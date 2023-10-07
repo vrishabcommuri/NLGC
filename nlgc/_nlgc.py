@@ -4,6 +4,7 @@
 import itertools
 from multiprocessing import cpu_count, current_process
 
+import scipy
 import copy
 import logging
 import numpy as np
@@ -295,7 +296,15 @@ def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, var_thr=1.0, ROIs=[], alpha=0
         model_f = NeuraLVAR(p, p1, n_eigenmodes, use_lapack=use_lapack)
         lambda_range = lambda_range[0]
 
-    model_f.fit(y, f, r * np.eye(n), lambda_range, a_init=a_init, q_init=q_init.copy(), **kwargs)
+    if isinstance(r, list):
+        assert(len(r) == 2)
+        cov = scipy.linalg.block_diag(r[0] * np.eye(n//2), r[1] * np.eye(n//2))
+        print(y.shape)
+        print(f.shape)
+        print(cov.shape)
+    else:
+        cov = r * np.eye(n)
+    model_f.fit(y, f, cov, lambda_range, a_init=a_init, q_init=q_init.copy(), **kwargs)
     bias_f = model_f.compute_bias(y)
 
     warnings.filterwarnings('ignore')
@@ -388,7 +397,12 @@ def _learn_reduced_model(i, j, y, f, r, lambda_f, a, q, n, p, p1, n_eigenmodes, 
     a_init = a.copy()
     a_init[:, target, source] = 0.0
     model_r = NeuraLVAR(p, p1, n_eigenmodes, use_lapack=use_lapack)
-    model_r.fit(y, f, r * np.eye(n), lambda_f, a_init=a_init, q_init=q.copy(), restriction=link, alpha=alpha,
+    if isinstance(r, list):
+        assert(len(r) == 2)
+        cov = scipy.linalg.block_diag(r[0] * np.eye(n//2), r[1] * np.eye(n//2))
+    else:
+        cov = r * np.eye(n)
+    model_r.fit(y, f, cov, lambda_f, a_init=a_init, q_init=q.copy(), restriction=link, alpha=alpha,
                 beta=beta, **kwargs)
     bias = model_r.compute_bias(y)
     ll = model_r.ll
