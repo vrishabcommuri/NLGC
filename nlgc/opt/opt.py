@@ -10,6 +10,7 @@ from joblib import Parallel, delayed
 from sklearn import preprocessing
 from sklearn.model_selection import TimeSeriesSplit
 
+import mne
 from mne.utils import logger
 
 from .e_step import sskf, sskfcv, align_cast, sskf_prediction
@@ -61,8 +62,8 @@ class NeuraLVAR:
         self._use_lapack = use_lapack
         self._n_eigenmodes = 1 if n_eigenmodes is None else n_eigenmodes
 
-    def _fit(self, y, f, r, lambda2=None, max_iter=500, max_cyclic_iter=3, a_init=None, q_init=None,
-            rel_tol=0.01, xs=None, alpha=0.0, beta=0.0, fixed_a=False, fixed_q=False):
+    def _fit(self, y, f, r, lambda2=None, lb=None, la=None, max_iter=500, max_cyclic_iter=3, a_init=None, q_init=None,
+            rel_tol=0.01, xs=None, alpha=0.0, beta=0.0, fixed_a=False, fixed_q=False, verbose=False):
         """Internal function that fits the model from given data
 
         Parameters
@@ -146,7 +147,12 @@ class NeuraLVAR:
 
             for _ in range(max_cyclic_iter):
                 if not fixed_a:
-                    a_upper, changes = solve_for_a(q_upper, s1, s2, a_upper, p1, lambda2=lambda2, max_iter=5000,
+                    if lb is not None and la is not None:
+                        a_upper, changes = solve_for_a_indepdiag(q_upper, s1, s2, a_upper, p1, lb=lb, la=la, max_iter=max_iter,
+                                                   tol=min(1e-4, rel_tol), zeroed_index=zeroed_index,
+                                                   update_only_target=False, n_eigenmodes=self._n_eigenmodes)
+                    else:
+                        a_upper, changes = solve_for_a(q_upper, s1, s2, a_upper, p1, lambda2=lambda2, max_iter=max_iter,
                                                    tol=min(1e-4, rel_tol), zeroed_index=zeroed_index,
                                                    update_only_target=False, n_eigenmodes=self._n_eigenmodes)
                 if not fixed_q:
@@ -303,8 +309,8 @@ class NeuraLVAR:
         bias = sum([bias_by_idx(i, q_upper, a_, x_, s_, b, m, p, self._zeroed_index) for i in source])
         return bias
 
-    def fit(self, y, f, r, lambda2=None, max_iter=500, max_cyclic_iter=3, a_init=None, q_init=None, rel_tol=0.0001,
-            restriction=None, alpha=0.0, beta=0.0, use_es=None):
+    def fit(self, y, f, r, lambda2=None, lb=None, la=None, max_iter=500, max_cyclic_iter=3, a_init=None, q_init=None, rel_tol=0.0001,
+            restriction=None, alpha=0.0, beta=0.0, use_es=None, verbose=False):
         """Fits the model from given m/eeg data, forward gain and noise covariance
 
         Parameters
@@ -333,9 +339,9 @@ class NeuraLVAR:
         if (restriction is None or re.search('->', restriction)) is False:
             raise ValueError(f"restriction:{restriction} should be None or should have format 'i->j'!")
         self.restriction = restriction
-        a, q_upper, lls, f, r, zeroed_index, _, x_ = self._fit(y, f, r, lambda2=lambda2, max_iter=max_iter,
+        a, q_upper, lls, f, r, zeroed_index, _, x_ = self._fit(y, f, r, lambda2=lambda2, lb=None, la=None, max_iter=max_iter,
                                                                max_cyclic_iter=max_cyclic_iter, a_init=a_init,
-                                                               q_init=q_init, rel_tol=rel_tol, alpha=alpha, beta=beta)
+                                                               q_init=q_init, rel_tol=rel_tol, alpha=alpha, beta=beta, verbose=verbose)
         self._parameters = (a, f, q_upper, r, x_)
         self._zeroed_index = zeroed_index
         self._lls = lls
@@ -468,7 +474,10 @@ class NeuraLVARCV(NeuraLVAR):
         NeuraLVAR.__init__(self, order, self_history, n_eigenmodes, copy, standardize, normalize, use_lapack)
 
     def _cvfit(self, split, info_y, info_f, info_r, info_cv, info_pred, splits, lambda_range, max_iter=500,
-            max_cyclic_iter=3, a_init=None, q_init=None, rel_tol=1e-5, alpha=0.0, beta=0.0):
+            max_cyclic_iter=3, a_init=None, q_init=None, rel_tol=1e-5, alpha=0.0, beta=0.0, verbose=False):
+        
+        mne.set_log_level(verbose)
+
         """Utility function to be used by self.fit()
 
         Parameters
@@ -491,6 +500,7 @@ class NeuraLVARCV(NeuraLVAR):
         val
 
         """
+        logger.info(f"{current_process().name} working on {split}th split")
         logger.debug(f"{current_process().name} working on {split}th split")
         try:
             y, shm_y = link_share_memory(info_y)
@@ -509,6 +519,7 @@ class NeuraLVARCV(NeuraLVAR):
         logger.debug(f"{current_process().name} successfully split the data")
         for i, lambda2 in enumerate(lambda_range * np.sqrt(y.shape[-1])):
             lambda2 = lambda2 / np.sqrt(y_train.shape[-1])
+            logger.info(f"{current_process().name} {split} doing {lambda2}")
             logger.debug(f"{current_process().name} {split} doing {lambda2}")
             if i > 0:
                 a_init = a_.copy()
@@ -520,6 +531,7 @@ class NeuraLVARCV(NeuraLVAR):
             # # different criteria for cross-validation
             cv[0, split, i] = self.compute_ll_(y_test, (a_, f, q_upper, r))
             cv[1, split, i] = lambda2 * self.compute_norm_one(a_)
+
             # cv[2, split, i] = self.compute_ll(y_test, (a_, f, q_upper, r))
             # cv[3, split, i] = self.compute_crossvalidation_metric(y_test, (a_, f, q_upper, r))
             # cv[4, split, i] = self.compute_Q(y_test, (a_, f, q_upper, r))
@@ -532,7 +544,8 @@ class NeuraLVARCV(NeuraLVAR):
         return None
 
     def fit(self, y, f, r, lambda_range=None, max_iter=500, max_cyclic_iter=3, a_init=None, q_init=None,
-            rel_tol=1e-5, restriction=None, alpha=0.0, beta=0.0, use_es=True):
+            rel_tol=1e-5, restriction=None, alpha=0.0, beta=0.0, use_es=True, verbose=False):
+        logger.info(f"fit max iter = {max_iter}")
         """Fits the model from given m/eeg data, forward gain and noise covariance
 
         y : ndarray of shape (n_channels, n_samples)
@@ -587,14 +600,14 @@ class NeuraLVARCV(NeuraLVAR):
         shared_cv_mat, info_cv, shm_c = create_shared_mem(cv_mat)
         shared_pred_mat, info_pred, shm_p = create_shared_mem(pred_mat)
         initargs = (info_y, info_f, info_r, info_cv, info_pred, cvsplits, lambda_range,
-                    max_iter, max_cyclic_iter, a_init, q_init, rel_tol, alpha, beta)
+                    max_iter, max_cyclic_iter, a_init, q_init, rel_tol, alpha, beta, verbose)
 
-        print('Starting cross-validation')
+        logger.info('Starting cross-validation')
         # Serial implementation
         # out = [self._cvfit(i, *initargs) for i in range(len(cvsplits))]
         # Parallel implementation
         Parallel(n_jobs=self.n_jobs, verbose=10)(delayed(self._cvfit)(i, *initargs) for i in range(len(cvsplits)))
-        print('Done cross-validation')
+        logger.info('Done cross-validation')
 
         self.cv_lambdas = lambda_range
         cv_mat[:] = np.reshape(shared_cv_mat, cv_mat.shape)
@@ -618,15 +631,15 @@ class NeuraLVARCV(NeuraLVAR):
                 best_lambda = lambda_range[np.nanargmin(self.es_path[:index])]
             except ValueError:
                 best_lambda = lambda_range[index]
-            print(f'best_regularizing parameter: {best_lambda} using es')
+            logger.info(f'\nbest_regularizing parameter: {best_lambda} using es')
         else:
             index = self.mse_path[1].mean(axis=0).argmax()
             best_lambda = lambda_range[index]
-            print(f'best_regularizing parameter: {best_lambda}')
+            logger.info(f'\nbest_regularizing parameter: {best_lambda}')
 
         a, q_upper, lls, f, r, zeroed_index, _, x_ = self._fit(y, f, r, lambda2=best_lambda, max_iter=max_iter,
                                                                max_cyclic_iter=max_cyclic_iter, a_init=a_init,
-                                                               q_init=q_init, rel_tol=rel_tol, alpha=alpha, beta=beta)
+                                                               q_init=q_init, rel_tol=rel_tol, alpha=alpha, beta=beta, verbose=verbose)
         self._parameters = (a, f, q_upper, r, x_)
         self._zeroed_index = zeroed_index
         self._lls = lls
@@ -672,4 +685,4 @@ def compute_es_criterion(pred):
         this_pred_mean = (this_pred * cv_split_repeats[:, None]).mean(axis=0)
         fluctuation = (this_pred - this_pred_mean[None, :]) * np.sqrt(cv_split_repeats[:, None])
         es[j] = (fluctuation ** 2).sum() / (this_pred_mean ** 2).sum()
-    return es
+    return es 

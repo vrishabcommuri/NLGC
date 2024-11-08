@@ -12,6 +12,7 @@ import warnings
 from functools import reduce
 from joblib import Parallel, delayed
 from matplotlib import pyplot as plt
+import mne
 from mne import (Forward, Label)
 from mne.forward import is_fixed_orient
 from mne.inverse_sparse.mxne_inverse import _prepare_gain
@@ -61,7 +62,7 @@ class NLGC:
         reduced model bias matrix, [.]_{i,j} corresponds to link j->i
     """
     def __init__(self, subject, nx, ny, t, p, n_eigenmodes, n_segments, d_raw, bias_f, bias_r,
-                 model_f, conv_flag, label_names, label_vertidx, debug=None):
+                 model_f, conv_flag, label_names, label_vertidx, forward_orig, cov_orig, whitener, eig_src_weights, debug=None):
 
         self.subject = subject
         self.nx = nx
@@ -77,6 +78,10 @@ class NLGC:
         self._conv_flag = conv_flag
         self._labels = label_names
         self._label_vertidx = label_vertidx
+        self.forward_orig = forward_orig
+        self.cov_orig = cov_orig
+        self.whitener = whitener
+        self.eig_src_weights = eig_src_weights
         self._debug = debug
 
     def _plot_reduced_models_convergence(self, max_itr=1):
@@ -128,9 +133,8 @@ class NLGC:
 
 
 def nlgc_map(name, evoked, forward, noise_cov, labels, order, self_history=None, n_eigenmodes=2, alpha=0.0, beta=0.0,
-        patch_idx=[], n_segments=1, loose=0.0, depth=0.0, pca=True, rank=None, lambda_range=None,
-        max_iter=500, max_cyclic_iter=3, tol=1e-5, sparsity_factor=0.0, cv=5, use_lapack=True, use_es=True,
-        var_thr=1.0):
+        patch_idx=[], n_segments=1, loose=0.0, depth=0.0, pca=True, rank=None, lambda_range=None, lambda1=None, lambda2=None,
+        max_iter=500, max_cyclic_iter=3, tol=1e-5, sparsity_factor=0.0, cv=5, use_lapack=True, use_es=True, var_thr=1.0, verbose=False):
     """NLGC connectivity map estimation
 
     This function estimates the causal connectivity map across sources given the MEG measurements, forward model,
@@ -185,19 +189,20 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, order, self_history=None,
         the threshold to limit the number of reduced models by considering only the possible links between the active
         sources which explain 'var_thr' of the total power
         (default = 1, i.e., all sources)
-
+    
 
     Returns
     -------
     nlgc_obj : NLGC object
         contains the connectivity map and the some related parameters (see NLGC class for more info)
     """
+
     _check_reference(evoked)
 
     if not is_fixed_orient(forward):
         raise ValueError(f"Cannot work with free orientation forward: {forward}")
 
-    G, label_vertidx, label_names, gain_info, whitener = \
+    weights, G, label_vertidx, label_names, gain_info, whitener = \
         _prepare_eigenmodes(evoked, forward, noise_cov, labels, n_eigenmodes, loose, depth, pca, rank)
 
     # get the data
@@ -205,7 +210,9 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, order, self_history=None,
     M = evoked.data[sel]
 
     # whiten the data
-    logger.info('Whitening data matrix.')
+    if verbose:
+        print('Whitening data matrix.')
+
     M = np.dot(whitener, M)
 
     # Normalization
@@ -233,14 +240,17 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, order, self_history=None,
     models = []
 
     for this_segment in range(0, n_segments):
-        logger.info('Segment: ', this_segment + 1)
+        if verbose:
+            print('Segment: ', this_segment + 1)
+            print(f"nlgc_map max iter = {max_iter}")
         d_raw_, bias_r_, bias_f_, model_f, conv_flag_ = \
             _gc_extraction(M[:, this_segment * tt: (this_segment + 1) * tt], G, r, p=order, p1=self_history,
                            n_eigenmodes=n_eigenmodes,
                            ROIs=patch_idx,
-                           alpha=alpha, beta=beta, cv=cv, lambda_range=lambda_range, max_iter=max_iter,
+                           alpha=alpha, beta=beta, cv=cv, lambda_range=lambda_range, lambda1=lambda1, 
+                           lambda2=lambda2, max_iter=max_iter,
                            max_cyclic_iter=max_cyclic_iter, tol=tol, sparsity_factor=sparsity_factor,
-                           use_lapack=use_lapack, use_es=use_es, var_thr=var_thr)
+                           use_lapack=use_lapack, use_es=use_es, var_thr=var_thr, verbose=verbose)
         d_raw[this_segment] = d_raw_
         bias_r[this_segment] = bias_r_
         bias_f[this_segment] = bias_f_
@@ -248,16 +258,23 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, order, self_history=None,
         conv_flag[this_segment] = conv_flag_
 
     nlgc_obj = NLGC(name, nx, n, t, order, n_eigenmodes, n_segments, d_raw, bias_f, bias_r, models,
-                    conv_flag, label_names, label_vertidx)
+                    conv_flag, label_names, label_vertidx, forward, noise_cov, whitener, weights)
 
     return nlgc_obj
 
 
 def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, var_thr=1.0, ROIs=[], alpha=0, beta=0,
-        lambda_range=None, max_iter=500, max_cyclic_iter=3,
-        tol=1e-5, sparsity_factor=0.0, cv=5, use_lapack=True, use_es=True):
+        lambda_range=None, lambda1=None, lambda2=None, max_iter=500, max_cyclic_iter=3,
+        tol=1e-5, sparsity_factor=0.0, cv=5, use_lapack=True, use_es=True, verbose=False):
     n, m = f.shape
     nx = m // n_eigenmodes
+
+    if lambda1 is not None:
+        assert(lambda2 is not None)
+    if lambda2 is not None:
+        assert(lambda1 is not None)
+        if verbose:
+            print("individual lambdas specified for a and b coeffcients, ignoring lambda range")
 
     kwargs = {
         'use_es': use_es,
@@ -265,7 +282,8 @@ def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, var_thr=1.0, ROIs=[], alpha=0
         'beta': beta,
         'max_iter': max_iter,
         'max_cyclic_iter': max_cyclic_iter,
-        'rel_tol': tol
+        'rel_tol': tol,
+        'verbose':verbose
     }
 
     # learn the full model
@@ -289,13 +307,14 @@ def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, var_thr=1.0, ROIs=[], alpha=0
     q_init = q_val * np.eye(m)
     a_init = None
 
-    if len(lambda_range) > 1:
+    if len(lambda_range) > 1 and lambda1 is None:
         model_f = NeuraLVARCV(p, p1, n_eigenmodes, 10, cv, n_jobs, use_lapack=use_lapack)
+        model_f.fit(y, f, r * np.eye(n), lambda_range, a_init=a_init, q_init=q_init.copy(), **kwargs)
     else:
         model_f = NeuraLVAR(p, p1, n_eigenmodes, use_lapack=use_lapack)
         lambda_range = lambda_range[0]
+        model_f.fit(y, f, r * np.eye(n), lambda_range, lb=lambda1, la=lambda2, a_init=a_init, q_init=q_init.copy(), **kwargs)
 
-    model_f.fit(y, f, r * np.eye(n), lambda_range, a_init=a_init, q_init=q_init.copy(), **kwargs)
     bias_f = model_f.compute_bias(y)
 
     warnings.filterwarnings('ignore')
@@ -335,7 +354,8 @@ def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, var_thr=1.0, ROIs=[], alpha=0
         # Append rest of the links to check
         links_to_check.append((j, i))
 
-    logger.info(f"Checking {len(links_to_check)} links...")
+    if verbose:
+        print(f"Checking {len(links_to_check)} links...")
 
     # Memory management for Parallel implementation
     shared_y, info_y, shm_y = create_shared_mem(y)
@@ -364,7 +384,7 @@ def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, var_thr=1.0, ROIs=[], alpha=0
             try:
                 shm.unlink()
             except:
-                logger.info(f"Unlink shared-memory issue!")
+                print(f"\nUnlink shared-memory issue!")
 
         indices = tuple(z for z in zip(*links_to_check))
         dev_raw[indices] = 2 * model_f.ll
@@ -433,17 +453,18 @@ def _prepare_eigenmodes(evoked, forward, noise_cov, labels, n_eigenmodes=2, loos
     # whiten the data
     logger.info('Whitening data matrix.')
     if isinstance(labels, Forward):
-        G, label_vertidx, src_flip = _reduce_lead_field(forward, labels, n_eigenmodes, data=gain.T)
+        weights, G, label_vertidx, src_flip = _reduce_lead_field(forward, labels, n_eigenmodes, data=gain.T)
         label_names = []
         for i, label in enumerate(labels['src']):
             label_names.extend(map(lambda x: f'{i}-{x}', label['vertno']))
     elif isinstance(labels, SourceSpaces):
-        G, label_vertidx, src_flip = _reduce_lead_field(forward, labels, n_eigenmodes, data=gain.T)
+        weights, G, label_vertidx, src_flip = _reduce_lead_field(forward, labels, n_eigenmodes, data=gain.T)
         label_names = []
         for i, label in enumerate(labels):
             label_names.extend(map(lambda x: f'{i}-{x}', label['vertno']))
     elif isinstance(labels, list):
         if isinstance(labels[0], Label):
+            weights = None # not implemented
             G, label_vertidx, src_flip = _extract_label_eigenmodes(forward, labels, gain.T, mode, n_eigenmodes,
                                                                    allow_empty=True)
             label_names = [label.name for label in labels]
@@ -471,7 +492,7 @@ def _prepare_eigenmodes(evoked, forward, noise_cov, labels, n_eigenmodes=2, loos
         logger.info('No sources were found in following {:d} ROIs:\n'.format(len(discarded_labels)) +
                     '\n'.join(map(lambda x: str(x.name), discarded_labels)))
 
-    return G, label_vertidx, label_names, gain_info, whitener
+    return weights, G, label_vertidx, label_names, gain_info, whitener
 
 
 def _reduce_lead_field(forward, src, n_eigenmodes, data=None):
@@ -484,15 +505,25 @@ def _reduce_lead_field(forward, src, n_eigenmodes, data=None):
     if isinstance(src, mne.Forward):
         src = src['src']
 
-    grouped_vertidx, n_groups, n_verts = _prepare_leadfield_reduction(src, forward['src'])
+    grouped_vertidx_no_offset, grouped_vertidx, n_groups, n_verts = _prepare_leadfield_reduction(src, forward['src'])
     group_eigenmodes = np.zeros((sum(n_groups) * n_eigenmodes,) + data.shape[1:], dtype=data.dtype)
-    for i, this_grouped_vertidx in enumerate(grouped_vertidx):
-        this_group_eigenmodes, percentage_explained = _truncatedsvd(data[this_grouped_vertidx],
-                                                                    n_eigenmodes, return_pecentage_exaplained=True)
+    
+    lhweights = []
+    rhweights = []
+    
+    for i, (this_grouped_vertidx, this_grouped_vertidx_no_offset) in \
+                enumerate(zip(grouped_vertidx, grouped_vertidx_no_offset)):
+        eig_src_weights, this_group_eigenmodes, percentage_explained = _truncatedsvd(data[this_grouped_vertidx], n_eigenmodes, return_pecentage_exaplained=True)
+        print(f"patch {i}: vertices {data[this_grouped_vertidx].shape[0]} -> {n_eigenmodes} leadfield reduction explained {percentage_explained*100:.3f}% variance")
         group_eigenmodes[i * n_eigenmodes:(i + 1) * n_eigenmodes] = this_group_eigenmodes
+        if i < n_groups[0]:
+            lhweights.append([eig_src_weights, this_grouped_vertidx_no_offset])
+        else:
+            rhweights.append([eig_src_weights, this_grouped_vertidx_no_offset])
 
+    weights = [lhweights, rhweights]
     src_flips = [None] * sum(n_groups)
-    return group_eigenmodes.T, grouped_vertidx, src_flips
+    return weights, group_eigenmodes.T, grouped_vertidx, src_flips
 
 
 def _prepare_label_extraction(labels, src):
@@ -532,7 +563,7 @@ def assign_labels(labels, src_target, src_origin, thresh=0):
         vertex(patch) index
     """
     label_vertidx_origin = _prepare_label_extraction(labels, src_origin)
-    group_vertidx, _, _ = _prepare_leadfield_reduction(src_target, src_origin)
+    _, group_vertidx, _, _ = _prepare_leadfield_reduction(src_target, src_origin)
     label_vertidx = []
     for this_label_vertidx_origin in label_vertidx_origin:
         this_label_vertidx = []
@@ -552,16 +583,26 @@ def _prepare_leadfield_reduction(src_target, src_origin):
     n_verts = [s['nuse'] for s in src_origin]
     n_groups = [s['nuse'] for s in src_target]
     grouped_vertidx = []
+    grouped_vertidx_no_offset = []
+    
     for k, (this_vertno_target, this_pinfo_target, this_vertno_origin) in enumerate(zip(vertno_target, pinfo_target,
                                                                                         vertno_origin)):
         offset = 0 if k == 0 else n_verts[k - 1]
         for this_vert, this_pinfo in zip(this_vertno_target, this_pinfo_target):
             this_vertices = np.intersect1d(this_vertno_origin, this_pinfo)
             vertidx = offset + np.searchsorted(this_vertno_origin, this_vertices)
+            
+            # offset ensures that rh indices are sequential with the lh indices, but for indexing
+            # into the rh sources spaces object, we don't want this offset since the indices 
+            # overlap with the lh source spaces indices. just create another list for this
+            vertidx_no_offset = np.searchsorted(this_vertno_origin, this_vertices)
             if len(vertidx) == 0:
                 vertidx = None
+                vertidx_no_offset = None
             grouped_vertidx.append(vertidx)
-    return grouped_vertidx, n_groups, n_verts
+            grouped_vertidx_no_offset.append(vertidx_no_offset)
+            
+    return grouped_vertidx_no_offset, grouped_vertidx, n_groups, n_verts
 
 
 def _extract_label_eigenmodes(fwd, labels, data=None, mode='mean', n_eigenmodes=2, allow_empty=False,
@@ -652,8 +693,8 @@ def _truncatedsvd(a, n_components=2, return_pecentage_exaplained=False):
                           overwrite_a=True, check_finite=True,
                           lapack_driver='gesdd')
     if return_pecentage_exaplained:
-        return vh[:n_components] * s[:n_components][:, None], s[:n_components].sum() / s.sum()
-    return vh[:n_components] * s[:n_components][:, None]
+        return u, vh[:n_components] * s[:n_components][:, None], s[:n_components].sum() / s.sum()
+    return u, vh[:n_components] * s[:n_components][:, None]
 
 
 _svd_funcs = {

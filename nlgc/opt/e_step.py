@@ -1,5 +1,6 @@
 import numpy as np
 from scipy import linalg
+import control
 
 
 def sskf(y, a, f, q, r, xs=None, use_lapack=True):
@@ -45,9 +46,15 @@ def sskf(y, a, f, q, r, xs=None, use_lapack=True):
         assert x_.flags['C_CONTIGUOUS']
 
     try:
-        _s = linalg.solve_discrete_are(a.T, f.T, q, r, balanced=False)
+        _s = linalg.solve_discrete_are(a.T, f.T, q, r, balanced=False)           
     except np.linalg.LinAlgError:
         _s = linalg.solve_discrete_are(a.T, f.T, q, r, balanced=True)
+    except ValueError:
+        try:
+            _s, _, _ = control.dare(a.T, f.T, q, r, stabilizing=True, method=None)
+        except ValueError:
+            _s, _, _ = control.dare(a.T, f.T, q, r, stabilizing=False, method=None)
+
 
     temp = f.dot(_s)
     temp2 = temp.dot(f.T) + r
@@ -163,10 +170,19 @@ def sskfcv(y, a, f, q, r, xs=None, use_lapack=True):
         assert _x.flags['C_CONTIGUOUS']
         assert x_.flags['C_CONTIGUOUS']
 
+    # try:
+    #     _s = linalg.solve_discrete_are(a.T, f.T, q, r, balanced=True)
+    # except ValueError:
+    #     _s = linalg.solve_discrete_are(a.T, f.T, q, r, balanced=False)
     try:
+        _s = linalg.solve_discrete_are(a.T, f.T, q, r, balanced=False)           
+    except np.linalg.LinAlgError:
         _s = linalg.solve_discrete_are(a.T, f.T, q, r, balanced=True)
     except ValueError:
-        _s = linalg.solve_discrete_are(a.T, f.T, q, r, balanced=False)
+        try:
+            _s, _, _ = control.dare(a.T, f.T, q, r, stabilizing=True, method=None)
+        except ValueError:
+            _s, _, _ = control.dare(a.T, f.T, q, r, stabilizing=False, method=None)
 
     temp = f.dot(_s)
     temp2 = temp.dot(f.T) + r
@@ -265,10 +281,19 @@ def sskf_prediction(y, a, f, q, r, xs=None, use_lapack=True):
         assert _x.flags['C_CONTIGUOUS']
         assert x_.flags['C_CONTIGUOUS']
 
+    # try:
+    #     _s = linalg.solve_discrete_are(a.T, f.T, q, r, balanced=False)
+    # except np.linalg.LinAlgError:
+    #     _s = linalg.solve_discrete_are(a.T, f.T, q, r, balanced=True)
     try:
-        _s = linalg.solve_discrete_are(a.T, f.T, q, r, balanced=False)
+        _s = linalg.solve_discrete_are(a.T, f.T, q, r, balanced=False)           
     except np.linalg.LinAlgError:
         _s = linalg.solve_discrete_are(a.T, f.T, q, r, balanced=True)
+    except ValueError:
+        try:
+            _s, _, _ = control.dare(a.T, f.T, q, r, stabilizing=True, method=None)
+        except ValueError:
+            _s, _, _ = control.dare(a.T, f.T, q, r, stabilizing=False, method=None)
 
     temp = f.dot(_s)
     temp2 = temp.dot(f.T) + r

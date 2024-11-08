@@ -32,18 +32,22 @@ def sample_path_bias(q, a, x_bar, zeroed_index, n_eigenmodes):
     qd = np.diag(q)
     cx = np.zeros((t - p, dtot))
 
+
     for idx_src in range(dxm):
         ai = a[idx_src]
 
         xi = x_bar[p:, idx_src]
+
 
         for k in range(p):
             cx[:, k * dxm:(k + 1) * dxm] = x_bar[p - 1 - k:t - 1 - k]
 
         # gradient of log - likelihood
         ldot = cx.T.dot(xi - cx.dot(ai)) / qd[idx_src]
+
         # hessian of log - likelihood
         ldotdot = -cx.T.dot(cx) / qd[idx_src]
+
 
         # if zeroed_index is not None:
         #     x_index, y_index = zeroed_index
@@ -54,6 +58,26 @@ def sample_path_bias(q, a, x_bar, zeroed_index, n_eigenmodes):
         #         ldotdot = np.delete(ldotdot, removed_idx, axis=1)
 
         # FIX removing cross-talk components (that forced to be zero)
+        # for l in range(0, dxm, n_eigenmodes):
+        #     for u in range(n_eigenmodes):
+        #         for v in range(n_eigenmodes):
+        #             if v != u and idx_src == l + v:
+        #                 removed_idx = list(range(l + u, dtot, dxm))
+        #                 print(f"removed_idx = {removed_idx}")
+        #                 if zeroed_index is not None:
+        #                     print(f"zeroed_index = {zeroed_index}")
+        #                     x_index, y_index = zeroed_index
+        #                     if idx_src in x_index:
+        #                         removed_idx.extend(list(np.asanyarray(y_index)[np.asanyarray(x_index) == idx_src]))
+        #                     print(f"extended removed_idx = {removed_idx}")
+        #                 ldot = np.delete(ldot, removed_idx)
+        #                 print(f"ldot.shape after delete = {ldot.shape}")
+        #                 ldotdot = np.delete(ldotdot, removed_idx, axis=0)
+        #                 print(f"ldotdot.shape after delete1 = {ldotdot.shape}")
+        #                 ldotdot = np.delete(ldotdot, removed_idx, axis=1)
+        #                 print(f"ldotdot.shape after delete2 = {ldotdot.shape}")
+
+        delete_idxs = []
         for l in range(0, dxm, n_eigenmodes):
             for u in range(n_eigenmodes):
                 for v in range(n_eigenmodes):
@@ -63,9 +87,11 @@ def sample_path_bias(q, a, x_bar, zeroed_index, n_eigenmodes):
                             x_index, y_index = zeroed_index
                             if idx_src in x_index:
                                 removed_idx.extend(list(np.asanyarray(y_index)[np.asanyarray(x_index) == idx_src]))
-                        ldot = np.delete(ldot, removed_idx)
-                        ldotdot = np.delete(ldotdot, removed_idx, axis=0)
-                        ldotdot = np.delete(ldotdot, removed_idx, axis=1)
+                        delete_idxs.extend(removed_idx)
+        
+        ldot = np.delete(ldot, delete_idxs)
+        ldotdot = np.delete(ldotdot, delete_idxs, axis=0)
+        ldotdot = np.delete(ldotdot, delete_idxs, axis=1)
 
         bias += ldot.dot(np.linalg.solve(ldotdot, ldot))
     return bias

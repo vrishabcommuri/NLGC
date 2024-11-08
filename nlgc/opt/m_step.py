@@ -2,6 +2,9 @@ import numpy as np
 from matplotlib import pyplot as plt
 from scipy import linalg
 from numba import jit, njit, float32, float64, uint, vectorize
+from mne.utils import logger
+from multiprocessing import current_process
+
 
 np.seterr(all='warn')
 import warnings
@@ -74,6 +77,25 @@ def solve_for_a(q, s1, s2, a, p1, lambda2, max_iter=5000, tol=1e-3, zeroed_index
         a[target] = a_
         return a, changes
 
+def solve_for_a_indepdiag(q, s1, s2, a, p1, lb, la, max_iter=5000, tol=1e-3, zeroed_index=None, update_only_target=False,
+        n_eigenmodes=1):
+    if not update_only_target or zeroed_index is None:
+        return _solve_for_a_indepdiag(q, s1, s2, a, p1, lb, la, max_iter=max_iter, tol=tol, zeroed_index=zeroed_index,
+                            n_eigenmodes=n_eigenmodes)
+    else:
+        target = np.unique(zeroed_index[0])
+        s1_ = s1[target]
+        a_ = a[target]
+        q_ = q[target, target]
+        if q_.ndim == 1:
+            q_ = q_[:, None]
+        target_ = np.asarray(zeroed_index[0]) - min(zeroed_index[0])
+        source = np.asarray(zeroed_index[1])
+        a_, changes = _solve_for_a_indepdiag(q_, s1_, s2, a_, p1, lb, la, max_iter=max_iter, tol=tol,
+                                   zeroed_index=(target_, source), n_eigenmodes=n_eigenmodes)
+        a[target] = a_
+        return a, changes
+
 
 # @njit(cache=True)
 def _solve_for_a(q, s1, s2, a, p1, lambda2, max_iter=5000, tol=1e-3, zeroed_index=None, n_eigenmodes=1):
@@ -139,6 +161,8 @@ def _solve_for_a(q, s1, s2, a, p1, lambda2, max_iter=5000, tol=1e-3, zeroed_inde
     fs[0] = f_old
     temp1 = a.dot(s2)
     for i in range(max_iter):
+        if i % 250 == 0:
+            logger.info(f"{current_process().name}: iterate {i}/{max_iter}")
         if changes[i] < tol or num == 0:
             break
         _a[:] = a
@@ -217,6 +241,159 @@ def shrink(x, t):
         return x + t
     else:
         return 0
+
+
+def _solve_for_a_indepdiag(q, s1, s2, a, p1, lambda_b, lambda_a, max_iter=5000, tol=1e-3, zeroed_index=None, n_eigenmodes=1):
+    """Gradient descent to learn a, state-transition matrix
+
+    Parameters
+    ----------
+    q : ndarray of shape (n_sources, n_sources)
+    s1 : ndarray of shape (n_sources, n_sources*order)
+    s2 : ndarray of shape (n_sources*order, n_sources*order)
+    a : ndarray of shape (n_sources, n_sources*order)
+    lambda2 : float
+    max_iter : int, default=1000
+    tol : float, default=0.01
+    zeroed_index : tuple of lists, like ([3, 3, 3], [1, 2, 3]).
+        forces these indexes of a to 0.0.
+
+    Notes
+    -----
+    To learn restricted model for i --> j, pass ([j] * p, list(range(i, m*p, m)))
+    as zeroed index.
+
+    Returns
+    -------
+    a : ndarray of shape (n_sources, n_sources*order)
+    changes : list of floats
+    """
+    # if lambda2 == 0:
+    #     try:
+    #         a = linalg.solve(s2, s1.T, assume_a='pos') # s1 * (s2 ** -1)
+    #     except linalg.LinAlgError:
+    #         a = linalg.solve(s2, s1.T, assume_a='sym') # s1 * (s2 ** -1)
+    #     return a.T, None
+
+    eps = np.finfo(s1.dtype).eps
+    q = np.diag(q)
+    qinv = 1 / q
+    qinv = np.expand_dims(qinv, -1)
+    q_inv_sqrt = np.sqrt(qinv)
+
+    d = np.sqrt(np.diag(s2))
+    s2 = s2 / d[:, None]
+    s2 = s2 / d[None, :]
+    s1 = s1 / d[None, :]
+    a = a * d[None, :]
+
+    a = a * q_inv_sqrt
+    s1 = s1 * q_inv_sqrt
+
+    h_norm = np.linalg.eigvalsh(s2).max()
+    tau_max = 0.99 / h_norm
+
+    _a = np.empty_like(a)
+    temp = np.empty_like(a)
+    m = a.shape[0]
+    p = a.shape[1] // m
+
+    changes = np.zeros(max_iter+1)
+    fs = np.zeros(max_iter+1)
+    changes[0] = 1
+    num = 1
+    f_old = -2 * np.einsum('ij,ji->i', a.T, s1).sum() + np.einsum('ij,ji->i', a.T, a.dot(s2)).sum()
+    fs[0] = f_old
+    temp1 = a.dot(s2)
+    for i in range(max_iter):
+        if changes[i] < tol or num == 0:
+            break
+        _a[:] = a
+        # Calculate gradient
+        grad = temp1
+        grad -= s1
+        grad *= 2
+
+        # # old implementation of aggregate eigenmodes
+        # grad = _take_care(grad, n_eigenmodes)
+
+        # Find opt step-size
+        warnings.filterwarnings('error')
+        try:
+            # tau = 0.5 * (grad * grad).sum() / (np.diag(grad.dot(s2.dot(grad.T))) * qinv.ravel()).sum()
+            temp2 = grad.dot(s2.T)
+            den = ((temp2 * grad).sum(axis=1)).sum()
+            num = (grad * grad).sum()
+            tau = 0.5 * num / den
+            tau = max(tau, tau_max)
+        except Warning:
+            raise RuntimeError(f'Q possibly contains negative value {q.min()}')
+        warnings.filterwarnings('ignore')
+
+        while True:
+            # Forward step
+            temp = _a.copy()
+            temp -= tau * grad
+
+            # Backward (proximal) step
+            a = shrink_indepdiag(temp, lambda_b * tau, lambda_a * tau)
+
+            # #************* make the self history = 0 from lag p1***********
+            for k in range(p1, p):
+                a.flat[k * m::(p * m + 1)] = 0.0
+            # # *************************************************************
+            if zeroed_index is not None:
+                a[zeroed_index] = 0.0
+
+            "************* make the cross history between eigenmodes = 0 from lag p1***********"
+            for l in range(0, m, n_eigenmodes):
+                for u in range(n_eigenmodes):
+                    for v in range(n_eigenmodes):
+                        if v != u:
+                            a[l+v, l+u::m] = 0
+            "*********************************************************************"
+
+            temp1 = a.dot(s2)
+            f_new = -2 * np.einsum('ij,ji->i', a.T, s1).sum() + np.einsum('ij,ji->i', a.T, temp1).sum()
+            diff = (a - _a)
+            f_new_upper = f_old + (grad * diff).sum() + (diff ** 2).sum() / (2 * tau)
+            if f_new < f_new_upper or tau / tau_max < 1e-10:
+                break
+            else:
+                tau /= 2
+
+        num = np.sum(diff ** 2)
+        den = np.sum(_a ** 2)
+        f_old = f_new
+        changes[i+1] = 1 if den == 0 else np.sqrt(num / den)
+
+        fs[i+1] = f_old
+
+    a = a / d[None, :]
+    a = a / q_inv_sqrt
+
+    return a, changes
+
+def shrink_indepdiag(x, t1, t2):
+    nrows, ncols = x.shape
+    x_out = np.zeros(x.shape)
+    for i in range(nrows):
+        for j in range(ncols):
+            if i == j%nrows:
+                if x[i, j] > t1:
+                    x_out[i, j] =  x[i, j] - t1
+                elif x[i, j] < -t1:
+                    x_out[i, j] = x[i, j] + t1
+                else:
+                    x_out[i, j] = 0
+            else:
+                if x[i, j] > t2:
+                    x_out[i, j] =  x[i, j] - t2
+                elif x[i, j] < -t2:
+                    x_out[i, j] = x[i, j] + t2
+                else:
+                    x_out[i, j] = 0
+    return x_out
 
 
 @njit([float32[:,:](float32[:,:], uint), float64[:,:](float64[:,:], uint)], cache=True)
