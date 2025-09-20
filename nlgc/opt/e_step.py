@@ -45,6 +45,16 @@ def sskf(y, a, f, q, r, xs=None, use_lapack=True):
         assert _x.flags['C_CONTIGUOUS']
         assert x_.flags['C_CONTIGUOUS']
 
+    ##################################
+    # solve for kalman gain
+    ##################################
+
+    # first solve the riccati equation to obtain steady-state covariance
+    # P^{-} = A P^{+} A^T + Q,
+    # P^{+} = P^{-} - P^{-} H^T (H P^{-} H^T + R) H P^{-}
+    # substituting the expression for P^{+} into the first equation and 
+    # solving for P^{-} gives _s below
+    # i'll refer to P^{-} as P below for simplicity.
     try:
         _s = linalg.solve_discrete_are(a.T, f.T, q, r, balanced=False)           
     except np.linalg.LinAlgError:
@@ -56,23 +66,49 @@ def sskf(y, a, f, q, r, xs=None, use_lapack=True):
             _s, _, _ = control.dare(a.T, f.T, q, r, stabilizing=False, method=None)
 
 
+    # kalman gain K is given by K = P H^T (H P H^T + R)^{-1} where P is the steady state covariance
+    # H P
     temp = f.dot(_s)
+    # H P H^T + R
     temp2 = temp.dot(f.T) + r
+
+    # cholesky decomposition efficiently solves equations of the form Ax = b where A = LL^T
+    # which is done in two stages: solve for y in Ly = b and substitute into L^Tx = y to solve for x
+    # this is faster than LU factorization or equivalent methods to directly solve the system.
+
+    # we use this idea to compute the kalman gain:
+    # (H P H^T + R)^T K^T = H P^T  is now in Ax = b form
+
+    # factor (H P H^T + R) into LL^T
     (l, low) = linalg.cho_factor(temp2, check_finite=False)
+    # gives k^T since terms are not transposed
     k = linalg.cho_solve((l, low), temp, check_finite=False)
+
     inv_innov_cov = linalg.cho_solve((l, low), np.eye(dy), check_finite=False)
     logdet_inno_cov = np.log(np.diag(l)).sum()  # already multiplied by 1/2
+
+    # untranspose kalman gain
     k = k.T  # Kalman Gain
+
+    ##################################
+    # solve for smoother gain
+    ##################################
+    # the smoother gain for the backwards pass is given by B_k in x_{k|T} = x_k + B_k(x_{k+1|T}-x_{k+1}) 
+    # where B_k = P_k^{+} A^T (P_{k+1}^{-}){-1}. we can drop the dependence on k since these are steady-state estimates.
+    # P_{k+1}^{-} becomes P^{-} which is the steady-state update covariance from the riccati equation
     s = _s.copy()
-    s -= k.dot(temp)
-    temp = a.dot(s)
+    s -= k.dot(temp) # s = P - K H P = P - P H^T (H P H^T + R)^{-1} H P = P^{+}
+    temp = a.dot(s)  # temp = A(P - K H P) = AP^{+}
     try:
         (l, low) = linalg.cho_factor(_s, lower=True, check_finite=False)
+        # solve P^{-} B = A P^{+} for B 
         b = linalg.cho_solve((l, low), temp, check_finite=False)
     except np.linalg.LinAlgError:
         b, *rest = linalg.lstsq(_s, temp, check_finite=False)
 
+    # B^T = P^{+} A^T (P^{-})^{-1} (where P^{-} and P^{+} are symmetric)
     b = b.T  # Smoother Gain
+
     s_hat = s - b.dot(_s).dot(b.T)  # See README what this means!
     s_ = linalg.solve_discrete_lyapunov(b, s_hat)
     if (np.diag(s_) <= 0).any():
