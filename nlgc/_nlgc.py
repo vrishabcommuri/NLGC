@@ -8,6 +8,8 @@ from functools import reduce
 from matplotlib import pyplot as plt
 from mne.forward import is_fixed_orient
 from mne.minimum_norm.inverse import _check_reference
+from mne.minimum_norm import apply_inverse, make_inverse_operator, InverseOperator
+import mne.minimum_norm
 from scipy import linalg
 from .opt import *
 from ._stat import fdr_control
@@ -20,7 +22,7 @@ from ._nlgc_test_utils import run_GT_sim
 
 def nlgc_map(name, evoked, forward, noise_cov, labels, order, self_history=None, n_eigenmodes=2, alpha=0.0, beta=0.0,
         patch_idx=[], n_segments=1, loose=0.0, depth=0.0, pca=True, rank=None, lambda_range=None, lambda1=None, lambda2=None,
-        max_iter=500, max_cyclic_iter=3, tol=1e-5, sparsity_factor=0.0, cv=5, use_lapack=True, use_es=True, var_thr=1.0, verbose=False):
+        max_iter=500, max_cyclic_iter=3, tol=1e-5, sparsity_factor=0.0, cv=5, use_lapack=True, use_es=True, var_thr=1.0, verbose=False, warm_start = False):
     """NLGC connectivity map estimation
 
     This function estimates the causal connectivity map across sources given the MEG measurements, forward model,
@@ -88,8 +90,22 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, order, self_history=None,
     if not is_fixed_orient(forward):
         raise ValueError(f"Cannot work with free orientation forward: {forward}")
 
+
+        
     weights, G, label_vertidx, label_names, gain_info, whitener = \
         _prepare_eigenmodes(evoked.info, forward, noise_cov, labels, n_eigenmodes, loose, depth, pca, rank)
+
+
+
+    # TODO: Create inverse solution for warm start and find transformation matrix to transform inverse solution from ico-4 to ico-1 and cortical patches
+    if warm_start:
+        inverse_op = make_inverse_operator(evoked.info, forward, noise_cov, loose, depth, rank, verbose = verbose)
+        stc = apply_inverse(evoked, inverse_op, lambda2 = lambda2)
+        # TODO: Add some transformation to move stc dimensions from ico-4 to eigenmodes
+        inverse_soln = stc
+    else:
+        inverse_soln = None
+
 
     # get the data
     sel = [evoked.ch_names.index(name) for name in gain_info['ch_names']]
@@ -108,15 +124,14 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, order, self_history=None,
     # G *= np.sqrt(M_normalizing_factor)
     M /= np.sqrt(M_normalizing_factor)
     r = 1 / M_normalizing_factor
-    
     if len(patch_idx) == 0:
         raise ValueError("Length of patch_idx should not be zero")
 
 
-    run_GT_sim(lead_field_gen = False, lf = G, seed = 0, band = "wide", fs = 50, natures = 'all', 
-        root = None, subject_id = None, session_name = None, trans = False, order = order, t = 500, n_eigenmodes = n_eigenmodes,
-        n_segments = 1, loose = loose, depth = depth, pca = pca, rank = rank, lambda_range = lambda_range,
-        max_iter = max_iter, max_cyclic_iter = max_cyclic_iter, tol = tol, sparsity_factor = sparsity_factor, cv = cv ,var_thr = var_thr, alpha = alpha)
+    # run_GT_sim(lead_field_gen = False, lf = G, seed = 0, band = "wide", fs = 50, natures = 'all', 
+    #     root = None, subject_id = None, session_name = None, trans = None, order = order, t = 500, n_eigenmodes = n_eigenmodes,
+    #     n_segments = 1, loose = loose, depth = depth, pca = pca, rank = rank, lambda_range = lambda_range,
+    #     max_iter = max_iter, max_cyclic_iter = max_cyclic_iter, tol = tol, sparsity_factor = sparsity_factor, cv = cv ,var_thr = var_thr, alpha = alpha)
     
 
     n, _ = G.shape
@@ -131,7 +146,7 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, order, self_history=None,
     conv_flag = np.zeros((n_segments, nx, nx))
 
     models = []
-
+    # TODO: Pass inverse soln to the _fit where a matrix is initialized
     for this_segment in range(0, n_segments):
         if verbose:
             print('Segment: ', this_segment + 1)
@@ -143,7 +158,7 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, order, self_history=None,
                            alpha=alpha, beta=beta, cv=cv, lambda_range=lambda_range, lambda1=lambda1, 
                            lambda2=lambda2, max_iter=max_iter,
                            max_cyclic_iter=max_cyclic_iter, tol=tol, sparsity_factor=sparsity_factor,
-                           use_lapack=use_lapack, use_es=use_es, var_thr=var_thr, verbose=verbose)
+                           use_lapack=use_lapack, use_es=use_es, var_thr=var_thr, inverse_soln = inverse_soln, verbose=verbose)
         d_raw[this_segment] = d_raw_
         bias_r[this_segment] = bias_r_
         bias_f[this_segment] = bias_f_

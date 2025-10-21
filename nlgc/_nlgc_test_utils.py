@@ -1,7 +1,7 @@
 import numpy as np
 import scipy
 from scipy import linalg
-
+import os
 from ._nlgc_utils import _gc_extraction , _prepare_eigenmodes, NLGC
 
 from mne.source_space import SourceSpaces
@@ -40,16 +40,21 @@ a: ground truth a matrix which VAR model is trying to estimate, contains GC link
 
 '''
 # Assume folder setup follows eelbrain pipeline
-def lead_field_generation(root, subject_id, n_eigenmodes, trans = False):
+def lead_field_generation(root, subject_id, n_eigenmodes, trans = None):
     full_empty_room_path = root + "meg/" + subject_id + "/" + subject_id + "_emptyroom-raw.fif"
     raw_empty_room = mne.io.read_raw_fif(full_empty_room_path)
     info = raw_empty_room.info
     noise_cov = mne.compute_raw_covariance(raw_empty_room, tmin=0, tmax=None)
-    if trans:
-        trans_file= root + "meg/" + subject_id + "/" + subject_id + "-trans.fif"
+    if trans == None:
+        expected_trans_file= root + "meg/" + subject_id + "/" + subject_id + "-trans.fif"
+        if (os.path.exists(expected_trans_file)):
+            print(" trans file found")
+            trans_file = expected_trans_file
+        else: 
+            print("No trans file provided using mne fsaverage instead")
+            trans_file = "fsaverage"
     else:
-        print("No trans file provided using mne fsaverage instead")
-        trans_file = "fsaverage"
+        trans_file = trans
     bem_folder= root + "/bem/" + subject_id + "/"
     f_opt = mne.make_forward_solution(info, trans_file, src = bem_folder + subject_id + "-ico-4-src.fif",
                                         bem = bem_folder + subject_id  + "-inner_skull-bem-sol.fif")
@@ -63,13 +68,13 @@ def lead_field_generation(root, subject_id, n_eigenmodes, trans = False):
 
     return G
 
-def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2, G = None, p = 2, t = 500, m_active = 10, n_links = 8):
-
+def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2, G = None, p = 2, t = 500, m_active = 10, n_links = 10):
+    print(f't is {t}')
     np.random.seed(seed)
     if (type(G) == type(None)):
         n = 100 # number of sensors
         
-        n_patches = 25
+        n_patches = 10
         m = n_patches*n_eigenmodes # number of sources
 
         
@@ -92,11 +97,11 @@ def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2,
     print(idx_i)
     for i in range(m_active):
         q[idx_i[i], idx_i[i]] = 1
-        a[0, i, i] = 0.9
+        a[0, idx_i[i], idx_i[i]] = 0.9
     
-    if n_links > m_active:
-        print('n_links is greater than m_active setting it to size m_active')
-        n_links = m_active
+    # if n_links > m_active:
+    #     print('n_links is greater than m_active setting it to size m_active')
+    #     n_links = m_active
         
     # (i,j) pairs to add a link to
     for i, j in zip(np.random.randint(0, m_active, n_links), 
@@ -215,12 +220,12 @@ tol = tolerance for EM convergence
 sparsity_factor = threshold to remove reduced models with very small VAR coefficients
 '''
 def nlgc_map_opt(M, G, r, order, self_history=None, var_thr=1.0, n_segments=1, lambda_range=None, max_iter=500,
-                 max_cyclic_iter=3, tol=1e-5, sparsity_factor=0.0, cv=5, n_eigenmodes = 2):
+                 max_cyclic_iter=3, tol=1e-5, sparsity_factor=0.0, cv=5, n_eigenmodes = 2, use_es = False):
     n, nnx = G.shape
     len_patch_idx = nnx // n_eigenmodes
     _, t = M.shape
     tt = t // n_segments
-
+    print(f'r is {r}')
     d_raw = np.zeros((n_segments, len_patch_idx, len_patch_idx))
     bias_r = np.zeros((n_segments, len_patch_idx, len_patch_idx))
     bias_f = np.zeros((n_segments, 1))
@@ -235,7 +240,7 @@ def nlgc_map_opt(M, G, r, order, self_history=None, var_thr=1.0, n_segments=1, l
             _gc_extraction(M[:, n * tt: (n + 1) * tt], G, r, p=order, p1=self_history, n_eigenmodes=n_eigenmodes,
                            ROIs=list(range(len_patch_idx)), cv=cv, lambda_range=lambda_range, max_iter=max_iter,
                            max_cyclic_iter=max_cyclic_iter, tol=tol, sparsity_factor=sparsity_factor,
-                           use_lapack=True, use_es=False, var_thr=var_thr)
+                           use_lapack=True, use_es=use_es, var_thr=var_thr)
         d_raw[n] = d_raw_
         bias_r[n] = bias_r_
         bias_f[n] = bias_f_
@@ -293,11 +298,15 @@ var_thr: float
         (default = 1, i.e., all sources)
 alpha: int | float
         Inv-Gamma(alpha*t/2 - 1, beta*t) prior on the state noise covariance matrix
+m_active: int
+        Number of active sources in the generated data
+n_links: int
+        Number of links present in active sources, this must be less than or equal to m_active
 '''
 def run_GT_sim(lead_field_gen = False, lf = None, seed = 0, band = "wide", fs = 50, natures = 'all', 
-        root = None, subject_id = None, session_name = None, trans = False, order = 2, t = 500, n_eigenmodes = 1,
+        root = None, subject_id = None, session_name = None, trans = None, order = 2, t = 500, n_eigenmodes = 1,
         n_segments = 1, loose = 0.0, depth = 0.0, pca = True, rank = None, lambda_range = None,
-        max_iter = 500, max_cyclic_iter = 3, tol = 1e-5, sparsity_factor = 0.0, cv = 5 ,var_thr = 1.0, alpha = .1):
+        max_iter = 500, max_cyclic_iter = 3, tol = 1e-5, sparsity_factor = 0.0, cv = 5 ,var_thr = 1.0, alpha = .1, m_active = 10, n_links = 10, use_es = False):
     
     if (lead_field_gen):
         G = lead_field_generation(root, subject_id, n_eigenmodes, trans)
@@ -305,19 +314,20 @@ def run_GT_sim(lead_field_gen = False, lf = None, seed = 0, band = "wide", fs = 
         G = lf
     else:
         G = None
-    f, y, r_cov, p, JG, pow_actives, a = data_generation(seed, band, fs, natures, n_eigenmodes, G, order, t)
+    f, y, r_cov, p, JG, pow_actives, a = data_generation(seed, band, fs, natures, n_eigenmodes, G, order, t, m_active, n_links)
     print("Completed data gen")
     plt.imshow(JG)
     plt.show()
     print('Start nglc_map_opt')
     temp_obj = nlgc_map_opt(y.T, f, r=r_cov, order=p, self_history=p, lambda_range=lambda_range, n_segments=n_segments,
                                 var_thr=var_thr, max_iter=max_iter, max_cyclic_iter=max_cyclic_iter, tol=tol,
-                                sparsity_factor=sparsity_factor, n_eigenmodes = n_eigenmodes)
+                                sparsity_factor=sparsity_factor, n_eigenmodes = n_eigenmodes, use_es = use_es)
     
     J = temp_obj.get_J_statistics(alpha)
 
     plt.imshow(JG)
     plt.imshow(J)
     plt.show()
+    return temp_obj
 
 

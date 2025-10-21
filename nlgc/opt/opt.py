@@ -14,7 +14,7 @@ import mne
 from mne.utils import logger
 
 from .e_step import sskf, sskfcv, align_cast, sskf_prediction
-from .m_step import (calculate_ss, solve_for_a, solve_for_q, compute_ll,
+from .m_step_fastac import (calculate_ss, solve_for_a, solve_for_q, compute_ll,
                      compute_cross_ll, compute_Q)
 
 # filename = os.path.realpath(os.path.join(__file__, '..', '..', "debug.log"))
@@ -101,6 +101,7 @@ class NeuraLVAR:
         This equivalent to alpha*n - 2 additional observations that sum to beta*n.
         """
         warnings.filterwarnings('always')
+        # TODO: Pass inverse soln to _prep_for_sskf for initializing xs?
         y, a_, a_upper, f_, q_, q_upper, non_zero_indices, r, xs, m, n, p, use_lapack = \
             self._prep_for_sskf(y, a_init, f, q_init, r, xs)
         p1 = self._self_histoty
@@ -152,7 +153,7 @@ class NeuraLVAR:
                                                    tol=min(1e-4, rel_tol), zeroed_index=zeroed_index,
                                                    update_only_target=False, n_eigenmodes=self._n_eigenmodes)
                     else:
-                        a_upper, changes = solve_for_a(q_upper, s1, s2, a_upper, p1, lambda2=lambda2, max_iter=max_iter,
+                        a_upper = solve_for_a(q_upper, s1, s2, a_upper, p1, lambda2=lambda2, max_iter=max_iter,
                                                    tol=min(1e-4, rel_tol), zeroed_index=zeroed_index,
                                                    update_only_target=False, n_eigenmodes=self._n_eigenmodes)
                 if not fixed_q:
@@ -309,7 +310,7 @@ class NeuraLVAR:
         bias = sum([bias_by_idx(i, q_upper, a_, x_, s_, b, m, p, self._zeroed_index) for i in source])
         return bias
 
-    def fit(self, y, f, r, lambda2=None, lb=None, la=None, max_iter=500, max_cyclic_iter=3, a_init=None, q_init=None, rel_tol=0.0001,
+    def fit(self, y, f, r, lambda2=None, lb=None, la=None, max_iter=500, max_cyclic_iter=3, a_init=None, q_init=None, stc_init = None, rel_tol=0.0001,
             restriction=None, alpha=0.0, beta=0.0, use_es=None, verbose=False):
         """Fits the model from given m/eeg data, forward gain and noise covariance
 
@@ -341,7 +342,7 @@ class NeuraLVAR:
         self.restriction = restriction
         a, q_upper, lls, f, r, zeroed_index, _, x_ = self._fit(y, f, r, lambda2=lambda2, lb=None, la=None, max_iter=max_iter,
                                                                max_cyclic_iter=max_cyclic_iter, a_init=a_init,
-                                                               q_init=q_init, rel_tol=rel_tol, alpha=alpha, beta=beta, verbose=verbose)
+                                                               q_init=q_init, rel_tol=rel_tol, xs = stc_init, alpha=alpha, beta=beta, verbose=verbose)
         self._parameters = (a, f, q_upper, r, x_)
         self._zeroed_index = zeroed_index
         self._lls = lls
@@ -369,6 +370,7 @@ class NeuraLVAR:
         return np.swapaxes(np.reshape(a, (m, p, m)), 0, 1)
 
     def _prep_for_sskf(self, y, a, f, q, r, xs=None):
+        # TODO: Add option for using mne inverse soln for warm start
         """Prepares (mostly memory allocation and type-casting) arrays for sskf()
 
         Parameters
@@ -412,7 +414,6 @@ class NeuraLVAR:
 
         assert q.shape[0] == m
         q_upper = q
-
         a_upper = np.zeros((m, m * p), dtype=np.float64)
         a_lower = np.hstack((np.eye(m * (p - 1)), np.zeros((m * (p - 1), m))))
         a_ = np.vstack((a_upper, a_lower))
@@ -542,8 +543,8 @@ class NeuraLVARCV(NeuraLVAR):
         for shm in (shm_y, shm_f, shm_r, shm_c):
             shm.close()
         return None
-
-    def fit(self, y, f, r, lambda_range=None, max_iter=500, max_cyclic_iter=3, a_init=None, q_init=None,
+    # TODO: Pass inverse solution for warm start to fit function (a_init, q_init)?
+    def fit(self, y, f, r, lambda_range=None, max_iter=500, max_cyclic_iter=3, a_init=None, q_init=None, stc_init = None,
             rel_tol=1e-5, restriction=None, alpha=0.0, beta=0.0, use_es=True, verbose=False):
         logger.info(f"fit max iter = {max_iter}")
         """Fits the model from given m/eeg data, forward gain and noise covariance
@@ -636,10 +637,10 @@ class NeuraLVARCV(NeuraLVAR):
             index = self.mse_path[1].mean(axis=0).argmax()
             best_lambda = lambda_range[index]
             logger.info(f'\nbest_regularizing parameter: {best_lambda}')
-
+        # TODO: Pass inverse soln to _fit for warm start
         a, q_upper, lls, f, r, zeroed_index, _, x_ = self._fit(y, f, r, lambda2=best_lambda, max_iter=max_iter,
                                                                max_cyclic_iter=max_cyclic_iter, a_init=a_init,
-                                                               q_init=q_init, rel_tol=rel_tol, alpha=alpha, beta=beta, verbose=verbose)
+                                                               q_init=q_init, rel_tol=rel_tol, xs = stc_init, alpha=alpha, beta=beta, verbose=verbose)
         self._parameters = (a, f, q_upper, r, x_)
         self._zeroed_index = zeroed_index
         self._lls = lls

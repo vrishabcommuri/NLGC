@@ -135,7 +135,7 @@ class NLGC:
 
 def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, var_thr=1.0, ROIs=[], alpha=0, beta=0,
         lambda_range=None, lambda1=None, lambda2=None, max_iter=500, max_cyclic_iter=3,
-        tol=1e-5, sparsity_factor=0.0, cv=5, use_lapack=True, use_es=True, verbose=False):
+        tol=1e-5, sparsity_factor=0.0, cv=5, use_lapack=True, use_es=True, inverse_soln = None, verbose=False):
     n, m = f.shape
     nx = m // n_eigenmodes
 
@@ -176,14 +176,14 @@ def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, var_thr=1.0, ROIs=[], alpha=0
         q_val = 0.0001
     q_init = q_val * np.eye(m)
     a_init = None
-
+    # TODO: Pass inverse solution for warm start to fit function use a_init and q_init above to pass inverse soln?
     if len(lambda_range) > 1 and lambda1 is None:
         model_f = NeuraLVARCV(p, p1, n_eigenmodes, 10, cv, n_jobs, use_lapack=use_lapack)
-        model_f.fit(y, f, r * np.eye(n), lambda_range, a_init=a_init, q_init=q_init.copy(), **kwargs)
+        model_f.fit(y, f, r * np.eye(n), lambda_range, a_init=a_init, q_init=q_init.copy(), stc_init = inverse_soln, **kwargs)
     else:
         model_f = NeuraLVAR(p, p1, n_eigenmodes, use_lapack=use_lapack)
         lambda_range = lambda_range[0]
-        model_f.fit(y, f, r * np.eye(n), lambda_range, lb=lambda1, la=lambda2, a_init=a_init, q_init=q_init.copy(), **kwargs)
+        model_f.fit(y, f, r * np.eye(n), lambda_range, lb=lambda1, la=lambda2, a_init=a_init, q_init=q_init.copy(), stc_init = inverse_soln, **kwargs)
 
     bias_f = model_f.compute_bias(y)
 
@@ -283,7 +283,7 @@ def _learn_reduced_model(i, j, y, f, r, lambda_f, a, q, n, p, p1, n_eigenmodes, 
         cov = scipy.linalg.block_diag(r[0] * np.eye(n//2), r[1] * np.eye(n//2))
     else:
         cov = r * np.eye(n)
-    model_r.fit(y, f, cov, lambda_f, a_init=a_init, q_init=q.copy(), restriction=link, alpha=alpha,
+    model_r.fit(y, f, cov, lambda_f, a_init=a_init, q_init=q.copy(), stc_init = inverse_soln, restriction=link, alpha=alpha,
                 beta=beta, **kwargs)
     bias = model_r.compute_bias(y)
     ll = model_r.ll
@@ -376,7 +376,7 @@ def _reduce_lead_field(forward, src, n_eigenmodes, data=None):
         logger.info('Using the raw forward solution')
         data = np.swapaxes(forward['sol']['data'], 0, 1)  # (n_sources, n_channels)
     data = data.copy()
-
+    print(f'Data shape is {data.shape}')
     if isinstance(src, mne.Forward):
         src = src['src']
 
@@ -395,9 +395,12 @@ def _reduce_lead_field(forward, src, n_eigenmodes, data=None):
             lhweights.append([eig_src_weights, this_grouped_vertidx_no_offset])
         else:
             rhweights.append([eig_src_weights, this_grouped_vertidx_no_offset])
-
+        print(this_group_eigenmodes.shape)
     weights = [lhweights, rhweights]
     src_flips = [None] * sum(n_groups)
+    weights_test = np.array(weights)
+    print(weights_test.shape)
+    print(group_eigenmodes.shape)
     return weights, group_eigenmodes.T, grouped_vertidx, src_flips
 
 
@@ -567,6 +570,14 @@ def _truncatedsvd(a, n_components=2, return_pecentage_exaplained=False):
     u, s, vh = linalg.svd(a, full_matrices=False, compute_uv=True,
                           overwrite_a=True, check_finite=True,
                           lapack_driver='gesdd')
+    
+    print(f'u is shape {u.shape}')
+    print(f's is shape {s.shape}')
+    print(f'vh is shape {vh.shape}')
+    test = vh[:n_components] * s[:n_components][:, None]
+    print(s[:n_components][:, None])
+    print(vh[:n_components].shape)
+    print(f'vh is shape {test.shape}')
     if return_pecentage_exaplained:
         return u, vh[:n_components] * s[:n_components][:, None], s[:n_components].sum() / s.sum()
     return u, vh[:n_components] * s[:n_components][:, None]
