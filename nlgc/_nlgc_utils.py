@@ -135,7 +135,7 @@ class NLGC:
 
 def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, var_thr=1.0, ROIs=[], alpha=0, beta=0,
         lambda_range=None, lambda1=None, lambda2=None, max_iter=500, max_cyclic_iter=3,
-        tol=1e-5, sparsity_factor=0.0, cv=5, use_lapack=True, use_es=True, inverse_soln = None, verbose=False):
+        tol=1e-5, sparsity_factor=0.0, cv=5, use_lapack=True, use_es=True, xs_init = None, verbose=False):
     n, m = f.shape
     nx = m // n_eigenmodes
 
@@ -176,14 +176,14 @@ def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, var_thr=1.0, ROIs=[], alpha=0
         q_val = 0.0001
     q_init = q_val * np.eye(m)
     a_init = None
-    # TODO: Pass inverse solution for warm start to fit function use a_init and q_init above to pass inverse soln?
+
     if len(lambda_range) > 1 and lambda1 is None:
         model_f = NeuraLVARCV(p, p1, n_eigenmodes, 10, cv, n_jobs, use_lapack=use_lapack)
-        model_f.fit(y, f, r * np.eye(n), lambda_range, a_init=a_init, q_init=q_init.copy(), stc_init = inverse_soln, **kwargs)
+        model_f.fit(y, f, r * np.eye(n), lambda_range, a_init=a_init, q_init=q_init.copy(), xs_init = xs_init, **kwargs)
     else:
         model_f = NeuraLVAR(p, p1, n_eigenmodes, use_lapack=use_lapack)
         lambda_range = lambda_range[0]
-        model_f.fit(y, f, r * np.eye(n), lambda_range, lb=lambda1, la=lambda2, a_init=a_init, q_init=q_init.copy(), stc_init = inverse_soln, **kwargs)
+        model_f.fit(y, f, r * np.eye(n), lambda_range, lb=lambda1, la=lambda2, a_init=a_init, q_init=q_init.copy(), xs_init = xs_init, **kwargs)
 
     bias_f = model_f.compute_bias(y)
 
@@ -283,7 +283,7 @@ def _learn_reduced_model(i, j, y, f, r, lambda_f, a, q, n, p, p1, n_eigenmodes, 
         cov = scipy.linalg.block_diag(r[0] * np.eye(n//2), r[1] * np.eye(n//2))
     else:
         cov = r * np.eye(n)
-    model_r.fit(y, f, cov, lambda_f, a_init=a_init, q_init=q.copy(), stc_init = inverse_soln, restriction=link, alpha=alpha,
+    model_r.fit(y, f, cov, lambda_f, a_init=a_init, q_init=q.copy(), restriction=link, alpha=alpha,
                 beta=beta, **kwargs)
     bias = model_r.compute_bias(y)
     ll = model_r.ll
@@ -468,12 +468,13 @@ def _prepare_leadfield_reduction(src_target, src_origin):
         offset = 0 if k == 0 else n_verts[k - 1]
         for this_vert, this_pinfo in zip(this_vertno_target, this_pinfo_target):
             this_vertices = np.intersect1d(this_vertno_origin, this_pinfo)
-            vertidx = offset + np.searchsorted(this_vertno_origin, this_vertices)
             
             # offset ensures that rh indices are sequential with the lh indices, but for indexing
             # into the rh sources spaces object, we don't want this offset since the indices 
             # overlap with the lh source spaces indices. just create another list for this
             vertidx_no_offset = np.searchsorted(this_vertno_origin, this_vertices)
+            vertidx = offset + vertidx_no_offset
+
             if len(vertidx) == 0:
                 vertidx = None
                 vertidx_no_offset = None
@@ -593,3 +594,106 @@ _svd_funcs = {
 def _reapply_source_weighting(X, source_weighting):
     X *= source_weighting[:, None]
     return X
+
+
+def get_region_vec_ori(hemi, region, w, src_origin, neig):
+    # apply the weights for the current patch to all of the ico-4 vectors in that same patch
+    # (n_curr_patch_eigs, n_ico4_sources) x (n_ico4_sources, RAS) = (n_curr_patch_eigs, RAS)
+    return w[hemi][region][0][:, :neig].T @ src_origin[hemi]['nn'][src_origin[hemi]['vertno']][w[hemi][region][1]]
+
+def imbue_vector_direction(src_target, src_origin, weights, neig):
+    # data: (n eig groups, 3)
+    # vertnos: (2, 42), axis 0 indexes hemisphere 
+    # vertloc: (n_eigenmodes)
+    vec_src = {'data': [], 'vertnos': [], 'vertloc': []}
+
+    vec_src['vertnos'] = [src_target[0]['vertno'], src_target[1]['vertno']]
+    vec_src['vertloc'] = [src_target[0]['rr'][src_target[0]['vertno']], 
+                          src_target[1]['rr'][src_target[1]['vertno']]]
+    for hemi in range(2):
+        for region in range(42):
+            ori = get_region_vec_ori(hemi, region, weights, src_origin, neig)
+            assert(len(ori) == neig)
+            vec_src['data'].extend(ori)
+    vec_src['data'] = np.array(vec_src['data'])
+    
+    return vec_src
+
+
+def surface_eigs_to_vector_eigs(data, src_target, src_origin, weights, neigs):
+    """
+    data: array of shape (n_eigenmodes * n_sources, ...)
+    weights: list with elements [[left_hemi_transform, left_hemi_vertices], [right_hemi_transform, right_hemi_vertices]]
+        where transform is a matrix of shape (n_eigs, n_ico4_sources)
+    returns array of shape (n_sources, RAS, ...) 
+    where are RAS are right, anterior, superior projections
+    """
+    # generate RAS orientations for all eigenmodes
+    vec_src = imbue_vector_direction(src_target, src_origin, weights, neig)
+
+    patch_vec_ts = []
+    for pi in range(84):
+        if isinstance(data, NLGC):
+            # get the eigenmode time series for the current patch
+            ei = model.model_f[0]._parameters[4][:, :neigs*84].T\
+                   [pi*neigs:(pi+1)*neigs] # (n_eigs, n_time)
+        else:
+            ei = data[pi*neigs:(pi+1)*neigs] # (n_eigs, n_time)
+        
+        ev = vec_src['data'][pi*neigs:(pi+1)*neigs] # (n_eigs, RAS)
+        patch_vec_ts.append(ev.T @ ei) # (RAS, n_time)
+
+    return np.array(patch_vec_ts) # (n_sources, RAS, n_time)
+
+
+def surface_eigs_to_surface_ico4(data, weights, neigs):
+    """
+    data: array of shape (n_eigenmodes * n_sources, ...)
+    weights: list with elements [[left_hemi_transform, left_hemi_vertices], [right_hemi_transform, right_hemi_vertices]]
+        where transform is a matrix of shape (n_eigs, n_ico4_sources)
+    returns array of shape (n_ico4_sources, ...) 
+    """
+    patch_vec_ts = []
+    for hemi in range(2):
+        for region in range(42):
+            pi = (hemi * 42) + 42
+            if isinstance(data, NLGC):
+                # get the eigenmode time series for the current patch
+                ei = model.model_f[0]._parameters[4][:, :neigs*84].T\
+                    [pi*neigs:(pi+1)*neigs] # (n_eigs, n_time)
+            else:
+                ei = data[pi*neigs:(pi+1)*neigs] # (n_eigs, n_time)
+
+            ev = weights[hemi][region][0][:, :neigs].T # (n_eigs, n_ico4_sources)
+        
+            patch_vec_ts.append(ev.T @ ei) # (n_ico4_sources, n_time)
+
+    return np.array(patch_vec_ts) # (n_ico4_sources, n_time)
+
+
+def surface_ico4_to_surface_eigs(data, weights, neigs):
+    """
+    data: array of shape (n_ico4_sources, ...)
+    weights: list with elements [[left_hemi_transform, left_hemi_vertices], [right_hemi_transform, right_hemi_vertices]]
+        where transform is a matrix of shape (n_eigs, n_ico4_sources)
+    returns array of shape (n_ico4_sources, ...) 
+    """
+    patch_vec_ts = []
+    for hemi in range(2):
+        for region in range(42):
+            ev = weights[hemi][region][0][:, :neigs].T # (n_eigs, n_ico4_sources)
+            assert(isinstance(data, mne.SourceEstimate))
+            if hemi == 0:
+                hemidata = data[:5124//2]
+            else:
+                hemidata = data[5124//2:]
+
+            pd = hemidata[weights[hemi][region][1]] # (n_ico4_sources, n_time)
+            patch_vec_ts.append(ev @ pd) # (n_eigs, n_time)
+
+    return np.array(patch_vec_ts) # (n_eigs * n_sources, n_time)
+
+
+
+
+

@@ -15,7 +15,7 @@ from .opt import *
 from ._stat import fdr_control
 from ._bias_utils import debias_deviances
 from ._gen_utils import LazyProperty
-from ._nlgc_utils import _gc_extraction, _prepare_eigenmodes, NLGC
+from ._nlgc_utils import _gc_extraction, _prepare_eigenmodes, NLGC, surface_ico4_to_surface_eigs
 from ._nlgc_test_utils import run_GT_sim
 
 
@@ -96,16 +96,12 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, order, self_history=None,
         _prepare_eigenmodes(evoked.info, forward, noise_cov, labels, n_eigenmodes, loose, depth, pca, rank)
 
 
-
-    # TODO: Create inverse solution for warm start and find transformation matrix to transform inverse solution from ico-4 to ico-1 and cortical patches
+    stc_init = None
     if warm_start:
-        inverse_op = make_inverse_operator(evoked.info, forward, noise_cov, loose, depth, rank, verbose = verbose)
-        stc = apply_inverse(evoked, inverse_op, lambda2 = lambda2)
-        # TODO: Add some transformation to move stc dimensions from ico-4 to eigenmodes
-        inverse_soln = stc
-    else:
-        inverse_soln = None
-
+        inv = make_inverse_operator(evoked.info, forward, noise_cov, loose, depth, rank, verbose = verbose)
+        inv_stc = apply_inverse(evoked, inv)
+        stc_init = surface_ico4_to_surface_eigs(inv_stc, weights, n_eigenmodes)
+        
 
     # get the data
     sel = [evoked.ch_names.index(name) for name in gain_info['ch_names']]
@@ -146,7 +142,6 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, order, self_history=None,
     conv_flag = np.zeros((n_segments, nx, nx))
 
     models = []
-    # TODO: Pass inverse soln to the _fit where a matrix is initialized
     for this_segment in range(0, n_segments):
         if verbose:
             print('Segment: ', this_segment + 1)
@@ -158,7 +153,7 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, order, self_history=None,
                            alpha=alpha, beta=beta, cv=cv, lambda_range=lambda_range, lambda1=lambda1, 
                            lambda2=lambda2, max_iter=max_iter,
                            max_cyclic_iter=max_cyclic_iter, tol=tol, sparsity_factor=sparsity_factor,
-                           use_lapack=use_lapack, use_es=use_es, var_thr=var_thr, inverse_soln = inverse_soln, verbose=verbose)
+                           use_lapack=use_lapack, use_es=use_es, var_thr=var_thr, xs_init=stc_init, verbose=verbose)
         d_raw[this_segment] = d_raw_
         bias_r[this_segment] = bias_r_
         bias_f[this_segment] = bias_f_

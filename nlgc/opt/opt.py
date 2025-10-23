@@ -101,7 +101,6 @@ class NeuraLVAR:
         This equivalent to alpha*n - 2 additional observations that sum to beta*n.
         """
         warnings.filterwarnings('always')
-        # TODO: Pass inverse soln to _prep_for_sskf for initializing xs?
         y, a_, a_upper, f_, q_, q_upper, non_zero_indices, r, xs, m, n, p, use_lapack = \
             self._prep_for_sskf(y, a_init, f, q_init, r, xs)
         p1 = self._self_histoty
@@ -310,8 +309,10 @@ class NeuraLVAR:
         bias = sum([bias_by_idx(i, q_upper, a_, x_, s_, b, m, p, self._zeroed_index) for i in source])
         return bias
 
-    def fit(self, y, f, r, lambda2=None, lb=None, la=None, max_iter=500, max_cyclic_iter=3, a_init=None, q_init=None, stc_init = None, rel_tol=0.0001,
-            restriction=None, alpha=0.0, beta=0.0, use_es=None, verbose=False):
+    def fit(self, y, f, r, lambda2=None, lb=None, la=None, max_iter=500, 
+            max_cyclic_iter=3, a_init=None, q_init=None, xs_init=None, 
+            rel_tol=0.0001, restriction=None, alpha=0.0, beta=0.0, use_es=None, 
+            verbose=False):
         """Fits the model from given m/eeg data, forward gain and noise covariance
 
         Parameters
@@ -324,6 +325,7 @@ class NeuraLVAR:
         max_cyclic_iter : int, default=2
         a_init : ndarray of shape (order, n_sources, n_sources), default=None
         q_init : ndarray of shape (n_sources, n_sources), default=None
+        xs_init : ndarray of shape (n_sources, n_samples), default=None
         rel_tol : float, default=0.0001
         restriction : regular expression like 'i->j' or 'i1,i2->j1,j2', default = None
             i and j should be integers.
@@ -342,7 +344,7 @@ class NeuraLVAR:
         self.restriction = restriction
         a, q_upper, lls, f, r, zeroed_index, _, x_ = self._fit(y, f, r, lambda2=lambda2, lb=None, la=None, max_iter=max_iter,
                                                                max_cyclic_iter=max_cyclic_iter, a_init=a_init,
-                                                               q_init=q_init, rel_tol=rel_tol, xs = stc_init, alpha=alpha, beta=beta, verbose=verbose)
+                                                               q_init=q_init, rel_tol=rel_tol, xs = xs_init, alpha=alpha, beta=beta, verbose=verbose)
         self._parameters = (a, f, q_upper, r, x_)
         self._zeroed_index = zeroed_index
         self._lls = lls
@@ -370,7 +372,6 @@ class NeuraLVAR:
         return np.swapaxes(np.reshape(a, (m, p, m)), 0, 1)
 
     def _prep_for_sskf(self, y, a, f, q, r, xs=None):
-        # TODO: Add option for using mne inverse soln for warm start
         """Prepares (mostly memory allocation and type-casting) arrays for sskf()
 
         Parameters
@@ -475,7 +476,7 @@ class NeuraLVARCV(NeuraLVAR):
         NeuraLVAR.__init__(self, order, self_history, n_eigenmodes, copy, standardize, normalize, use_lapack)
 
     def _cvfit(self, split, info_y, info_f, info_r, info_cv, info_pred, splits, lambda_range, max_iter=500,
-            max_cyclic_iter=3, a_init=None, q_init=None, rel_tol=1e-5, alpha=0.0, beta=0.0, verbose=False):
+            max_cyclic_iter=3, a_init=None, q_init=None, rel_tol=1e-5, alpha=0.0, beta=0.0, xs_init=None, verbose=False):
         
         mne.set_log_level(verbose)
 
@@ -516,7 +517,8 @@ class NeuraLVARCV(NeuraLVAR):
         logger.debug(f"{current_process().name} successfully read the shared memory")
         train, test = splits[split]
         y_train, y_test = y[:, train], y[:, test]
-        xs = None
+        xs = xs_init
+        
         logger.debug(f"{current_process().name} successfully split the data")
         for i, lambda2 in enumerate(lambda_range * np.sqrt(y.shape[-1])):
             lambda2 = lambda2 / np.sqrt(y_train.shape[-1])
@@ -543,9 +545,10 @@ class NeuraLVARCV(NeuraLVAR):
         for shm in (shm_y, shm_f, shm_r, shm_c):
             shm.close()
         return None
-    # TODO: Pass inverse solution for warm start to fit function (a_init, q_init)?
-    def fit(self, y, f, r, lambda_range=None, max_iter=500, max_cyclic_iter=3, a_init=None, q_init=None, stc_init = None,
-            rel_tol=1e-5, restriction=None, alpha=0.0, beta=0.0, use_es=True, verbose=False):
+
+    def fit(self, y, f, r, lambda_range=None, max_iter=500, max_cyclic_iter=3, 
+            a_init=None, q_init=None, xs_init=None, rel_tol=1e-5, 
+            restriction=None, alpha=0.0, beta=0.0, use_es=True, verbose=False):
         logger.info(f"fit max iter = {max_iter}")
         """Fits the model from given m/eeg data, forward gain and noise covariance
 
@@ -601,7 +604,7 @@ class NeuraLVARCV(NeuraLVAR):
         shared_cv_mat, info_cv, shm_c = create_shared_mem(cv_mat)
         shared_pred_mat, info_pred, shm_p = create_shared_mem(pred_mat)
         initargs = (info_y, info_f, info_r, info_cv, info_pred, cvsplits, lambda_range,
-                    max_iter, max_cyclic_iter, a_init, q_init, rel_tol, alpha, beta, verbose)
+                    max_iter, max_cyclic_iter, a_init, q_init, rel_tol, alpha, beta, xs_init, verbose)
 
         logger.info('Starting cross-validation')
         # Serial implementation
@@ -637,10 +640,11 @@ class NeuraLVARCV(NeuraLVAR):
             index = self.mse_path[1].mean(axis=0).argmax()
             best_lambda = lambda_range[index]
             logger.info(f'\nbest_regularizing parameter: {best_lambda}')
-        # TODO: Pass inverse soln to _fit for warm start
+
         a, q_upper, lls, f, r, zeroed_index, _, x_ = self._fit(y, f, r, lambda2=best_lambda, max_iter=max_iter,
                                                                max_cyclic_iter=max_cyclic_iter, a_init=a_init,
-                                                               q_init=q_init, rel_tol=rel_tol, xs = stc_init, alpha=alpha, beta=beta, verbose=verbose)
+                                                               q_init=q_init, rel_tol=rel_tol, xs = xs_init, alpha=alpha, 
+                                                               beta=beta, verbose=verbose)
         self._parameters = (a, f, q_upper, r, x_)
         self._zeroed_index = zeroed_index
         self._lls = lls
