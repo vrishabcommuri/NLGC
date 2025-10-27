@@ -98,10 +98,23 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, order, self_history=None,
 
     stc_init = None
     if warm_start:
-        inv = make_inverse_operator(evoked.info, forward, noise_cov, loose, depth, rank, verbose = verbose)
+        inv = make_inverse_operator(evoked.info, forward, noise_cov, loose=loose, depth=depth, rank=rank, fixed=True, verbose=verbose)
         inv_stc = apply_inverse(evoked, inv)
-        stc_init = surface_ico4_to_surface_eigs(inv_stc, weights, n_eigenmodes)
+
+        # sources are stacked in the VAR(1) representation, so has dim (n_times, n_sources * n_lags)
+        _x = np.zeros((inv_stc.data.shape[1], n_eigenmodes * 84 * order))
+        stc_init = surface_ico4_to_surface_eigs(inv_stc, weights, n_eigenmodes) # (n_samples, n_sources)
+
+        # roll initialization data to represent each lag
+        for _p in range(order):
+            _x[:, _p * n_eigenmodes * 84: (_p+1) * n_eigenmodes * 84] = np.ascontiguousarray(np.roll(stc_init, -_p, axis=0))
         
+        # TODO: stc initialization this way includes autocorrelation structure in x
+        # which may influence the connections derived in A under sparsity constraints.
+        # one solution to this is to fit a VAR(1) or VAR(p) model using least-squares 
+        # to estimate the first- or pth-order autocorrelation in the data and then 
+        # use the residual from the model as the initialization.
+        stc_init = (_x, np.ascontiguousarray(np.roll(_x, -1, axis=0)))  # _x, x_
 
     # get the data
     sel = [evoked.ch_names.index(name) for name in gain_info['ch_names']]
@@ -161,6 +174,6 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, order, self_history=None,
         conv_flag[this_segment] = conv_flag_
 
     nlgc_obj = NLGC(name, nx, n, t, order, n_eigenmodes, n_segments, d_raw, bias_f, bias_r, models,
-                    conv_flag, label_names, label_vertidx, forward, noise_cov, whitener, weights)
+                    conv_flag, label_names, label_vertidx, forward, whitener, weights)
 
     return nlgc_obj

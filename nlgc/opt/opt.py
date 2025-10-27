@@ -433,10 +433,10 @@ class NeuraLVAR:
             x_ = np.empty_like(_x)
             xs = (_x, x_)
         else:
-            _x, x_ = xs
-            assert _x.shape[0] == y.shape[0]
-            assert _x.flags['C_CONTIGUOUS']
-            assert x_.flags['C_CONTIGUOUS']
+            _x, x_ ,= xs
+            assert(_x.shape[0] == y.shape[0])
+            assert(_x.flags['C_CONTIGUOUS'])
+            assert(x_.flags['C_CONTIGUOUS'])
         return y, a_, a_upper, f_, q_, q_upper, non_zero_indices, r, xs, m, n, p, use_lapack
 
     def _plot_ll_curve(self):

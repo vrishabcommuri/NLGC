@@ -62,7 +62,7 @@ class NLGC:
         reduced model bias matrix, [.]_{i,j} corresponds to link j->i
     """
     def __init__(self, subject, nx, ny, t, p, n_eigenmodes, n_segments, d_raw, bias_f, bias_r,
-                 model_f, conv_flag, label_names, label_vertidx, forward_orig, cov_orig, whitener, eig_src_weights, debug=None):
+                 model_f, conv_flag, label_names, label_vertidx, forward_orig, whitener, eig_src_weights, debug=None):
 
         self.subject = subject
         self.nx = nx
@@ -79,7 +79,6 @@ class NLGC:
         self._labels = label_names
         self._label_vertidx = label_vertidx
         self.forward_orig = forward_orig
-        self.cov_orig = cov_orig
         self.whitener = whitener
         self.eig_src_weights = eig_src_weights
         self._debug = debug
@@ -179,6 +178,7 @@ def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, var_thr=1.0, ROIs=[], alpha=0
 
     if len(lambda_range) > 1 and lambda1 is None:
         model_f = NeuraLVARCV(p, p1, n_eigenmodes, 10, cv, n_jobs, use_lapack=use_lapack)
+        print(y.shape, xs_init[0].shape)
         model_f.fit(y, f, r * np.eye(n), lambda_range, a_init=a_init, q_init=q_init.copy(), xs_init = xs_init, **kwargs)
     else:
         model_f = NeuraLVAR(p, p1, n_eigenmodes, use_lapack=use_lapack)
@@ -398,9 +398,6 @@ def _reduce_lead_field(forward, src, n_eigenmodes, data=None):
         print(this_group_eigenmodes.shape)
     weights = [lhweights, rhweights]
     src_flips = [None] * sum(n_groups)
-    weights_test = np.array(weights)
-    print(weights_test.shape)
-    print(group_eigenmodes.shape)
     return weights, group_eigenmodes.T, grouped_vertidx, src_flips
 
 
@@ -678,20 +675,27 @@ def surface_ico4_to_surface_eigs(data, weights, neigs):
         where transform is a matrix of shape (n_eigs, n_ico4_sources)
     returns array of shape (n_ico4_sources, ...) 
     """
-    patch_vec_ts = []
+    n_total_rows = neigs * 84
+    n_time = data.data.shape[1]
+    _x = np.zeros((n_time, n_total_rows), dtype=np.float64)
+    col_idx = 0
+
     for hemi in range(2):
         for region in range(42):
-            ev = weights[hemi][region][0][:, :neigs].T # (n_eigs, n_ico4_sources)
+            ev = weights[hemi][region][0][:, :neigs] # (n_ico4_sources, n_eigs)
             assert(isinstance(data, mne.SourceEstimate))
             if hemi == 0:
-                hemidata = data[:5124//2]
+                hemidata = data.data[:5124//2]
             else:
-                hemidata = data[5124//2:]
+                hemidata = data.data[5124//2:]
 
-            pd = hemidata[weights[hemi][region][1]] # (n_ico4_sources, n_time)
-            patch_vec_ts.append(ev @ pd) # (n_eigs, n_time)
+            patchdata = hemidata[weights[hemi][region][1]].T # (n_time, n_ico4_sources)
+            n_cols = ev.shape[1]
+            _x[:,  col_idx:col_idx + n_cols] = patchdata @ ev
+            col_idx += n_cols
 
-    return np.array(patch_vec_ts) # (n_eigs * n_sources, n_time)
+    assert(_x.flags['C_CONTIGUOUS'])
+    return _x # (n_time, n_eigs * n_sources)
 
 
 

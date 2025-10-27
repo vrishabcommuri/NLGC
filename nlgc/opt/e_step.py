@@ -429,11 +429,11 @@ def test_sskf(t=1000):
     for _ in range(10):
         with t1:
             x_, s_, b, _, _ = sskf(y, a, f, q, r, xs=(_x, x_), use_lapack=True)
-    print("Elapsed time: {:.4f}\pm{:.4f}".format(Timer.timers.mean("opt"), Timer.timers.stdev("opt")))
+    print(f"Elapsed time: {Timer.timers.mean("opt"):.4f} +/- {Timer.timers.stdev("opt"):.4f}")
     for _ in range(10):
         with t2:
             x__, s__, b, _, _ = sskf(y, a, f, q, r, xs=(_x, x_), use_lapack=False)
-    print("Elapsed time: {:.4f}\pm{:.4f}".format(Timer.timers.mean("vanilla"), Timer.timers.stdev("vanilla")))
+    print(f"Elapsed time: {Timer.timers.mean("vanilla"):.4f} +/- {Timer.timers.stdev("vanilla"):.4f}")
 
     fig, axes = plt.subplots(x.shape[1])
     for xi, xi_, xi__, ax in zip(x.T, x_.T, x__.T, axes):
