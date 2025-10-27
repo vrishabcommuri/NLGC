@@ -517,7 +517,12 @@ class NeuraLVARCV(NeuraLVAR):
         logger.debug(f"{current_process().name} successfully read the shared memory")
         train, test = splits[split]
         y_train, y_test = y[:, train], y[:, test]
-        xs = xs_init
+        xs_init_train = None
+        if not xs_init is None:
+            # only need training split for warm start since the validation step doesn't need initialization
+            _x_train = np.ascontiguousarray(xs_init[0][train, :]) 
+            x__train = np.ascontiguousarray(xs_init[1][train, :])
+            xs_init_train = (_x_train, x__train)
         
         logger.debug(f"{current_process().name} successfully split the data")
         for i, lambda2 in enumerate(lambda_range * np.sqrt(y.shape[-1])):
@@ -530,7 +535,7 @@ class NeuraLVARCV(NeuraLVAR):
             a_, q_upper, lls, _, _, _, xs, _ = \
                 self._fit(y_train, f, r, lambda2=lambda2, max_iter=max_iter,
                           max_cyclic_iter=max_cyclic_iter,
-                          a_init=a_init, q_init=q_init.copy(), rel_tol=rel_tol, xs=xs, alpha=alpha, beta=beta)
+                          a_init=a_init, q_init=q_init.copy(), rel_tol=rel_tol, xs=xs_init_train, alpha=alpha, beta=beta)
             # # different criteria for cross-validation
             cv[0, split, i] = self.compute_ll_(y_test, (a_, f, q_upper, r))
             cv[1, split, i] = lambda2 * self.compute_norm_one(a_)
