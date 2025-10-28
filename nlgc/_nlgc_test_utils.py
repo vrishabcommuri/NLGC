@@ -2,8 +2,8 @@ import numpy as np
 import scipy
 from scipy import linalg
 import os
-from ._nlgc_utils import _gc_extraction , _prepare_eigenmodes, NLGC
-
+from ._nlgc_utils import _gc_extraction , _prepare_eigenmodes, NLGC, surface_ico4_to_surface_eigs
+from mne.minimum_norm import apply_inverse, make_inverse_operator, InverseOperator
 from mne.source_space import SourceSpaces
 from mne.utils import (logger, _check_option, _validate_type)
 from mne.inverse_sparse.mxne_inverse import _prepare_gain
@@ -40,7 +40,7 @@ a: ground truth a matrix which VAR model is trying to estimate, contains GC link
 
 '''
 # Assume folder setup follows eelbrain pipeline
-def lead_field_generation(root, subject_id, n_eigenmodes, trans = None):
+def lead_field_generation(root, subject_id, n_eigenmodes, loose=0.0, depth=0.0, pca=True, rank=None, trans = None):
     full_empty_room_path = root + "meg/" + subject_id + "/" + subject_id + "_emptyroom-raw.fif"
     raw_empty_room = mne.io.read_raw_fif(full_empty_room_path)
     info = raw_empty_room.info
@@ -61,12 +61,12 @@ def lead_field_generation(root, subject_id, n_eigenmodes, trans = None):
     f_opt_ico_1 = mne.make_forward_solution(info, trans_file, src = bem_folder + subject_id  + "-ico-1-src.fif",
                                         bem = bem_folder + subject_id + "-inner_skull-bem-sol.fif")
     f_opt_data = f_opt['sol']
-    weights, G, label_vertidx, label_names, gain_info, whitener = _prepare_eigenmodes(info, f_opt, noise_cov, f_opt_ico_1, n_eigenmodes=n_eigenmodes, loose=0.0, depth=0.0, pca=True, rank=None,
+    weights, G, label_vertidx, label_names, gain_info, whitener = _prepare_eigenmodes(info, f_opt, noise_cov, f_opt_ico_1, n_eigenmodes=n_eigenmodes, loose=loose, depth=depth, pca=pca, rank=rank,
     mode='svd_flip')
     G_normalizing_factor = np.sqrt(np.sum(G ** 2, axis=0))
     G /= G_normalizing_factor
 
-    return G
+    return G, info, noise_cov, f_opt, weights
 
 def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2, G = None, p = 2, t = 500, m_active = 10, n_links = 10):
     print(f't is {t}')
@@ -108,20 +108,26 @@ def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2,
                     np.random.randint(0, m_active, n_links)):
         # (i,j) pair has a random link nature
         if natures == 'all':
-            a[0, idx_i[i], idx_i[j]] = np.random.uniform(-0.5, 0.5)
-            a[1, idx_i[i], idx_i[j]] = np.random.uniform(-0.5, 0.5)
+            for k in range(p):
+                a[k, idx_i[i], idx_i[j]] = np.random.uniform(-0.5, 0.5)
         elif natures == 'excitatory':
-            a[0, idx_i[i], idx_i[j]] = np.random.uniform(0, 0.5)
-            a[1, idx_i[i], idx_i[j]] = np.random.uniform(0, 0.5)
+            for k in range(p):
+                a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, 0.5)
         elif natures == 'inhibitory':
-            a[0, idx_i[i], idx_i[j]] = np.random.uniform(0, -0.5)
-            a[1, idx_i[i], idx_i[j]] = np.random.uniform(0, -0.5)
+            for k in range(p):
+                a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, -0.5)
         elif natures == 'sharpening1':
-            a[0, idx_i[i], idx_i[j]] = np.random.uniform(0, 0.5)
-            a[1, idx_i[i], idx_i[j]] = np.random.uniform(0, -0.5)
+            for k in range(p):
+                if k % 2 == 0:
+                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, 0.5)
+                else:      
+                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, -0.5) 
         elif natures == 'sharpening2':
-            a[0, idx_i[i], idx_i[j]] = np.random.uniform(0, -0.5)
-            a[1, idx_i[i], idx_i[j]] = np.random.uniform(0, 0.5)
+            for k in range(p):
+                if k % 2 == 0:
+                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, -0.5)
+                else:      
+                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, 0.5) 
         else:
             raise Exception(f"nature {natures} not implemented")
 
@@ -220,7 +226,7 @@ tol = tolerance for EM convergence
 sparsity_factor = threshold to remove reduced models with very small VAR coefficients
 '''
 def nlgc_map_opt(M, G, r, order, self_history=None, var_thr=1.0, n_segments=1, lambda_range=None, max_iter=500,
-                 max_cyclic_iter=3, tol=1e-5, sparsity_factor=0.0, cv=5, n_eigenmodes = 2, use_es = False):
+                 max_cyclic_iter=3, tol=1e-5, sparsity_factor=0.0, cv=5, n_eigenmodes = 2, xs_init = None, use_es = False):
     n, nnx = G.shape
     len_patch_idx = nnx // n_eigenmodes
     _, t = M.shape
@@ -240,7 +246,7 @@ def nlgc_map_opt(M, G, r, order, self_history=None, var_thr=1.0, n_segments=1, l
             _gc_extraction(M[:, n * tt: (n + 1) * tt], G, r, p=order, p1=self_history, n_eigenmodes=n_eigenmodes,
                            ROIs=list(range(len_patch_idx)), cv=cv, lambda_range=lambda_range, max_iter=max_iter,
                            max_cyclic_iter=max_cyclic_iter, tol=tol, sparsity_factor=sparsity_factor,
-                           use_lapack=True, use_es=use_es, var_thr=var_thr)
+                           use_lapack=True, use_es=use_es, var_thr=var_thr, xs_init = xs_init)
         d_raw[n] = d_raw_
         bias_r[n] = bias_r_
         bias_f[n] = bias_f_
@@ -306,10 +312,10 @@ n_links: int
 def run_GT_sim(lead_field_gen = False, lf = None, seed = 0, band = "wide", fs = 50, natures = 'all', 
         root = None, subject_id = None, session_name = None, trans = None, order = 2, t = 500, n_eigenmodes = 1,
         n_segments = 1, loose = 0.0, depth = 0.0, pca = True, rank = None, lambda_range = None,
-        max_iter = 500, max_cyclic_iter = 3, tol = 1e-5, sparsity_factor = 0.0, cv = 5 ,var_thr = 1.0, alpha = .1, m_active = 10, n_links = 10, use_es = False):
+        max_iter = 500, max_cyclic_iter = 3, tol = 1e-5, sparsity_factor = 0.0, cv = 5 ,var_thr = 1.0, alpha = .1, m_active = 10, n_links = 10, warm_start = False, self_history = None, use_es = False):
     
     if (lead_field_gen):
-        G = lead_field_generation(root, subject_id, n_eigenmodes, trans)
+        G, info, noise_cov, f_opt, weights = lead_field_generation(root, subject_id, n_eigenmodes, loose, depth, pca, rank, trans)
     elif (type(lf) != type(None)):
         G = lf
     else:
@@ -319,9 +325,20 @@ def run_GT_sim(lead_field_gen = False, lf = None, seed = 0, band = "wide", fs = 
     plt.imshow(JG)
     plt.show()
     print('Start nglc_map_opt')
+
+    stc_init = None
+    if lead_field_gen & warm_start:
+        raw = mne.io.RawArray(y.T, info)
+        epochs = mne.Epochs(raw)
+        evoked = epochs.average()
+        inv = make_inverse_operator(evoked.info, f_opt, noise_cov, loose, depth, rank)
+        inv_stc = apply_inverse(evoked, inv)
+        stc_init = surface_ico4_to_surface_eigs(inv_stc, weights, n_eigenmodes)
+
+
     temp_obj = nlgc_map_opt(y.T, f, r=r_cov, order=p, self_history=p, lambda_range=lambda_range, n_segments=n_segments,
                                 var_thr=var_thr, max_iter=max_iter, max_cyclic_iter=max_cyclic_iter, tol=tol,
-                                sparsity_factor=sparsity_factor, n_eigenmodes = n_eigenmodes, use_es = use_es)
+                                sparsity_factor=sparsity_factor, n_eigenmodes = n_eigenmodes, xs_init = stc_init, use_es = use_es)
     
     J = temp_obj.get_J_statistics(alpha)
 
