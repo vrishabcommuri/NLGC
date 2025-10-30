@@ -14,6 +14,103 @@ warnings.filterwarnings('ignore')
 
 import matplotlib.pyplot as plt
 import mne
+from matplotlib.backends.backend_pdf import PdfPages
+
+import pickle
+import json
+import os
+import zipfile
+
+# Save information in 
+def save_info(dir, a, JG, model, param_dict, zip_pkl = True):
+
+    conv = int(np.floor((5/336)*a.shape[1]) + 1)
+    if not os.path.exists(dir):
+        os.makedirs(dir)
+        print(f"Directory '{dir}' created.")
+    else:
+        print(f"Directory '{dir}' already exists.")
+
+    with PdfPages(dir + 'model-comparison.pdf') as pdf:
+        plt.figure(figsize=(75, 75))
+        arr = np.concatenate(a[:], axis = 1)
+        plt.imshow(scipy.signal.convolve2d(arr, np.ones((conv,conv))), cmap = 'seismic', vmin=-1, vmax=1)
+        plt.title('A Coefficients Concatenated', fontsize = 80)
+        pdf.savefig()  # saves the current figure into a pdf page
+        plt.close()
+
+        # if LaTeX is not installed or error caught, change to `False`
+        plt.figure(figsize=(75, 75))
+        model_params = model._model_f[0]._parameters[0]
+        arr_model = np.concatenate(model_params[:], axis = 1)
+        plt.imshow(scipy.signal.convolve2d(arr_model, np.ones((conv,conv))), cmap = 'seismic', vmin=-1, vmax=1)
+        plt.title('Derived Model Parameters Concatenated', fontsize = 80)
+        # pdf.attach_note("plot of sin(x)")  # attach metadata (as pdf note) to page
+        pdf.savefig()
+        plt.close()
+
+        
+        fig = plt.figure(figsize=(75, 75))
+        plt.imshow(JG)
+        plt.title('Ground Truth J Statistics')
+        pdf.savefig(fig)  
+        plt.close()
+        
+        fig = plt.figure(figsize=(75, 75))
+        plt.imshow(model.get_J_statistics())
+        plt.title('Derived J Statistics', fontsize = 80)
+        pdf.savefig(fig)  
+        plt.close()
+
+
+        negated_identity = np.abs(np.eye(a.shape[1]) - 1)
+
+        a_abs = np.abs(a[:]*negated_identity)
+        a_summed = np.sum(a_abs[:], axis = 0)
+        fig = plt.figure(figsize=(75, 75))
+        plt.imshow(a_summed, cmap = 'seismic', vmin=-1, vmax=1)
+        plt.title('No Diagonal Absolute Summed Lags A Coeffs', fontsize = 80)
+        pdf.savefig(fig)  
+        plt.close()
+
+
+        model_params_abs = np.abs(model_params[:]*negated_identity)
+        model_params_summed = np.sum(model_params_abs[:], axis = 0)
+        fig = plt.figure(figsize=(75, 75))
+        plt.imshow(model_params_summed, cmap = 'seismic', vmin=-1, vmax=1)
+        plt.title('No Diagonal Absolute Summed Lags Derived Model Params', fontsize = 80)
+        pdf.savefig(fig)  
+        plt.close()
+
+        # We can also set the file's metadata via the PdfPages object:
+        d = pdf.infodict()
+        d['Title'] = 'Model Analyatics PDF'
+        d['Author'] = 'Kavin Loganathan'
+
+        model_path = dir + 'model.pkl'
+        A_path = dir + 'G-Coeffs.pkl'
+        JG_path = dir + 'JG.pkl'
+        with open(model_path, 'wb') as file:
+            pickle.dump(model, file)
+        with open(A_path, 'wb') as file:
+            pickle.dump(a, file)
+        with open(JG_path, 'wb') as file:
+            pickle.dump(a, file)
+
+        with zipfile.ZipFile(dir + "data.zip", "w") as zip_file:
+            zip_file.write(model_path, arcname="model.pkl")
+            zip_file.write(A_path, arcname="G-Coeffs.pkl") 
+            zip_file.write(JG_path, arcname= 'JG.pkl')
+
+        os.remove(model_path)
+        os.remove(A_path)
+        os.remove(JG_path)
+
+        with open(dir + "params.json", "w") as f:
+            json.dump(param_dict, f, indent=4)
+        
+
+
 
 
 '''
@@ -224,9 +321,16 @@ max_iter = num of EM iters to converge on param estimation
 max_cyclic_iter = num of FASTA iters per EM iter
 tol = tolerance for EM convergence
 sparsity_factor = threshold to remove reduced models with very small VAR coefficients
+
+xs_init: 
+    initializes eigenmode time sources to this for warm start
+use_es: bool
+        Default: False, Use estimation stability
+verbose: bool
+        Default: False, Run GC extraction with verbose mode or not
 '''
 def nlgc_map_opt(M, G, r, order, self_history=None, var_thr=1.0, n_segments=1, lambda_range=None, max_iter=500,
-                 max_cyclic_iter=3, tol=1e-5, sparsity_factor=0.0, cv=5, n_eigenmodes = 2, xs_init = None, use_es = False):
+                 max_cyclic_iter=3, tol=1e-5, sparsity_factor=0.0, cv=5, n_eigenmodes = 2, xs_init = None, use_es = False, verbose = False):
     n, nnx = G.shape
     len_patch_idx = nnx // n_eigenmodes
     _, t = M.shape
@@ -246,7 +350,7 @@ def nlgc_map_opt(M, G, r, order, self_history=None, var_thr=1.0, n_segments=1, l
             _gc_extraction(M[:, n * tt: (n + 1) * tt], G, r, p=order, p1=self_history, n_eigenmodes=n_eigenmodes,
                            ROIs=list(range(len_patch_idx)), cv=cv, lambda_range=lambda_range, max_iter=max_iter,
                            max_cyclic_iter=max_cyclic_iter, tol=tol, sparsity_factor=sparsity_factor,
-                           use_lapack=True, use_es=use_es, var_thr=var_thr, xs_init = xs_init)
+                           use_lapack=True, use_es=use_es, var_thr=var_thr, xs_init = xs_init, verbose = verbose)
         d_raw[n] = d_raw_
         bias_r[n] = bias_r_
         bias_f[n] = bias_f_
@@ -308,14 +412,37 @@ m_active: int
         Number of active sources in the generated data
 n_links: int
         Number of links present in active sources, this must be less than or equal to m_active
+warm_start: bool
+        Default: False, if you want to use initialize xs_init 
+self_history: int
+        Number of lags that you want to use <= order, default is order
+passed_evoked: dict
+        Dictionary of file path to the following: noise_cov, fwd, evoked, src_target. 
+        Allows you to directly do _prep_eigenmodes rather than generate these values using lead_field_gen function
+use_es: bool
+        Default: False, Use estimation stability
+verbose: bool
+        Default: False, Run GC extraction with verbose mode or not
+save_dir: string
+        Default: None, Pass in directory for saving analytics and model/data
 '''
 def run_GT_sim(lead_field_gen = False, lf = None, seed = 0, band = "wide", fs = 50, natures = 'all', 
         root = None, subject_id = None, session_name = None, trans = None, order = 2, t = 500, n_eigenmodes = 1,
         n_segments = 1, loose = 0.0, depth = 0.0, pca = True, rank = None, lambda_range = None,
-        max_iter = 500, max_cyclic_iter = 3, tol = 1e-5, sparsity_factor = 0.0, cv = 5 ,var_thr = 1.0, alpha = .1, m_active = 10, n_links = 10, warm_start = False, self_history = None, use_es = False):
+        max_iter = 500, max_cyclic_iter = 3, tol = 1e-5, sparsity_factor = 0.0, cv = 5 ,var_thr = 1.0, alpha = .1, 
+        m_active = 10, n_links = 10, warm_start = False, self_history = None, passed_evoked = None, use_es = False, verbose = False, save_dir = None):
     
-    if (lead_field_gen):
-        G, info, noise_cov, f_opt, weights = lead_field_generation(root, subject_id, n_eigenmodes, loose, depth, pca, rank, trans)
+    if (passed_evoked != None):
+        print('using passed in evoked')
+        noise_cov = mne.read_cov(passed_evoked['noise_cov'])
+        fwd = mne.read_forward_solution(passed_evoked['fwd'])
+        evoked = mne.read_evokeds(passed_evoked['evoked'])
+        src_target = mne.read_source_spaces(passed_evoked['src_target'])
+        info = evoked[0].info
+        weights, G, label_vertidx, label_names, gain_info, whitener = _prepare_eigenmodes(info, fwd, noise_cov, src_target, 
+                                                                            n_eigenmodes=n_eigenmodes, loose=loose, depth=depth, pca=pca, rank=rank, mode='svd_flip')
+    elif (lead_field_gen):
+        G, info, noise_cov, fwd, weights = lead_field_generation(root, subject_id, n_eigenmodes, loose, depth, pca, rank, trans)
     elif (type(lf) != type(None)):
         G = lf
     else:
@@ -328,19 +455,64 @@ def run_GT_sim(lead_field_gen = False, lf = None, seed = 0, band = "wide", fs = 
 
     stc_init = None
     if lead_field_gen & warm_start:
-        raw = mne.io.RawArray(y.T, info)
-        epochs = mne.Epochs(raw)
-        evoked = epochs.average()
-        inv = make_inverse_operator(evoked.info, f_opt, noise_cov, loose, depth, rank)
+        evoked[0].drop_channels(evoked[0].info["bads"])
+        evoked[0]._pick_drop_channels(mne.pick_types(evoked[0].info, meg = True))
+        evoked[0].data = y.T
+        evoked = evoked[0]
+        # raw = mne.io.RawArray(y.T, info)
+        # epochs = mne.Epochs(raw)
+        # evoked = epochs.average()
+        inv = make_inverse_operator(evoked.info, fwd, noise_cov, loose=loose, depth=depth, rank=rank, fixed=True)
         inv_stc = apply_inverse(evoked, inv)
+        _x = np.zeros((inv_stc.data.shape[1], n_eigenmodes * 84 * order))
         stc_init = surface_ico4_to_surface_eigs(inv_stc, weights, n_eigenmodes)
-
-
+        for _p in range(order):
+            _x[:, _p * n_eigenmodes * 84: (_p+1) * n_eigenmodes * 84] = np.ascontiguousarray(np.roll(stc_init, -_p, axis=0))
+        stc_init = (_x, np.ascontiguousarray(np.roll(_x, -1, axis=0)))
+    print(stc_init == None)
     temp_obj = nlgc_map_opt(y.T, f, r=r_cov, order=p, self_history=p, lambda_range=lambda_range, n_segments=n_segments,
                                 var_thr=var_thr, max_iter=max_iter, max_cyclic_iter=max_cyclic_iter, tol=tol,
-                                sparsity_factor=sparsity_factor, n_eigenmodes = n_eigenmodes, xs_init = stc_init, use_es = use_es)
+                                sparsity_factor=sparsity_factor, n_eigenmodes = n_eigenmodes, xs_init = stc_init, use_es = use_es, verbose = verbose)
     
     J = temp_obj.get_J_statistics(alpha)
+
+
+    if save_dir != None:
+        data_gen_dict = {
+            'seed': seed,
+            'band': band,
+            'fs': fs,
+            'natures': natures,
+            'm_active': m_active,
+            'n_links': n_links,
+        }
+
+        if lead_field_gen:
+            lead_gen_dict = {
+                'root_dir': root,
+                'subject_id': subject_id,
+                'trans': trans,
+            }
+        else:
+            lead_gen_dict = None
+
+        param_dict = {
+            'best_lambda': temp_obj._model_f[0].lambda_,
+            'lambda_range': lambda_range,
+            'order': order,
+            'n_eigenmodes': n_eigenmodes,
+            't': t,
+            'use_es': use_es,
+            'data_gen': data_gen_dict,
+            'warm_start': warm_start,
+            'self_history': self_history,
+            'lead_field_gen': lead_gen_dict,
+            'passed_evoked': passed_evoked,
+        }
+
+        
+        save_info(save_dir, a, JG, temp_obj, param_dict)
+
 
     plt.imshow(JG)
     plt.imshow(J)

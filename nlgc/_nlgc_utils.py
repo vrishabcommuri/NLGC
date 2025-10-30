@@ -178,7 +178,8 @@ def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, var_thr=1.0, ROIs=[], alpha=0
 
     if len(lambda_range) > 1 and lambda1 is None:
         model_f = NeuraLVARCV(p, p1, n_eigenmodes, 10, cv, n_jobs, use_lapack=use_lapack)
-        print(y.shape, xs_init[0].shape)
+        if xs_init != None:
+            print(y.shape, xs_init[0].shape)
         model_f.fit(y, f, r * np.eye(n), lambda_range, a_init=a_init, q_init=q_init.copy(), xs_init = xs_init, **kwargs)
     else:
         model_f = NeuraLVAR(p, p1, n_eigenmodes, use_lapack=use_lapack)
@@ -219,7 +220,7 @@ def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, var_thr=1.0, ROIs=[], alpha=0
         # Exclude small cross-regression cases
         target = _expand_roi_indices_as_tup(j, n_eigenmodes)
         source = _expand_roi_indices_as_tup(i, n_eigenmodes)
-        if sparsity[target, source].sum() <= sparsity_factor * sparsity[target, target].sum():
+        if sparsity[target,:][:,source].sum() <= sparsity_factor * sparsity[target,:][:,target].sum():
             continue
         # Append rest of the links to check
         links_to_check.append((j, i))
@@ -567,15 +568,8 @@ def _truncatedsvd(a, n_components=2, return_pecentage_exaplained=False):
                          'min({:d}, {:d})'.format(n_components, *a.shape))
     u, s, vh = linalg.svd(a, full_matrices=False, compute_uv=True,
                           overwrite_a=True, check_finite=True,
-                          lapack_driver='gesdd')
-    
-    print(f'u is shape {u.shape}')
-    print(f's is shape {s.shape}')
-    print(f'vh is shape {vh.shape}')
+                          lapack_driver='gesdd')    
     test = vh[:n_components] * s[:n_components][:, None]
-    print(s[:n_components][:, None])
-    print(vh[:n_components].shape)
-    print(f'vh is shape {test.shape}')
     if return_pecentage_exaplained:
         return u, vh[:n_components] * s[:n_components][:, None], s[:n_components].sum() / s.sum()
     return u, vh[:n_components] * s[:n_components][:, None]
