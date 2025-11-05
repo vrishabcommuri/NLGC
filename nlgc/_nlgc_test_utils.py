@@ -20,11 +20,140 @@ import pickle
 import json
 import os
 import zipfile
+from matplotlib import patches
+from matplotlib.pyplot import axvline, axhline
+from collections import defaultdict
+
+def find_poles_and_zeros(a_true, model, order):
+    A = model._model_f[0]._parameters[0]
+    mask = np.abs(a_true).mean(axis=0)
+    mask = mask > 0.1
+
+    locx, locy = np.nonzero(mask)
+    a_t = []
+    b_t = []
+    a_s = []
+    b_s = []
+
+    for i in range(order):
+        a_t.append(a_true[i][locx, locy])
+        b_t.append(a_true[i][locx, locx])
+        a_s.append(A[i][locx, locy])
+        b_s.append(A[i][locx, locx])
+
+    a_t = np.array(a_t)
+    b_t = np.array(b_t)
+    a_s = np.array(a_s)
+    b_s = np.array(b_s)
+
+    zs, ps = [], []
+    zs_t, ps_t = [], []
+
+    for i in range(len(a_s[0])):
+        bt = [1] + (-b_t[:,i]).tolist()
+        at = a_t[:,i].tolist()
+        zt, pt, kt = scipy.signal.tf2zpk(at, bt)
+        zs_t.extend(zt)
+        ps_t.extend(pt)
+
+
+        bsig = [1] + (-b_s[:,i]).tolist()
+        asig = a_s[:,i].tolist()
+        zsig, psig, ksig = scipy.signal.tf2zpk(asig, bsig)
+        zs.extend(zsig)
+        ps.extend(psig)
+
+    return zs_t, ps_t, zs, ps
+
+
+def zplane(z, p, title, lim=1):
+
+
+    """Plot the complex z-plane given zeros and poles.
+    """
+    
+    # get a figure/plot
+    fig = plt.figure(figsize=(10,10))
+
+    ax = plt.subplot(2, 2, 1)
+    # TODO: should just inherit whatever subplot it's called in?
+
+    # Add unit circle and zero axes    
+    unit_circle = patches.Circle((0,0), radius=1, fill=False,
+                                 color='black', ls='solid', alpha=0.1)
+    ax.add_patch(unit_circle)
+    axvline(0, color='0.7')
+    axhline(0, color='0.7')
+    
+    # Plot the poles and set marker properties
+    poles = plt.plot(p.real, p.imag, 'x', markersize=9, alpha=0.5)
+    
+    # Plot the zeros and set marker properties
+    zeros = plt.plot(z.real, z.imag,  'o', markersize=9, 
+             color='none', alpha=0.5,
+             markeredgecolor=poles[0].get_color(), # same color as poles
+             )
+
+    # Scale axes to fit
+    r = 1.5 * np.amax(np.concatenate((abs(z), abs(p), [1])))
+    plt.axis('scaled')
+    if lim is None:
+        plt.axis([-r, r, -r, r])
+    else:
+        plt.axis([-lim, lim, -lim, lim])
+    
+    
+#    ticks = [-1, -.5, .5, 1]
+#    plt.xticks(ticks)
+#    plt.yticks(ticks)
+
+    """
+    If there are multiple poles or zeros at the same point, put a 
+    superscript next to them.
+    TODO: can this be made to self-update when zoomed?
+    """
+    # Finding duplicates by same pixel coordinates (hacky for now):
+    poles_xy = ax.transData.transform(np.vstack(poles[0].get_data()).T)
+    zeros_xy = ax.transData.transform(np.vstack(zeros[0].get_data()).T)    
+
+    # dict keys should be ints for matching, but coords should be floats for 
+    # keeping location of text accurate while zooming
+
+    # TODO make less hacky, reduce duplication of code
+    d = defaultdict(int)
+    coords = defaultdict(tuple)
+    for xy in poles_xy:
+        key = tuple(np.rint(xy).astype('int'))
+        d[key] += 1
+        coords[key] = xy
+    for key, value in d.items():
+        if value > 1:
+            x, y = ax.transData.inverted().transform(coords[key])
+            plt.text(x, y, 
+                        r' ${}^{' + str(value) + '}$',
+                        fontsize=13,
+                        )
+
+    d = defaultdict(int)
+    coords = defaultdict(tuple)
+    for xy in zeros_xy:
+        key = tuple(np.rint(xy).astype('int'))
+        d[key] += 1
+        coords[key] = xy
+    for key, value in d.items():
+        if value > 1:
+            x, y = ax.transData.inverted().transform(coords[key])
+            plt.text(x, y, 
+                        r' ${}^{' + str(value) + '}$',
+                        fontsize=13,
+                        )
+    plt.title(title, fontsize = 20)
+    return fig
 
 # Save information in 
-def save_info(dir, a, JG, model, param_dict, zip_pkl = True):
+def save_info(dir, a, JG, model, param_dict, order, zip_pkl = True):
 
-    conv = int(np.floor((5/336)*a.shape[1]) + 1)
+    conv = int(np.floor((5/350)*a.shape[1]) + 1)
     if not os.path.exists(dir):
         os.makedirs(dir)
         print(f"Directory '{dir}' created.")
@@ -52,7 +181,7 @@ def save_info(dir, a, JG, model, param_dict, zip_pkl = True):
         
         fig = plt.figure(figsize=(75, 75))
         plt.imshow(JG)
-        plt.title('Ground Truth J Statistics')
+        plt.title('Ground Truth J Statistics', fontsize = 80)
         pdf.savefig(fig)  
         plt.close()
         
@@ -68,7 +197,7 @@ def save_info(dir, a, JG, model, param_dict, zip_pkl = True):
         a_abs = np.abs(a[:]*negated_identity)
         a_summed = np.sum(a_abs[:], axis = 0)
         fig = plt.figure(figsize=(75, 75))
-        plt.imshow(a_summed, cmap = 'seismic', vmin=-1, vmax=1)
+        plt.imshow(scipy.signal.convolve2d(a_summed, np.ones((conv,conv))), cmap = 'seismic', vmin=-1, vmax=1)
         plt.title('No Diagonal Absolute Summed Lags A Coeffs', fontsize = 80)
         pdf.savefig(fig)  
         plt.close()
@@ -77,10 +206,23 @@ def save_info(dir, a, JG, model, param_dict, zip_pkl = True):
         model_params_abs = np.abs(model_params[:]*negated_identity)
         model_params_summed = np.sum(model_params_abs[:], axis = 0)
         fig = plt.figure(figsize=(75, 75))
-        plt.imshow(model_params_summed, cmap = 'seismic', vmin=-1, vmax=1)
+        
+        plt.imshow(scipy.signal.convolve2d(model_params_summed, np.ones((conv,conv))), cmap = 'seismic', vmin=-1, vmax=1)
         plt.title('No Diagonal Absolute Summed Lags Derived Model Params', fontsize = 80)
         pdf.savefig(fig)  
         plt.close()
+
+
+        zs_t, ps_t, zs, ps = find_poles_and_zeros(a, model, order)
+
+        fig = zplane(np.array(zs_t), np.array(ps_t), 'Ground Truth Pole Zero Plot')
+        pdf.savefig(fig)
+        plt.close()
+
+        fig = zplane(np.array(zs),np.array(ps), 'Model Parameters Pole Zero Plot')
+        pdf.savefig(fig)
+        plt.close()
+
 
         # We can also set the file's metadata via the PdfPages object:
         d = pdf.infodict()
@@ -95,7 +237,7 @@ def save_info(dir, a, JG, model, param_dict, zip_pkl = True):
         with open(A_path, 'wb') as file:
             pickle.dump(a, file)
         with open(JG_path, 'wb') as file:
-            pickle.dump(a, file)
+            pickle.dump(JG, file)
 
         with zipfile.ZipFile(dir + "data.zip", "w") as zip_file:
             zip_file.write(model_path, arcname="model.pkl")
@@ -303,7 +445,7 @@ def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2,
     y += noise / np.sqrt(multiplier)
     r_cov = 1 / multiplier
 
-    return f, y, r_cov, p, JG, pow_actives, a
+    return f, y, x, r_cov, p, JG, pow_actives, a
 
 
 '''
@@ -430,7 +572,7 @@ def run_GT_sim(lead_field_gen = False, lf = None, seed = 0, band = "wide", fs = 
         root = None, subject_id = None, session_name = None, trans = None, order = 2, t = 500, n_eigenmodes = 1,
         n_segments = 1, loose = 0.0, depth = 0.0, pca = True, rank = None, lambda_range = None,
         max_iter = 500, max_cyclic_iter = 3, tol = 1e-5, sparsity_factor = 0.0, cv = 5 ,var_thr = 1.0, alpha = .1, 
-        m_active = 10, n_links = 10, warm_start = False, self_history = None, passed_evoked = None, use_es = False, verbose = False, save_dir = None):
+        m_active = 10, n_links = 10, warm_start = False, self_history = None, passed_evoked = None, use_es = False, verbose = False, diff_lf = False, save_dir = None):
     
     if (passed_evoked != None):
         print('using passed in evoked')
@@ -444,10 +586,11 @@ def run_GT_sim(lead_field_gen = False, lf = None, seed = 0, band = "wide", fs = 
     elif (lead_field_gen):
         G, info, noise_cov, fwd, weights = lead_field_generation(root, subject_id, n_eigenmodes, loose, depth, pca, rank, trans)
     elif (type(lf) != type(None)):
+        print('Using passed in lead field')
         G = lf
     else:
         G = None
-    f, y, r_cov, p, JG, pow_actives, a = data_generation(seed, band, fs, natures, n_eigenmodes, G, order, t, m_active, n_links)
+    f, y, x, r_cov, p, JG, pow_actives, a = data_generation(seed, band, fs, natures, n_eigenmodes, G, order, t, m_active, n_links)
     print("Completed data gen")
     plt.imshow(JG)
     plt.show()
@@ -468,8 +611,22 @@ def run_GT_sim(lead_field_gen = False, lf = None, seed = 0, band = "wide", fs = 
         stc_init = surface_ico4_to_surface_eigs(inv_stc, weights, n_eigenmodes)
         for _p in range(order):
             _x[:, _p * n_eigenmodes * 84: (_p+1) * n_eigenmodes * 84] = np.ascontiguousarray(np.roll(stc_init, -_p, axis=0))
+        print(_x.shape)
         stc_init = (_x, np.ascontiguousarray(np.roll(_x, -1, axis=0)))
+        # print(f'mean is {np.mean(x)}')
+        # mean = 0  
+        # std_dev = 0.000001
+        # print(x.shape)
+        # noise = np.random.normal(mean, std_dev, x.shape)
+        # stc_init = x + noise
+        # print(stc_init)
     print(stc_init == None)
+
+    if diff_lf:
+        f, info, noise_cov, fwd, weights = lead_field_generation(root, subject_id, n_eigenmodes, loose, depth, pca, rank, trans)
+        print('Creating diff lf')
+        print(f'Shape of second lead field: {f.shape}')
+
     temp_obj = nlgc_map_opt(y.T, f, r=r_cov, order=p, self_history=p, lambda_range=lambda_range, n_segments=n_segments,
                                 var_thr=var_thr, max_iter=max_iter, max_cyclic_iter=max_cyclic_iter, tol=tol,
                                 sparsity_factor=sparsity_factor, n_eigenmodes = n_eigenmodes, xs_init = stc_init, use_es = use_es, verbose = verbose)
@@ -511,7 +668,7 @@ def run_GT_sim(lead_field_gen = False, lf = None, seed = 0, band = "wide", fs = 
         }
 
         
-        save_info(save_dir, a, JG, temp_obj, param_dict)
+        save_info(save_dir, a, JG, temp_obj, order, param_dict)
 
 
     plt.imshow(JG)
