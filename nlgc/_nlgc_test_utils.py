@@ -671,7 +671,7 @@ def run_GT_sim(lead_field_gen = False, lf = None, seed = 0, band = "wide", fs = 
         }
 
         
-        save_info(save_dir, a, JG, temp_obj, order, param_dict)
+        save_info(dir = save_dir,a = a, JG = JG, model = temp_obj, order = order, param_dict = param_dict)
 
 
     plt.imshow(JG)
