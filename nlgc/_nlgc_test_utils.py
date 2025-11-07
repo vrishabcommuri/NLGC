@@ -151,7 +151,7 @@ def zplane(z, p, title, lim=1):
     return fig
 
 # Save information in 
-def save_info(dir, a, JG, model, param_dict, order, zip_pkl = True):
+def save_info(dir, a, JG, model, order, param_dict, zip_pkl = True):
 
     conv = int(np.floor((5/350)*a.shape[1]) + 1)
     if not os.path.exists(dir):
@@ -472,7 +472,7 @@ verbose: bool
         Default: False, Run GC extraction with verbose mode or not
 '''
 def nlgc_map_opt(M, G, r, order, self_history=None, var_thr=1.0, n_segments=1, lambda_range=None, max_iter=500,
-                 max_cyclic_iter=3, tol=1e-5, sparsity_factor=0.0, cv=5, n_eigenmodes = 2, xs_init = None, use_es = False, verbose = False):
+                 max_cyclic_iter=3, tol=1e-5, sparsity_factor=0.0, cv=5, n_eigenmodes = 2, xs_init = None, use_es = False, patch_idx = None, verbose = False):
     n, nnx = G.shape
     len_patch_idx = nnx // n_eigenmodes
     _, t = M.shape
@@ -483,6 +483,9 @@ def nlgc_map_opt(M, G, r, order, self_history=None, var_thr=1.0, n_segments=1, l
     bias_f = np.zeros((n_segments, 1))
     conv_flag = np.zeros((n_segments, len_patch_idx, len_patch_idx))
     models = []
+    ROI_list = list(range(len_patch_idx))
+    if patch_idx != None:
+        ROI_list = patch_idx
     print('Starting loop')
     for n in range(0, n_segments):
         print('Segment: ', n + 1)
@@ -490,7 +493,7 @@ def nlgc_map_opt(M, G, r, order, self_history=None, var_thr=1.0, n_segments=1, l
         print(nnx)
         d_raw_, bias_r_, bias_f_, model_f, conv_flag_ = \
             _gc_extraction(M[:, n * tt: (n + 1) * tt], G, r, p=order, p1=self_history, n_eigenmodes=n_eigenmodes,
-                           ROIs=list(range(len_patch_idx)), cv=cv, lambda_range=lambda_range, max_iter=max_iter,
+                           ROIs=ROI_list, cv=cv, lambda_range=lambda_range, max_iter=max_iter,
                            max_cyclic_iter=max_cyclic_iter, tol=tol, sparsity_factor=sparsity_factor,
                            use_lapack=True, use_es=use_es, var_thr=var_thr, xs_init = xs_init, verbose = verbose)
         d_raw[n] = d_raw_
@@ -572,7 +575,7 @@ def run_GT_sim(lead_field_gen = False, lf = None, seed = 0, band = "wide", fs = 
         root = None, subject_id = None, session_name = None, trans = None, order = 2, t = 500, n_eigenmodes = 1,
         n_segments = 1, loose = 0.0, depth = 0.0, pca = True, rank = None, lambda_range = None,
         max_iter = 500, max_cyclic_iter = 3, tol = 1e-5, sparsity_factor = 0.0, cv = 5 ,var_thr = 1.0, alpha = .1, 
-        m_active = 10, n_links = 10, warm_start = False, self_history = None, passed_evoked = None, use_es = False, verbose = False, diff_lf = False, save_dir = None):
+        m_active = 10, n_links = 10, warm_start = False, self_history = None, passed_evoked = None, use_es = False, verbose = False, diff_lf = False, patch_idx = None, save_dir = None):
     
     if (passed_evoked != None):
         print('using passed in evoked')
@@ -626,10 +629,10 @@ def run_GT_sim(lead_field_gen = False, lf = None, seed = 0, band = "wide", fs = 
         f, info, noise_cov, fwd, weights = lead_field_generation(root, subject_id, n_eigenmodes, loose, depth, pca, rank, trans)
         print('Creating diff lf')
         print(f'Shape of second lead field: {f.shape}')
-
+    print(patch_idx)
     temp_obj = nlgc_map_opt(y.T, f, r=r_cov, order=p, self_history=p, lambda_range=lambda_range, n_segments=n_segments,
                                 var_thr=var_thr, max_iter=max_iter, max_cyclic_iter=max_cyclic_iter, tol=tol,
-                                sparsity_factor=sparsity_factor, n_eigenmodes = n_eigenmodes, xs_init = stc_init, use_es = use_es, verbose = verbose)
+                                sparsity_factor=sparsity_factor, n_eigenmodes = n_eigenmodes, xs_init = stc_init, use_es = use_es, patch_idx = patch_idx, verbose = verbose)
     
     J = temp_obj.get_J_statistics(alpha)
 
