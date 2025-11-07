@@ -191,7 +191,7 @@ def _solve_for_a(q, s1, s2, a, p1, lambda2, max_iter=5000, tol=1e-3, zeroed_inde
 
     def gfunct(x): return g(x, lambda2)
     def funct(x): return f(x,s1,s2)
-    def proxg_funct(x, t): return proxg(x,t,p1,p,m,zeroed_index, n_eigenmodes)
+    def proxg_funct(x, t): return proxg(x,lambda2*t,p1,p,m,zeroed_index, n_eigenmodes)
     def grad_funct(x): return gradf(x, s1, s2)
 
     fasta = Fasta(funct, gfunct, grad_funct, proxg_funct, beta = .5, n_iter = max_iter)
