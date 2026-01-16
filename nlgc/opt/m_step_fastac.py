@@ -9,20 +9,20 @@ from ._fastac import Fasta
 np.seterr(all='warn')
 import warnings
 
-def g(x, lam):
-    cost = lam*(np.sum(np.abs(x)))
+def g(x, lam, m, p):
+    N = m // 3
+    A = x.reshape(m, p, m).transpose(1, 0, 2)  # p, m, m
+    B = A.reshape(p, N, 3, N, 3)  # p, N, 3, N, 3
+    cost = lam*(np.sqrt((B ** 2).sum(axis=(2, 4))).sum())
     return cost
 
 
-def gradf(x, s1, s2):
-    temp1 = x.dot(s2)
-    grad = temp1
-    grad -= s1
-    grad *= 2
-    return grad
+def gradf(x, s1, s2, Qinv):
+    return 2 * (Qinv.dot(x.dot(s2)) - s1)
 
-def f(x, s1, s2):
-    return -2 * np.einsum('ij,ji->i', x.T, s1).sum() + np.einsum('ij,ji->i', x.T, x.dot(s2)).sum()
+def f(x, s1, s2, Qinv):
+    U = Qinv.dot(x)
+    return -2 * np.einsum('ij,ji->i', U, s1).sum() + np.einsum('ij,ji->i', U.dot(s2), x).sum()
 
 def proxg(x,t, p1, p, m, zeroed_index, n_eigenmodes):
     a = shrink(x, t)
@@ -165,19 +165,15 @@ def _solve_for_a(q, s1, s2, a, p1, lambda2, max_iter=5000, tol=1e-3, zeroed_inde
         return a.T, None
 
     eps = np.finfo(s1.dtype).eps
-    q = np.diag(q)
-    qinv = 1 / q
-    qinv = np.expand_dims(qinv, -1)
-    q_inv_sqrt = np.sqrt(qinv)
-
+    qinv = linalg.inv(q)
     d = np.sqrt(np.diag(s2))
     s2 = s2 / d[:, None]
     s2 = s2 / d[None, :]
     s1 = s1 / d[None, :]
     a = a * d[None, :]
 
-    a = a * q_inv_sqrt
-    s1 = s1 * q_inv_sqrt
+    # a = a * q_inv_sqrt
+    # s1 = s1 * q_inv_sqrt
 
     h_norm = np.linalg.eigvalsh(s2).max()
     tau_max = 0.99 / h_norm
@@ -189,16 +185,15 @@ def _solve_for_a(q, s1, s2, a, p1, lambda2, max_iter=5000, tol=1e-3, zeroed_inde
 
 
 
-    def gfunct(x): return g(x, lambda2)
-    def funct(x): return f(x,s1,s2)
+    def gfunct(x): return g(x, lambda2, m, p)
+    def funct(x): return f(x,s1, s2, qinv)
     def proxg_funct(x, t): return proxg(x,lambda2*t,p1,p,m,zeroed_index, n_eigenmodes)
-    def grad_funct(x): return gradf(x, s1, s2)
+    def grad_funct(x): return gradf(x, s1, s2, qinv)
 
     fasta = Fasta(funct, gfunct, grad_funct, proxg_funct, beta = .5, n_iter = max_iter)
     fasta.learn(a, tol)
 
     a = fasta.coefs_ / d[None, :]
-    a = a / q_inv_sqrt
 
     return a
 
