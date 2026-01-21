@@ -24,23 +24,28 @@ def f(x, s1, s2, Qinv):
     U = Qinv.dot(x)
     return -2 * np.einsum('ij,ji->i', U, s1).sum() + np.einsum('ij,ji->i', U.dot(s2), x).sum()
 
-def proxg(x,t, p1, p, m, zeroed_index, n_eigenmodes):
-    a = shrink(x, t)
+def proxg(x, t, lam, p1, p, m, zeroed_index, n_eigenmodes):
 
-    # #************* make the self history = 0 from lag p1***********
-    for k in range(p1, p):
-        a.flat[k * m::(p * m + 1)] = 0.0
-    # # *************************************************************
-    if zeroed_index is not None:
-        a[zeroed_index] = 0.0
+    N = m // 3
 
-    "************* make the cross history between eigenmodes = 0 from lag p1***********"
-    for l in range(0, m, n_eigenmodes):
-        for u in range(n_eigenmodes):
-            for v in range(n_eigenmodes):
-                if v != u:
-                    a[l+v, l+u::m] = 0
-    "*********************************************************************"
+    # View as blocks: (p, N, 3, N, 3)
+    A = x.reshape(m, p, m).transpose(1, 0, 2)     # (p, m, m)
+    B = A.reshape(p, N, 3, N, 3)                  # (p, N, 3, N, 3)
+
+    # Frobenius norm per block: (p, N, N)
+    nrm = np.sqrt((B ** 2).sum(axis=(2, 4)))
+
+    # shrink factors: (p, N, N)
+    thresh = t * lam
+    scale = np.maximum(1.0 - thresh / np.maximum(nrm, 1e-12), 0.0)
+
+    # apply scale to each 3x3 block (broadcast over the 3x3 axes)
+    B_shrunk = B * scale[:, :, None, :, None]
+
+    # reshape back to (m, m*p)
+    out_lag = B_shrunk.reshape(p, m, m)
+    a = out_lag.transpose(1, 0, 2).reshape(m, m * p)
+    
     return a
 
 def calculate_ss(x_bar, s_bar, b, m, p):
@@ -187,7 +192,7 @@ def _solve_for_a(q, s1, s2, a, p1, lambda2, max_iter=5000, tol=1e-3, zeroed_inde
 
     def gfunct(x): return g(x, lambda2, m, p)
     def funct(x): return f(x,s1, s2, qinv)
-    def proxg_funct(x, t): return proxg(x,lambda2*t,p1,p,m,zeroed_index, n_eigenmodes)
+    def proxg_funct(x, t): return proxg(x,t, lambda2, p1, p, m,zeroed_index, n_eigenmodes)
     def grad_funct(x): return gradf(x, s1, s2, qinv)
 
     fasta = Fasta(funct, gfunct, grad_funct, proxg_funct, beta = .5, n_iter = max_iter)
@@ -455,7 +460,7 @@ def _take_care(a, n_eigenmodes):
     return a_
 
 
-def solve_for_q(q, s1, s2, s3, a, lambda2, alpha=0, beta=0,):
+def solve_for_q(q, s1, s2, s3, a, m, p, lambda2, alpha=0, beta=0,):
     """One-step sol to learn q, state-noise covariance matrix
 
     Parameters
@@ -477,6 +482,14 @@ def solve_for_q(q, s1, s2, s3, a, lambda2, alpha=0, beta=0,):
     non-zero alpha, beta values imposes Inv-Gamma(alpha*n/2 - 1, beta*n) prior on q's.
     This equivalent to alpha*n - 2 additional observations that sum to beta*n.
     """
+
+    N = m // 3
+    
+    sigma = s3 - a.dot(s1.T) - s1.dot(a.T) + a.dot(s2).dot(a.T)
+
+    
+    
+
     diag_indices = np.diag_indices_from(q)
     q__ = q[diag_indices]
     temp = np.einsum('ij,ji->i', a, s2.T)
