@@ -202,85 +202,6 @@ def _solve_for_a(q, s1, s2, a, p1, lambda2, max_iter=5000, tol=1e-3, zeroed_inde
 
     return a
 
-    # changes = np.zeros(max_iter+1)
-    # fs = np.zeros(max_iter+1)
-    # changes[0] = 1
-    # num = 1
-    # f_old = -2 * np.einsum('ij,ji->i', a.T, s1).sum() + np.einsum('ij,ji->i', a.T, a.dot(s2)).sum()
-    # fs[0] = f_old
-    # temp1 = a.dot(s2)
-    # for i in range(max_iter):
-    #     if i % 250 == 0:
-    #         logger.info(f"{current_process().name}: iterate {i}/{max_iter}")
-    #     if changes[i] < tol or num == 0:
-    #         break
-    #     _a[:] = a
-    #     # Calculate gradient
-    #     grad = temp1
-    #     grad -= s1
-    #     grad *= 2
-
-    #     # # old implementation of aggregate eigenmodes
-    #     # grad = _take_care(grad, n_eigenmodes)
-
-    #     # Find opt step-size
-    #     warnings.filterwarnings('error')
-    #     try:
-    #         # tau = 0.5 * (grad * grad).sum() / (np.diag(grad.dot(s2.dot(grad.T))) * qinv.ravel()).sum()
-    #         temp2 = grad.dot(s2.T)
-    #         den = ((temp2 * grad).sum(axis=1)).sum()
-    #         num = (grad * grad).sum()
-    #         tau = 0.5 * num / den
-    #         tau = max(tau, tau_max)
-    #     except Warning:
-    #         raise RuntimeError(f'Q possibly contains negative value {q.min()}')
-    #     warnings.filterwarnings('ignore')
-
-    #     while True:
-    #         # Forward step
-    #         temp = _a.copy()
-    #         temp -= tau * grad
-
-    #         # Backward (proximal) step
-    #         a = shrink(temp, lambda2 * tau)
-
-    #         # #************* make the self history = 0 from lag p1***********
-    #         for k in range(p1, p):
-    #             a.flat[k * m::(p * m + 1)] = 0.0
-    #         # # *************************************************************
-    #         if zeroed_index is not None:
-    #             a[zeroed_index] = 0.0
-
-    #         "************* make the cross history between eigenmodes = 0 from lag p1***********"
-    #         for l in range(0, m, n_eigenmodes):
-    #             for u in range(n_eigenmodes):
-    #                 for v in range(n_eigenmodes):
-    #                     if v != u:
-    #                         a[l+v, l+u::m] = 0
-    #         "*********************************************************************"
-
-    #         temp1 = a.dot(s2)
-    #         f_new = -2 * np.einsum('ij,ji->i', a.T, s1).sum() + np.einsum('ij,ji->i', a.T, temp1).sum()
-    #         diff = (a - _a)
-    #         f_new_upper = f_old + (grad * diff).sum() + (diff ** 2).sum() / (2 * tau)
-    #         if f_new < f_new_upper or tau / tau_max < 1e-10:
-    #             break
-    #         else:
-    #             tau /= 2
-
-    #     num = np.sum(diff ** 2)
-    #     den = np.sum(_a ** 2)
-    #     f_old = f_new
-    #     changes[i+1] = 1 if den == 0 else np.sqrt(num / den)
-
-    #     fs[i+1] = f_old
-
-    # a = a / d[None, :]
-    # a = a / q_inv_sqrt
-
-    # return a, changes
-
-
 @vectorize([float32(float32, float32),
             float64(float64, float64)], cache=True)
 def shrink(x, t):
@@ -460,7 +381,7 @@ def _take_care(a, n_eigenmodes):
     return a_
 
 
-def solve_for_q(q, s1, s2, s3, a, m, p, lambda2, alpha=0, beta=0,):
+def solve_for_q(q, s1, s2, s3, a, m, p, n_samples, lambda2, alpha=0, beta=0,):
     """One-step sol to learn q, state-noise covariance matrix
 
     Parameters
@@ -482,27 +403,10 @@ def solve_for_q(q, s1, s2, s3, a, m, p, lambda2, alpha=0, beta=0,):
     non-zero alpha, beta values imposes Inv-Gamma(alpha*n/2 - 1, beta*n) prior on q's.
     This equivalent to alpha*n - 2 additional observations that sum to beta*n.
     """
-
-    N = m // 3
     
     sigma = s3 - a.dot(s1.T) - s1.dot(a.T) + a.dot(s2).dot(a.T)
-
-    
-    
-
-    diag_indices = np.diag_indices_from(q)
-    q__ = q[diag_indices]
-    temp = np.einsum('ij,ji->i', a, s2.T)
-    temp3 = np.einsum('ij,ji->i', s2 - a.dot(s3), a.T)
-    if s1.ndim == 2:
-        q_ = s1[diag_indices]
-    else:
-        q_ = s1
-    q_ -= (temp + temp3)
-    q_ += beta
-    q_ /= (1 + alpha)
-    q[diag_indices] = np.abs(q_)
-    rel_change = ((q__ - q_) ** 2).sum() / (q__ ** 2).sum()
+    q_ = (sigma + beta)/(n_samples + alpha)
+    rel_change = ((q - q_) ** 2).sum() / (q ** 2).sum()
 
     return q, rel_change
 
