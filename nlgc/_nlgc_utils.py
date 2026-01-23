@@ -29,6 +29,7 @@ from .opt import *
 from ._stat import fdr_control
 from ._bias_utils import debias_deviances
 from ._gen_utils import LazyProperty
+from scipy.spatial import cKDTree
 
 _default_lambda_range = np.asanyarray([5e-1, 2e-1, 1e-1, 5e-2, 2e-2, 1e-2, 5e-3, 2e-3, 1e-3, 5e-4, ])
 
@@ -402,6 +403,39 @@ def _reduce_lead_field(forward, src, n_eigenmodes, data=None):
     return weights, group_eigenmodes.T, grouped_vertidx, src_flips
 
 
+def _reduce_lead_field_vol(forward, src, n_eigenmodes, data=None):
+    import mne
+    if data is None:
+        logger.info('Using the raw forward solution')
+        data = np.swapaxes(forward['sol']['data'], 0, 1)  # (n_sources, n_channels)
+    data = data.copy()
+    print(f'Data shape is {data.shape}')
+    if isinstance(src, mne.Forward):
+        src = src['src']
+
+    groups = _prepare_leadfield_reduction_vol(src, forward['src'])
+    n_voxels = forward['src'][0]['nuse']
+
+    group_eigenmodes = np.zeros((sum(n_groups) * n_eigenmodes,) + data.shape[1:], dtype=data.dtype)
+    
+    lhweights = []
+    rhweights = []
+    
+    for i, (this_grouped_vertidx, this_grouped_vertidx_no_offset) in \
+                enumerate(zip(grouped_vertidx, grouped_vertidx_no_offset)):
+        eig_src_weights, this_group_eigenmodes, percentage_explained = _truncatedsvd(data[this_grouped_vertidx], n_eigenmodes, return_pecentage_exaplained=True)
+        print(f"patch {i}: vertices {data[this_grouped_vertidx].shape[0]} -> {n_eigenmodes} leadfield reduction explained {percentage_explained*100:.3f}% variance")
+        group_eigenmodes[i * n_eigenmodes:(i + 1) * n_eigenmodes] = this_group_eigenmodes
+        if i < n_groups[0]:
+            lhweights.append([eig_src_weights, this_grouped_vertidx_no_offset])
+        else:
+            rhweights.append([eig_src_weights, this_grouped_vertidx_no_offset])
+        print(this_group_eigenmodes.shape)
+    weights = [lhweights, rhweights]
+    src_flips = [None] * sum(n_groups)
+    return weights, group_eigenmodes.T, grouped_vertidx, src_flips
+
+
 def _prepare_label_extraction(labels, src):
     vertno = [s['vertno'] for s in src]
     label_vertidx = []
@@ -480,6 +514,26 @@ def _prepare_leadfield_reduction(src_target, src_origin):
             grouped_vertidx_no_offset.append(vertidx_no_offset)
             
     return grouped_vertidx_no_offset, grouped_vertidx, n_groups, n_verts
+
+def _prepare_leadfield_reduction_vol(src_target, src_origin):
+
+    # fine and coarse coordinates in RAS
+    coarse_rr = src_target[0]['rr'][src_target[0]['inuse'] > 0] # gets vertex xyz locs ('rr's) for the ones used by this ss
+    fine_rr = src_origin[0]['rr'][src_origin[0]['inuse'] > 0]
+
+
+    # build KD-tree on coarse grid; bascially 3d voronoi parcellation
+    tree = cKDTree(coarse_rr)
+
+    # for each fine voxel, find nearest coarse voxel
+    dist, idx = tree.query(fine_rr)
+
+    # now build groups
+    groups = {i: [] for i in range(len(coarse_rr))}
+    for fine_idx, coarse_idx in enumerate(idx):
+        groups[coarse_idx].append(fine_idx)
+    
+    return groups 
 
 
 def _extract_label_eigenmodes(fwd, labels, data=None, mode='mean', n_eigenmodes=2, allow_empty=False,

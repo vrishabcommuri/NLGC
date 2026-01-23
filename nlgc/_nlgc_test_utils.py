@@ -278,6 +278,15 @@ pow_actives: power of sources
 a: ground truth a matrix which VAR model is trying to estimate, contains GC links
 
 '''
+
+
+def lead_field_generation_vol(root, subject_id, n_eigenmodes, loose=0.0, depth=0.0, pca=True, rank=None, trans = None):
+    full_empty_room_path = root + "meg/" + subject_id + "/" + subject_id + "_emptyroom-raw.fif"
+    raw_empty_room = mne.io.read_raw_fif(full_empty_room_path)
+    info = raw_empty_room.info
+    noise_cov = mne.compute_raw_covariance(raw_empty_room, tmin=0, tmax=None)
+
+    
 # Assume folder setup follows eelbrain pipeline
 def lead_field_generation(root, subject_id, n_eigenmodes, loose=0.0, depth=0.0, pca=True, rank=None, trans = None):
     full_empty_room_path = root + "meg/" + subject_id + "/" + subject_id + "_emptyroom-raw.fif"
