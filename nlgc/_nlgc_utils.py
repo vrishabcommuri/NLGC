@@ -325,7 +325,20 @@ def _prepare_eigenmodes(info, forward, noise_cov, labels, n_eigenmodes=2, loose=
                                                                                depth_dict, loose, rank)
 
     if not is_fixed_orient(forward):
-        raise ValueError(f"Cannot work with free orientation forward: {forward}")
+        print('The lead field is not fixed-orientation using mixed source space method')
+        if isinstance(labels, Forward):
+            weights, G, label_vertidxw = _reduce_lead_field_vol(forward, labels, n_eigenmodes, data=gain.T)
+            label_names = []
+            for i, label in enumerate(labels['src']):
+                label_names.extend(map(lambda x: f'{i}-{x}', label['vertno']))
+        elif isinstance(labels, SourceSpaces):
+            weights, G, label_vertidx = _reduce_lead_field_vol(forward, labels, n_eigenmodes, data=gain.T)
+            label_names = []
+            for i, label in enumerate(labels):
+                label_names.extend(map(lambda x: f'{i}-{x}', label['vertno']))
+        else:
+            raise ValueError('Not supported {:s}: labels are expected to be either an mne.SourceSpace or'
+                             'mne.Forward object.'.format(labels))
 
     # whiten the data
     logger.info('Whitening data matrix.')
@@ -356,7 +369,8 @@ def _prepare_eigenmodes(info, forward, noise_cov, labels, n_eigenmodes=2, loose=
     sel = np.any(G, axis=0)
     G = G[:, sel].copy()
     label_vertidx = [i for select, i in zip(sel, label_vertidx) if select]
-    src_flip = [i for select, i in zip(sel, src_flip) if select]
+    if is_fixed_orient(forward):
+        src_flip = [i for select, i in zip(sel, src_flip) if select]
     discarded_labels = []
     j = 0
     for i, sel_ in enumerate(sel[::n_eigenmodes]):
@@ -407,33 +421,29 @@ def _reduce_lead_field_vol(forward, src, n_eigenmodes, data=None):
     import mne
     if data is None:
         logger.info('Using the raw forward solution')
-        data = np.swapaxes(forward['sol']['data'], 0, 1)  # (n_sources, n_channels)
-    data = data.copy()
+        data = forward['sol']['data'].view().reshape(np.sum([s['nuse'] for s in forward['src']]), 3, -1)
     print(f'Data shape is {data.shape}')
     if isinstance(src, mne.Forward):
         src = src['src']
 
-    groups = _prepare_leadfield_reduction_vol(src, forward['src'])
-    n_voxels = forward['src'][0]['nuse']
+    groups, coarse_rr = _prepare_leadfield_reduction_vol(src, forward['src'])
+    group_eigenmodes = np.zeros(len(groups)*n_eigenmodes, data.shape[-1], dtype=data.dtype)
+    weights = []
+    
+    for coarse_idx, members in groups.items():
+        idxs = np.empty(0, dtype=int)
+        for i in range(len(forward['src'])):
+            if len(members[i]) > 0:
+                idxs = np.append(idxs, np.array(members[i]) + int(np.sum([forward['src'][j]['nuse'] for j in range(i)])))
+            else:
+                continue
+        subvoxels = data[idxs, :, :].reshape(-1, data.shape[-1])
+        eig_src_weights, this_group_eigenmodes, percentage_explained = _truncatedsvd(subvoxels, n_eigenmodes, return_pecentage_exaplained=True)
+        group_eigenmodes[coarse_idx * n_eigenmodes:(coarse_idx + 1) * n_eigenmodes] = this_group_eigenmodes
+        print(f"patch {coarse_idx}: vertices {subvoxels.shape[0]} -> {n_eigenmodes} leadfield reduction explained {percentage_explained*100:.3f}% variance")
+        weights.append(eig_src_weights)
+    return weights, group_eigenmodes.T, groups
 
-    group_eigenmodes = np.zeros((sum(n_groups) * n_eigenmodes,) + data.shape[1:], dtype=data.dtype)
-    
-    lhweights = []
-    rhweights = []
-    
-    for i, (this_grouped_vertidx, this_grouped_vertidx_no_offset) in \
-                enumerate(zip(grouped_vertidx, grouped_vertidx_no_offset)):
-        eig_src_weights, this_group_eigenmodes, percentage_explained = _truncatedsvd(data[this_grouped_vertidx], n_eigenmodes, return_pecentage_exaplained=True)
-        print(f"patch {i}: vertices {data[this_grouped_vertidx].shape[0]} -> {n_eigenmodes} leadfield reduction explained {percentage_explained*100:.3f}% variance")
-        group_eigenmodes[i * n_eigenmodes:(i + 1) * n_eigenmodes] = this_group_eigenmodes
-        if i < n_groups[0]:
-            lhweights.append([eig_src_weights, this_grouped_vertidx_no_offset])
-        else:
-            rhweights.append([eig_src_weights, this_grouped_vertidx_no_offset])
-        print(this_group_eigenmodes.shape)
-    weights = [lhweights, rhweights]
-    src_flips = [None] * sum(n_groups)
-    return weights, group_eigenmodes.T, grouped_vertidx, src_flips
 
 
 def _prepare_label_extraction(labels, src):
@@ -515,26 +525,27 @@ def _prepare_leadfield_reduction(src_target, src_origin):
             
     return grouped_vertidx_no_offset, grouped_vertidx, n_groups, n_verts
 
-def _prepare_leadfield_reduction_vol(src_target, src_origin):
-
+def _prepare_leadfield_reduction_vol(vol_target, src_origin):
     # fine and coarse coordinates in RAS
-    coarse_rr = src_target[0]['rr'][src_target[0]['inuse'] > 0] # gets vertex xyz locs ('rr's) for the ones used by this ss
-    fine_rr = src_origin[0]['rr'][src_origin[0]['inuse'] > 0]
-
-
-    # build KD-tree on coarse grid; bascially 3d voronoi parcellation
+    coarse_rr = vol_target[0]['rr'][vol_target[0]['inuse'] > 0]
     tree = cKDTree(coarse_rr)
 
-    # for each fine voxel, find nearest coarse voxel
-    dist, idx = tree.query(fine_rr)
+    groups = {i: {j : [] for j in range(len(src_origin))} for i in range(len(coarse_rr))}
 
-    # now build groups
-    groups = {i: [] for i in range(len(coarse_rr))}
-    for fine_idx, coarse_idx in enumerate(idx):
-        groups[coarse_idx].append(fine_idx)
+    idxs = []
+    for i, s in enumerate(src_origin):
+        
+        src_rr = s['rr'][s['inuse'] > 0]
+
+        _, src_idx = tree.query(src_rr)
+        idxs.append(src_idx)
+
+        for fine_idx, coarse_idx in enumerate(src_idx):
+            groups[coarse_idx][i].append(fine_idx)
+
+
+    return groups, coarse_rr
     
-    return groups 
-
 
 def _extract_label_eigenmodes(fwd, labels, data=None, mode='mean', n_eigenmodes=2, allow_empty=False,
         trans=None, mri_resolution=True, ):
