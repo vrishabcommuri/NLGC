@@ -11,7 +11,7 @@ from mne import (Forward, Label)
 from mne.forward import is_fixed_orient
 import warnings
 warnings.filterwarnings('ignore')
-
+from .ggc.multiprocess_ggc import GGC, ggc_map
 import matplotlib.pyplot as plt
 import mne
 from matplotlib.backends.backend_pdf import PdfPages
@@ -151,7 +151,7 @@ def zplane(z, p, title, lim=1):
     return fig
 
 # Save information in 
-def save_info(dir, a, JG, model, order, param_dict, zip_pkl = True):
+def save_info(dir, a, JG, model, order, param_dict, ggc_model = None, J_GGC = None, ggc_model_extras = None,  zip_pkl = True):
 
     conv = int(np.floor((5/350)*a.shape[1]) + 1)
     if not os.path.exists(dir):
@@ -192,6 +192,14 @@ def save_info(dir, a, JG, model, order, param_dict, zip_pkl = True):
         plt.close()
 
 
+        if ggc_model != None:
+            fig = plt.figure(figsize=(75, 75))
+            plt.imshow(J_GGC)
+            plt.title('Ground Truth GGC J Statistics', fontsize = 80)
+            pdf.savefig(fig)  
+            plt.close()
+
+            
         negated_identity = np.abs(np.eye(a.shape[1]) - 1)
 
         a_abs = np.abs(a[:]*negated_identity)
@@ -232,6 +240,8 @@ def save_info(dir, a, JG, model, order, param_dict, zip_pkl = True):
         model_path = dir + 'model.pkl'
         A_path = dir + 'G-Coeffs.pkl'
         JG_path = dir + 'JG.pkl'
+
+        
         with open(model_path, 'wb') as file:
             pickle.dump(model, file)
         with open(A_path, 'wb') as file:
@@ -239,14 +249,34 @@ def save_info(dir, a, JG, model, order, param_dict, zip_pkl = True):
         with open(JG_path, 'wb') as file:
             pickle.dump(JG, file)
 
+
+        if ggc_model != None:
+            ggc_model_path = dir + 'ggc_model.pkl'
+            J_GGC_path = dir + 'J_GGC.pkl'
+            ggc_model_extras_path = dir + 'ggc_model_extras.pkl'
+            with open(ggc_model_path, 'wb') as file:
+                pickle.dump(ggc_model, file)
+            with open(J_GGC_path, 'wb') as file:
+                pickle.dump(J_GGC, file)
+            with open(ggc_model_extras_path, 'wb') as file:
+                pickle.dump(ggc_model_extras, file)
+
         with zipfile.ZipFile(dir + "data.zip", "w") as zip_file:
             zip_file.write(model_path, arcname="model.pkl")
             zip_file.write(A_path, arcname="G-Coeffs.pkl") 
             zip_file.write(JG_path, arcname= 'JG.pkl')
+            if ggc_model != None:
+                zip_file.write(ggc_model_path, arcname='ggc_model.pkl')
+                zip_file.write(J_GGC_path, arcname='J_GGC.pkl')
+                zip_file.write(ggc_model_extras_path, arcname='ggc_model_extras.pkl')
 
         os.remove(model_path)
         os.remove(A_path)
         os.remove(JG_path)
+        if ggc_model != None:
+            os.remove(ggc_model_path)
+            os.remove(J_GGC_path)
+            os.remove(ggc_model_extras_path)
 
         with open(dir + "params.json", "w") as f:
             json.dump(param_dict, f, indent=4)
@@ -575,7 +605,8 @@ def run_GT_sim(lead_field_gen = False, lf = None, seed = 0, band = "wide", fs = 
         root = None, subject_id = None, session_name = None, trans = None, order = 2, t = 500, n_eigenmodes = 1,
         n_segments = 1, loose = 0.0, depth = 0.0, pca = True, rank = None, lambda_range = None,
         max_iter = 500, max_cyclic_iter = 3, tol = 1e-5, sparsity_factor = 0.0, cv = 5 ,var_thr = 1.0, alpha = .1, 
-        m_active = 10, n_links = 10, warm_start = False, self_history = None, passed_evoked = None, use_es = False, verbose = False, diff_lf = False, patch_idx = None, save_dir = None):
+        m_active = 10, n_links = 10, warm_start = False, self_history = None, passed_evoked = None, use_es = False, 
+        verbose = False, diff_lf = False, patch_idx = None, save_dir = None, run_ggc = False, ggc_kwargs = None):
     
     if (passed_evoked != None):
         print('using passed in evoked')
@@ -630,12 +661,29 @@ def run_GT_sim(lead_field_gen = False, lf = None, seed = 0, band = "wide", fs = 
         print('Creating diff lf')
         print(f'Shape of second lead field: {f.shape}')
     print(patch_idx)
-    temp_obj = nlgc_map_opt(y.T, f, r=r_cov, order=p, self_history=p, lambda_range=lambda_range, n_segments=n_segments,
-                                var_thr=var_thr, max_iter=max_iter, max_cyclic_iter=max_cyclic_iter, tol=tol,
-                                sparsity_factor=sparsity_factor, n_eigenmodes = n_eigenmodes, xs_init = stc_init, use_es = use_es, patch_idx = patch_idx, verbose = verbose)
-    
-    J = temp_obj.get_J_statistics(alpha)
+    if run_ggc and ggc_kwargs != None and ggc_kwargs['model_params'] != None:
+        temp_obj = nlgc_map_opt(y.T, f, r=r_cov, order=p, self_history=p, lambda_range=lambda_range, n_segments=n_segments,
+                                    var_thr=var_thr, max_iter=max_iter, max_cyclic_iter=max_cyclic_iter, tol=tol,
+                                    sparsity_factor=sparsity_factor, n_eigenmodes = n_eigenmodes, xs_init = stc_init, use_es = use_es, patch_idx = patch_idx, verbose = verbose)
+        
+        J = temp_obj.get_J_statistics(alpha)
 
+    if run_ggc:
+        print('Running GGC')
+        if ggc_kwargs != None:
+            model_kwargs = ggc_kwargs['model_kwargs']
+            multitaper_kwargs = ggc_kwargs['multitaper_kwargs']
+            if ggc_kwargs['model_params'] != None:
+                model_params = ggc_kwargs['model_params']
+            else:
+                model_params = temp_obj._model_f
+        else:
+            model_kwargs = None
+            multitaper_kwargs = None
+        ggc_obj = GGC(model_params, model_kwargs, multitaper_kwargs)
+        ggc_mt, pexp, obs, binary_mask, modelkwargs, multitaperkwargs, J_GGC \
+            = ggc_map(ggc_obj, y.T, f, r_cov, order=p, self_history=p, var_thr=var_thr, max_iter=max_iter, max_cyclic_iter=max_cyclic_iter, tol=tol, sparsity_factor=sparsity_factor, n_eigenmodes = n_eigenmodes, xs_init = stc_init, use_es = use_es, patch_idx = patch_idx, verbose = verbose)
+        print('Completed GGC')
 
     if save_dir != None:
         data_gen_dict = {
@@ -645,6 +693,11 @@ def run_GT_sim(lead_field_gen = False, lf = None, seed = 0, band = "wide", fs = 
             'natures': natures,
             'm_active': m_active,
             'n_links': n_links,
+        }
+
+        ggc_dict = {
+            'run_ggc': run_ggc,
+            'ggc_kwargs': ggc_kwargs,
         }
 
         if lead_field_gen:
@@ -668,10 +721,18 @@ def run_GT_sim(lead_field_gen = False, lf = None, seed = 0, band = "wide", fs = 
             'self_history': self_history,
             'lead_field_gen': lead_gen_dict,
             'passed_evoked': passed_evoked,
+            'ggc_params':ggc_dict,
         }
 
+        ggc_model_extras = {
+            'pexp': pexp,
+            'obs': obs,
+            'binary_mask': binary_mask
+        }
         
-        save_info(dir = save_dir,a = a, JG = JG, model = temp_obj, order = order, param_dict = param_dict)
+
+        
+        save_info(dir = save_dir,a = a, JG = JG, model = temp_obj, order = order, param_dict = param_dict, ggc_model = ggc_obj, J_GGC = J_GGC, ggc_model_extras = ggc_model_extras)
 
 
     plt.imshow(JG)
