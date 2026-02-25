@@ -192,12 +192,12 @@ def save_info(dir, a, JG, model, order, param_dict, ggc_model = None, J_GGC = No
         plt.close()
 
 
-        if ggc_model != None:
-            fig = plt.figure(figsize=(75, 75))
-            plt.imshow(J_GGC)
-            plt.title('Ground Truth GGC J Statistics', fontsize = 80)
-            pdf.savefig(fig)  
-            plt.close()
+        # if ggc_model != None:
+        #     fig = plt.figure(figsize=(75, 75))
+        #     plt.imshow(J_GGC)
+        #     plt.title('Ground Truth GGC J Statistics', fontsize = 80)
+        #     pdf.savefig(fig)  
+        #     plt.close()
 
             
         negated_identity = np.abs(np.eye(a.shape[1]) - 1)
@@ -661,12 +661,15 @@ def run_GT_sim(lead_field_gen = False, lf = None, seed = 0, band = "wide", fs = 
         print('Creating diff lf')
         print(f'Shape of second lead field: {f.shape}')
     print(patch_idx)
-    if run_ggc and ggc_kwargs != None and ggc_kwargs['model_params'] != None:
+    if run_ggc and ggc_kwargs != None and ggc_kwargs['model_params'] == None:
         temp_obj = nlgc_map_opt(y.T, f, r=r_cov, order=p, self_history=p, lambda_range=lambda_range, n_segments=n_segments,
                                     var_thr=var_thr, max_iter=max_iter, max_cyclic_iter=max_cyclic_iter, tol=tol,
                                     sparsity_factor=sparsity_factor, n_eigenmodes = n_eigenmodes, xs_init = stc_init, use_es = use_es, patch_idx = patch_idx, verbose = verbose)
+    else:
+        temp_obj = ggc_kwargs['model']
         
-        J = temp_obj.get_J_statistics(alpha)
+    
+    J = temp_obj.get_J_statistics(alpha)
 
     if run_ggc:
         print('Running GGC')
@@ -680,9 +683,7 @@ def run_GT_sim(lead_field_gen = False, lf = None, seed = 0, band = "wide", fs = 
         else:
             model_kwargs = None
             multitaper_kwargs = None
-        ggc_obj = GGC(model_params, model_kwargs, multitaper_kwargs)
-        ggc_mt, pexp, obs, binary_mask, modelkwargs, multitaperkwargs, J_GGC \
-            = ggc_map(ggc_obj, y.T, f, r_cov, order=p, self_history=p, var_thr=var_thr, max_iter=max_iter, max_cyclic_iter=max_cyclic_iter, tol=tol, sparsity_factor=sparsity_factor, n_eigenmodes = n_eigenmodes, xs_init = stc_init, use_es = use_es, patch_idx = patch_idx, verbose = verbose)
+        ggc_obj, ggc_mt, pexp, obs, binary_mask, modelkwargs, multitaperkwargs, J_GGC = ggc_map(model_params, model_kwargs, multitaper_kwargs, alpha=0.1, frameno=0, J=None)
         print('Completed GGC')
 
     if save_dir != None:
@@ -697,7 +698,8 @@ def run_GT_sim(lead_field_gen = False, lf = None, seed = 0, band = "wide", fs = 
 
         ggc_dict = {
             'run_ggc': run_ggc,
-            'ggc_kwargs': ggc_kwargs,
+            'model_kwargs': ggc_kwargs['model_kwargs'] if ggc_kwargs != None else None,
+            'multitaper_kwargs': ggc_kwargs['multitaper_kwargs'] if ggc_kwargs != None else None,
         }
 
         if lead_field_gen:
@@ -727,10 +729,9 @@ def run_GT_sim(lead_field_gen = False, lf = None, seed = 0, band = "wide", fs = 
         ggc_model_extras = {
             'pexp': pexp,
             'obs': obs,
-            'binary_mask': binary_mask
+            'binary_mask': binary_mask,
+            'ggc_mt': ggc_mt,
         }
-        
-
         
         save_info(dir = save_dir,a = a, JG = JG, model = temp_obj, order = order, param_dict = param_dict, ggc_model = ggc_obj, J_GGC = J_GGC, ggc_model_extras = ggc_model_extras)
 

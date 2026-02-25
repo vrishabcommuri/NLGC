@@ -247,5 +247,5 @@ def ggc_map(modelparams, modelkwargs=None, multitaperkwargs=None, alpha=0.1, fra
     ggc = GGC(modelkwargs=modelkwargs, multitaperkwargs=multitaperkwargs)
     ggc_mt = ggc.fit_multitaper(modelparams)
     pexp, obs, binary_mask = ggc.significance_map(ggc_mt, alpha=alpha, frameno=frameno)
-    return ggc_mt, pexp, obs, binary_mask, ggc.modelkwargs, ggc.multitaperkwargs, J
+    return ggc, ggc_mt, pexp, obs, binary_mask, ggc.modelkwargs, ggc.multitaperkwargs, J
 
