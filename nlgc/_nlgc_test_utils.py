@@ -337,8 +337,12 @@ def lead_field_generation(root, subject_id, n_eigenmodes, loose=0.0, depth=0.0, 
 
     return G, info, noise_cov, f_opt, weights
 
-def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2, G = None, p = 2, t = 500, m_active = 10, n_links = 10):
+
+
+def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2, G = None, p = 2, t = 500, m_active = 10, n_links = 10, target_spec_rad = .9):
     print(f't is {t}')
+    if p < 1:
+        raise Exception('p should be at least 1')
     np.random.seed(seed)
     if (type(G) == type(None)):
         n = 100 # number of sensors
@@ -351,52 +355,73 @@ def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2,
         # 168*168*2 155*60*50
     else:
         n, m = G.shape
-        print(G.shape)
+
+        print(f'G shape is {G.shape}')
+
         n_patches = m // n_eigenmodes
 
-
+    burnin = max(200, 10*fs, 10* p * m)
     
     q = 0.01*np.eye(m)
-
-    a = np.zeros(p * m * m, dtype=np.float64)
-    a.shape = (p, m, m)
-    print(n_patches)
-    print(a.shape)
+    a = np.zeros((p, m, m), dtype=np.float64)
     idx_i = np.random.randint(0, m, size = m_active)
-    print(idx_i)
-    for i in range(m_active):
-        q[idx_i[i], idx_i[i]] = 1
-        a[0, idx_i[i], idx_i[i]] = 0.9
-    
-    # if n_links > m_active:
-    #     print('n_links is greater than m_active setting it to size m_active')
-    #     n_links = m_active
+
+    print(f'n_patches is {n_patches}')
+    print(f'A shape is {a.shape}')
+    print(f' idx_i is {idx_i}')
+
+
+    if band == 'wide':
+        for ii in idx_i:
+            q[ii, ii] = 1
+            a[0, ii, ii] = 0.9
+    else:
+
+        band_dict = {
+            'delta': (0.1, 4),
+            'theta': (4, 8),
+            'alpha': (8, 12),
+            'beta': (13, 23)
+        }
+
+        if band not in band_dict:
+            raise Exception(f'band {band} not implemented')
+        
+        f_low, f_high = band_dict[band]
+
+        f0 = np.random.uniform(f_low, f_high, size=m_active)
+        for ii, f in zip(idx_i, f0):
+            w0 = 2 * np.pi * f / fs
+            q[ii, ii] = 1
+            a[0, ii, ii] = 0.9*2*np.cos(w0)
         
     # (i,j) pairs to add a link to
-    for i, j in zip(np.random.randint(0, m_active, n_links), 
-                    np.random.randint(0, m_active, n_links)):
+    i_idx = np.random.randint(0, m_active, n_links)
+    j_idx = np.random.randint(0, m_active - 1, n_links)
+    j_idx += (j_idx >= i_idx)  # to prevent self-links, if j >= i, add 1 to j
+    for i, j in zip(i_idx, j_idx):
         # (i,j) pair has a random link nature
         if natures == 'all':
             for k in range(p):
-                a[k, idx_i[i], idx_i[j]] = np.random.uniform(-0.5, 0.5)
+                a[k, idx_i[i], idx_i[j]] = np.random.uniform(-0.4, 0.4)
         elif natures == 'excitatory':
             for k in range(p):
-                a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, 0.5)
+                a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, 0.4)
         elif natures == 'inhibitory':
             for k in range(p):
-                a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, -0.5)
+                a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, -0.4)
         elif natures == 'sharpening1':
             for k in range(p):
                 if k % 2 == 0:
-                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, 0.5)
+                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, 0.4)
                 else:      
-                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, -0.5) 
+                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, -0.4) 
         elif natures == 'sharpening2':
             for k in range(p):
                 if k % 2 == 0:
-                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, -0.5)
+                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, -0.4)
                 else:      
-                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, 0.5) 
+                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, 0.4) 
         else:
             raise Exception(f"nature {natures} not implemented")
 
@@ -419,33 +444,10 @@ def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2,
     for i in range(p):
         x[i] = 0.0
 
-    if band == 'wide':
-        for i in range(p, t):
-            x[i] = u[i]
-            for k in range(p):
-                x[i] += a[k].dot(x[i - k - 1])
-    else:
-        # added artificial data filtering
-        if (band == 'delta'):
-            sos = scipy.signal.butter(25, [0.1, 4], 'bp', fs=fs, output='sos')
-            filt = scipy.signal.sosfilt(sos, u.T).T
-        elif (band == 'theta'):
-            sos = scipy.signal.butter(25, [4, 8], 'bp', fs=fs, output='sos')
-            filt = scipy.signal.sosfilt(sos, u.T).T
-        elif (band == 'alpha'):
-            sos = scipy.signal.butter(25, [8, 12], 'bp', fs=fs, output='sos')
-            filt = scipy.signal.sosfilt(sos, u.T).T
-        elif (band == 'beta'):
-            sos = scipy.signal.butter(25, [13, 23], 'bp', fs=fs, output='sos')
-            filt = scipy.signal.sosfilt(sos, u.T).T
-        else:
-            raise Exception(f'band {band} not implemented')
-        
-        for i in range(p, t):
-            x[i] = filt[i]
-
-            for k in range(p):
-                x[i] += a[k].dot(x[i - k - 1])
+    for i in range(p, t):
+        x[i] = u[i]
+        for k in range(p):
+            x[i] += a[k].dot(x[i - k - 1])
 
 
     print('band', band, x.shape)
