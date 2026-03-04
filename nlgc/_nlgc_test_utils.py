@@ -347,7 +347,8 @@ def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2,
     if (type(G) == type(None)):
         n = 100 # number of sensors
         
-        n_patches = 10
+        n_patches = 20
+        print(f'n_patches is {n_patches}')
         m = n_patches*n_eigenmodes # number of sources
 
         
@@ -394,6 +395,7 @@ def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2,
             w0 = 2 * np.pi * f / fs
             q[ii, ii] = 1
             a[0, ii, ii] = 0.9*2*np.cos(w0)
+            a[1, ii, ii] = -(.9**2)
         
     # (i,j) pairs to add a link to
     i_idx = np.random.randint(0, m_active, n_links)
@@ -403,25 +405,25 @@ def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2,
         # (i,j) pair has a random link nature
         if natures == 'all':
             for k in range(p):
-                a[k, idx_i[i], idx_i[j]] = np.random.uniform(-0.4, 0.4)
+                a[k, idx_i[i], idx_i[j]] = np.random.uniform(-0.5, 0.5)
         elif natures == 'excitatory':
             for k in range(p):
-                a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, 0.4)
+                a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, 0.5)
         elif natures == 'inhibitory':
             for k in range(p):
-                a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, -0.4)
+                a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, -0.5)
         elif natures == 'sharpening1':
             for k in range(p):
                 if k % 2 == 0:
-                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, 0.4)
+                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, 0.5)
                 else:      
-                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, -0.4) 
+                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, -0.5) 
         elif natures == 'sharpening2':
             for k in range(p):
                 if k % 2 == 0:
-                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, -0.4)
+                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, -0.5)
                 else:      
-                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, 0.4) 
+                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, 0.5) 
         else:
             raise Exception(f"nature {natures} not implemented")
 
@@ -439,7 +441,16 @@ def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2,
     
     l = linalg.cholesky(q, lower=True)
     u = u.dot(l.T)
-    
+
+    print(f'Max of u {np.max(u)}')
+
+    u /= np.max(u)
+
+    print(f'Max of u scaled{np.max(u)}')
+
+    print(f'Max of a {np.max(a)}')
+    a /= (np.max(a)/.9)
+    print(f'Max of a scaled {np.max(a)}')
     x = np.empty((t, m), dtype=np.float64)
     for i in range(p):
         x[i] = 0.0
@@ -462,10 +473,12 @@ def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2,
     if (type(G) == type(None)):
         f = np.random.randn(n, m)
         f /= np.sqrt(np.sum(f ** 2, axis=0))
+        print(f'Max of f {np.max(f)}')
         
     else:
         f = G
 
+    print(f'max of x {np.max(x)}')
     y = x.dot(f.T)
     px = y.dot(y.T).trace()
 
@@ -473,7 +486,11 @@ def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2,
     
     pn = noise.dot(noise.T).trace()
     multiplier = 1e2 * pn / px
+    print(f'pn {pn}')
+    print(f'px {px}')
 
+    print(f'Multiplier {multiplier}')
+    print(f'Max noise/sqrt measurement noise {np.max(noise/np.sqrt(multiplier))}')
     y += noise / np.sqrt(multiplier)
     r_cov = 1 / multiplier
 
@@ -681,7 +698,7 @@ def run_GT_sim(lead_field_gen = False, lf = None, seed = 0, band = "wide", fs = 
             if ggc_kwargs['model_params'] != None:
                 model_params = ggc_kwargs['model_params']
             else:
-                model_params = temp_obj._model_f
+                model_params = temp_obj._model_f[0]._parameters
         else:
             model_kwargs = None
             multitaper_kwargs = None
