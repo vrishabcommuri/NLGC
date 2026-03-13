@@ -319,7 +319,14 @@ def _learn_reduced_model_parallel(link_index, info_y, info_f, info_bias_r, info_
 
 def _prepare_eigenmodes(info, forward, noise_cov, labels, n_eigenmodes=2, loose=0.0, depth=0.0, pca=True, rank=None,
         mode='svd_flip'):
-    depth_dict = {'exp': depth, 'limit_depth_chs': 'whiten', 'combine_xyz': 'fro', 'limit': None}
+    if not is_fixed_orient(forward):
+        depth_dict = None
+    else:
+        depth_dict = {'exp': depth, 'limit_depth_chs': 'whiten', 'combine_xyz': 'fro', 'limit': None}
+
+    if not is_fixed_orient(forward) and loose == 0.0:
+        print('Loose orientation must be set to 1.0 to be applied to free-orientation forward solutions, changing it to 1.0. If unsure set loose to auto')
+        loose = 1.0
 
     forward, gain, gain_info, whitener, source_weighting, mask = _prepare_gain(forward, info, noise_cov, pca,
                                                                                depth_dict, loose, rank)
