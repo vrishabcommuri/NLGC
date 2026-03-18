@@ -309,7 +309,7 @@ a: ground truth a matrix which VAR model is trying to estimate, contains GC link
 
 '''
 # Assume folder setup follows eelbrain pipeline
-def lead_field_generation(root, subject_id, n_eigenmodes, loose=0.0, depth=0.0, pca=True, rank=None, trans = None):
+def lead_field_generation(root, subject_id, src_space, n_eigenmodes, loose=0.0, depth=0.0, pca=True, rank=None, trans = None):
     full_empty_room_path = root + "meg/" + subject_id + "/" + subject_id + "_emptyroom-raw.fif"
     raw_empty_room = mne.io.read_raw_fif(full_empty_room_path)
     info = raw_empty_room.info
@@ -325,17 +325,28 @@ def lead_field_generation(root, subject_id, n_eigenmodes, loose=0.0, depth=0.0, 
     else:
         trans_file = trans
     bem_folder= root + "/bem/" + subject_id + "/"
-    f_opt = mne.make_forward_solution(info, trans_file, src = bem_folder + subject_id + "-ico-4-src.fif",
-                                        bem = bem_folder + subject_id  + "-inner_skull-bem-sol.fif")
-    f_opt_ico_1 = mne.make_forward_solution(info, trans_file, src = bem_folder + subject_id  + "-ico-1-src.fif",
-                                        bem = bem_folder + subject_id + "-inner_skull-bem-sol.fif")
-    f_opt_data = f_opt['sol']
-    weights, G, label_vertidx, label_names, gain_info, whitener = _prepare_eigenmodes(info, f_opt, noise_cov, f_opt_ico_1, n_eigenmodes=n_eigenmodes, loose=loose, depth=depth, pca=pca, rank=rank,
+    subjects_dir = root
+    if src_space == 'surf':
+        fwd_origin = mne.make_forward_solution(info, trans_file, src = bem_folder + subject_id + "-ico-4-src.fif",
+                                            bem = bem_folder + subject_id  + "-inner_skull-bem-sol.fif")
+        fwd_target = mne.make_forward_solution(info, trans_file, src = bem_folder + subject_id  + "-ico-1-src.fif",
+                                            bem = bem_folder + subject_id + "-inner_skull-bem-sol.fif")
+    elif src_space == 'vol' or src_space == 'mixed':
+        src_origin = mne.setup_volume_source_space(subject = subject_id, pos = 5.0, subjects_dir = subjects_dir, surface = bem_folder + 'inner_skull.surf')
+        src_target = mne.setup_volume_source_space(subject = subject_id, pos = 20.0, subjects_dir = subjects_dir, surface = bem_folder + 'inner_skull.surf')
+        if src_space == 'mixed':
+            surf_src = mne.setup_source_space(subject = subject_id, spacing = 'ico4', surface = 'white', subjects_dir = subjects_dir, add_dist = 'patch', verbose = None)
+            src_origin = surf_src + src_origin
+        
+        fwd_origin = mne.make_forward_solution(info = info, trans = trans_file, src = src_origin, bem = bem_folder + subject_id + "-inner_skull-bem-sol.fif", ignore_ref = True)
+        fwd_target = mne.make_forward_solution(info = info, trans = trans_file, src = src_target, bem = bem_folder + subject_id + "-inner_skull-bem-sol.fif", ignore_ref = True)
+    # fwd_origin_data = fwd_origin['sol']
+    weights, G, label_vertidx, label_names, gain_info, whitener = _prepare_eigenmodes(info, fwd_origin, noise_cov, fwd_target, n_eigenmodes=n_eigenmodes, loose=loose, depth=depth, pca=pca, rank=rank,
     mode='svd_flip')
     G_normalizing_factor = np.sqrt(np.sum(G ** 2, axis=0))
     G /= G_normalizing_factor
 
-    return G, info, noise_cov, f_opt, weights
+    return G, info, noise_cov, fwd_origin, weights
 
 
 
@@ -620,13 +631,16 @@ verbose: bool
 save_dir: string
         Default: None, Pass in directory for saving analytics and model/data
 '''
-def run_GT_sim(lead_field_gen = False, lf = None, seed = 0, band = "wide", fs = 50, natures = 'all', 
+def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, band = "wide", fs = 50, natures = 'all', 
         root = None, subject_id = None, session_name = None, trans = None, order = 2, t = 500, n_eigenmodes = 1,
         n_segments = 1, loose = 0.0, depth = 0.0, pca = True, rank = None, lambda_range = None,
         max_iter = 500, max_cyclic_iter = 3, tol = 1e-5, sparsity_factor = 0.0, cv = 5 ,var_thr = 1.0, alpha = .1, 
         m_active = 10, n_links = 10, warm_start = False, self_history = None, passed_evoked = None, use_es = False, 
         verbose = False, diff_lf = False, patch_idx = None, save_dir = None, run_ggc = False, ggc_kwargs = None):
     
+    if src_space not in ['surf', 'vol', 'mixed']:
+        raise Exception(f'src_space {src_space} not implemented')
+
     if (passed_evoked != None):
         print('using passed in evoked')
         noise_cov = mne.read_cov(passed_evoked['noise_cov'])
