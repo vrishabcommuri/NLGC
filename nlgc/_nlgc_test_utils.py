@@ -356,9 +356,9 @@ def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2,
         raise Exception('p should be at least 1')
     np.random.seed(seed)
     if (type(G) == type(None)):
-        n = 100 # number of sensors
+        n = 40 # number of sensors
         
-        n_patches = 20
+        n_patches = int(np.floor(2*n/n_eigenmodes))
         print(f'n_patches is {n_patches}')
         m = n_patches*n_eigenmodes # number of sources
 
@@ -374,7 +374,7 @@ def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2,
 
     burnin = max(200, 10*fs, 10* p * m)
     
-    q = 0.01*np.eye(m)
+    q = 0.001*np.eye(m)
     a = np.zeros((p, m, m), dtype=np.float64)
     idx_i = np.random.randint(0, m, size = m_active)
 
@@ -385,8 +385,8 @@ def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2,
 
     if band == 'wide':
         for ii in idx_i:
-            q[ii, ii] = 1
-            a[0, ii, ii] = 0.9
+            q[ii, ii] = .1
+            a[0, ii, ii] = target_spec_rad
     else:
 
         band_dict = {
@@ -404,10 +404,13 @@ def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2,
         f0 = np.random.uniform(f_low, f_high, size=m_active)
         for ii, f in zip(idx_i, f0):
             w0 = 2 * np.pi * f / fs
-            q[ii, ii] = 1
-            a[0, ii, ii] = 0.45*2*np.cos(w0)
-            a[1, ii, ii] = -(.45**2)
-        
+
+            q[ii, ii] = .1
+            a[0, ii, ii] = target_spec_rad*2*np.cos(w0)
+            print(f'Pole {target_spec_rad*2*np.cos(w0)}')
+            a[1, ii, ii] = -(target_spec_rad**2)
+    link_power = target_spec_rad/2
+    print(f'Link Power {link_power}')
     # (i,j) pairs to add a link to
     i_idx = np.random.randint(0, m_active, n_links)
     j_idx = np.random.randint(0, m_active - 1, n_links)
@@ -416,25 +419,25 @@ def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2,
         # (i,j) pair has a random link nature
         if natures == 'all':
             for k in range(p):
-                a[k, idx_i[i], idx_i[j]] = np.random.uniform(-0.25, 0.25)
+                a[k, idx_i[i], idx_i[j]] = np.random.uniform(-link_power, link_power)
         elif natures == 'excitatory':
             for k in range(p):
-                a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, 0.25)
+                a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, link_power)
         elif natures == 'inhibitory':
             for k in range(p):
-                a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, -0.25)
+                a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, -link_power)
         elif natures == 'sharpening1':
             for k in range(p):
                 if k % 2 == 0:
-                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, 0.25)
+                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, link_power)
                 else:      
-                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, -0.25) 
+                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, -link_power) 
         elif natures == 'sharpening2':
             for k in range(p):
                 if k % 2 == 0:
-                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, -0.25)
+                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, -link_power)
                 else:      
-                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, 0.25) 
+                    a[k, idx_i[i], idx_i[j]] = np.random.uniform(0, link_power) 
         else:
             raise Exception(f"nature {natures} not implemented")
 
@@ -446,30 +449,29 @@ def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2,
     for ei in range(n_eigenmodes):
         for ej in range(n_eigenmodes):
             JG += JG_[ei::n_eigenmodes, ej::n_eigenmodes]
-
-    u = np.random.standard_normal(m * t)
-    u.shape = (t, m)
+    
+    T = burnin + t
+    u = np.random.standard_normal(m * T)
+    u.shape = (T, m)
     
     l = linalg.cholesky(q, lower=True)
     u = u.dot(l.T)
 
     print(f'Max of u {np.max(u)}')
-
-    u /= (np.median(u)/.001)
     # u /= np.sqrt(np.sum(u ** 2, axis=0))
     print(f'Max of u scaled{np.max(u)}')
-
+    print(f'Med of u {np.median(u)}')
 
     print(f'Max of a scaled {np.max(a)}')
-    x = np.empty((t, m), dtype=np.float64)
+    x = np.zeros((T, m), dtype=np.float64)
     for i in range(p):
         x[i] = 0.0
-
-    for i in range(p, t):
+    for i in range(p, T):
         x[i] = u[i]
         for k in range(p):
             x[i] += a[k].dot(x[i - k - 1])
 
+    x = x[burnin:]
 
     print('band', band, x.shape)
     for i in range(x.T.shape[0]):
@@ -481,13 +483,17 @@ def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2,
         pow_actives.append(np.mean(x[:, i]**2))
 
     if (type(G) == type(None)):
-        f = np.random.randn(n, m) + np.eye(n, m)
+        f = np.random.randn(n, m)
         f /= np.sqrt(np.sum(f ** 2, axis=0))
         
         
     else:
         f = G
     print(f'Max of f {np.max(f)}')
+    print(f'Mean of f {np.mean(f)}')
+    print(f'Median of f {np.median(f)}')
+    print(f'min of f {np.min(f)}')
+
     print(f'max of x {np.max(x)}')
     print(f'median of x {np.median(x)}')
     y = x.dot(f.T)
@@ -631,7 +637,7 @@ verbose: bool
 save_dir: string
         Default: None, Pass in directory for saving analytics and model/data
 '''
-def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, band = "wide", fs = 50, natures = 'all', 
+def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, band = "wide", fs = 50, natures = 'all', target_spec_rad = .45,
         root = None, subject_id = None, session_name = None, trans = None, order = 2, t = 500, n_eigenmodes = 1,
         n_segments = 1, loose = 0.0, depth = 0.0, pca = True, rank = None, lambda_range = None,
         max_iter = 500, max_cyclic_iter = 3, tol = 1e-5, sparsity_factor = 0.0, cv = 5 ,var_thr = 1.0, alpha = .1, 
@@ -657,7 +663,7 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
         G = lf
     else:
         G = None
-    f, y, x, r_cov, p, JG, pow_actives, a = data_generation(seed, band, fs, natures, n_eigenmodes, G, order, t, m_active, n_links)
+    f, y, x, r_cov, p, JG, pow_actives, a = data_generation(seed, band, fs, natures, n_eigenmodes, G, order, t, m_active, n_links, target_spec_rad)
     print("Completed data gen")
     plt.imshow(JG)
     plt.show()
@@ -694,7 +700,7 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
         print('Creating diff lf')
         print(f'Shape of second lead field: {f.shape}')
     print(patch_idx)
-    if run_ggc and ggc_kwargs != None and ggc_kwargs['model_params'] == None:
+    if run_ggc == False or (run_ggc and ggc_kwargs != None and ggc_kwargs['model_params'] == None):
         temp_obj = nlgc_map_opt(y.T, f, r=r_cov, order=p, self_history=p, lambda_range=lambda_range, n_segments=n_segments,
                                     var_thr=var_thr, max_iter=max_iter, max_cyclic_iter=max_cyclic_iter, tol=tol,
                                     sparsity_factor=sparsity_factor, n_eigenmodes = n_eigenmodes, xs_init = stc_init, use_es = use_es, patch_idx = patch_idx, verbose = verbose)
@@ -758,15 +764,18 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
             'passed_evoked': passed_evoked,
             'ggc_params':ggc_dict,
         }
+        if run_ggc:
+            ggc_model_extras = {
+                'pexp': pexp,
+                'obs': obs,
+                'binary_mask': binary_mask,
+                'ggc_mt': ggc_mt,
+            }
+        if run_ggc:
+            save_info(dir = save_dir,a = a, JG = JG, model = temp_obj, order = order, param_dict = param_dict, ggc_model = ggc_obj, J_GGC = J_GGC, ggc_model_extras = ggc_model_extras)
+        else:
+            save_info(dir = save_dir,a = a, JG = JG, model = temp_obj, order = order, param_dict = param_dict)
 
-        ggc_model_extras = {
-            'pexp': pexp,
-            'obs': obs,
-            'binary_mask': binary_mask,
-            'ggc_mt': ggc_mt,
-        }
-        
-        save_info(dir = save_dir,a = a, JG = JG, model = temp_obj, order = order, param_dict = param_dict, ggc_model = ggc_obj, J_GGC = J_GGC, ggc_model_extras = ggc_model_extras)
 
 
     plt.imshow(JG)
