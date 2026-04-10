@@ -15,7 +15,7 @@ from mne.utils import logger
 
 from .e_step import sskf, sskfcv, align_cast, sskf_prediction
 from .m_step_fastac import (calculate_ss, solve_for_a, solve_for_q, compute_ll,
-                     compute_cross_ll, compute_Q)
+                     compute_cross_ll, compute_Q, solve_for_a_indepdiag)
 
 # filename = os.path.realpath(os.path.join(__file__, '..', '..', "debug.log"))
 # logging.basicConfig(filename=filename, level=logging.DEBUG)
@@ -62,7 +62,7 @@ class NeuraLVAR:
         self._use_lapack = use_lapack
         self._n_eigenmodes = 1 if n_eigenmodes is None else n_eigenmodes
 
-    def _fit(self, y, f, r, lambda2=None, lb=None, la=None, max_iter=500, max_cyclic_iter=3, a_init=None, q_init=None,
+    def _fit(self, y, f, r, lambda2=None, lb=None, max_iter=500, max_cyclic_iter=3, a_init=None, q_init=None,
             rel_tol=0.01, xs=None, alpha=0.0, beta=0.0, fixed_a=False, fixed_q=False, verbose=False):
         """Internal function that fits the model from given data
 
@@ -147,8 +147,8 @@ class NeuraLVAR:
 
             for _ in range(max_cyclic_iter):
                 if not fixed_a:
-                    if lb is not None and la is not None:
-                        a_upper, changes = solve_for_a_indepdiag(q_upper, s1, s2, a_upper, p1, lb=lb, la=la, max_iter=max_iter,
+                    if lb is not None:
+                        a_upper = solve_for_a_indepdiag(q_upper, s1, s2, a_upper, p1, lb=lb, la=lambda2, max_iter=max_iter,
                                                    tol=min(1e-4, rel_tol), zeroed_index=zeroed_index,
                                                    update_only_target=False, n_eigenmodes=self._n_eigenmodes)
                     else:
@@ -309,7 +309,7 @@ class NeuraLVAR:
         bias = sum([bias_by_idx(i, q_upper, a_, x_, s_, b, m, p, self._zeroed_index) for i in source])
         return bias
 
-    def fit(self, y, f, r, lambda2=None, lb=None, la=None, max_iter=500, 
+    def fit(self, y, f, r, lambda2=None, lb=None, max_iter=500, 
             max_cyclic_iter=3, a_init=None, q_init=None, xs_init=None, 
             rel_tol=0.0001, restriction=None, alpha=0.0, beta=0.0, use_es=None, 
             verbose=False):
@@ -342,7 +342,7 @@ class NeuraLVAR:
         if (restriction is None or re.search('->', restriction)) is False:
             raise ValueError(f"restriction:{restriction} should be None or should have format 'i->j'!")
         self.restriction = restriction
-        a, q_upper, lls, f, r, zeroed_index, _, x_ = self._fit(y, f, r, lambda2=lambda2, lb=None, la=None, max_iter=max_iter,
+        a, q_upper, lls, f, r, zeroed_index, _, x_ = self._fit(y, f, r, lambda2=lambda2, lb=lb, max_iter=max_iter,
                                                                max_cyclic_iter=max_cyclic_iter, a_init=a_init,
                                                                q_init=q_init, rel_tol=rel_tol, xs = xs_init, alpha=alpha, beta=beta, verbose=verbose)
         self._parameters = (a, f, q_upper, r, x_)
@@ -475,7 +475,7 @@ class NeuraLVARCV(NeuraLVAR):
         self.n_jobs = n_jobs
         NeuraLVAR.__init__(self, order, self_history, n_eigenmodes, copy, standardize, normalize, use_lapack)
 
-    def _cvfit(self, split, info_y, info_f, info_r, info_cv, info_pred, splits, lambda_range, max_iter=500,
+    def _cvfit(self, split, info_y, info_f, info_r, info_cv, info_pred, splits, lambda_range, lambda_b, max_iter=500,
             max_cyclic_iter=3, a_init=None, q_init=None, rel_tol=1e-5, alpha=0.0, beta=0.0, xs_init=None, verbose=False):
         
         mne.set_log_level(verbose)
@@ -533,7 +533,7 @@ class NeuraLVARCV(NeuraLVAR):
                 a_init = a_.copy()
                 # q_init = q_upper.copy() * lambda_range[i-1] / lambda_range[i]
             a_, q_upper, lls, _, _, _, xs, _ = \
-                self._fit(y_train, f, r, lambda2=lambda2, max_iter=max_iter,
+                self._fit(y_train, f, r, lambda2=lambda2, lb = lambda_b, max_iter=max_iter,
                           max_cyclic_iter=max_cyclic_iter,
                           a_init=a_init, q_init=q_init.copy(), rel_tol=rel_tol, xs=xs_init_train, alpha=alpha, beta=beta)
             # # different criteria for cross-validation
@@ -550,8 +550,88 @@ class NeuraLVARCV(NeuraLVAR):
         for shm in (shm_y, shm_f, shm_r, shm_c):
             shm.close()
         return None
+    
 
-    def fit(self, y, f, r, lambda_range=None, max_iter=500, max_cyclic_iter=3, 
+
+    def _cvfit_indepdiag(self, split, info_y, info_f, info_r, info_cv, info_pred, splits, lr_a, lr_b, max_iter=500,
+            max_cyclic_iter=3, a_init=None, q_init=None, rel_tol=1e-5, alpha=0.0, beta=0.0, xs_init=None, verbose=False):
+        
+        mne.set_log_level(verbose)
+
+        """Utility function to be used by self.fit()
+
+        Parameters
+        ----------
+        split :
+        info_y :
+        info_f :
+        info_r :
+        info_cv :
+        splits :
+        lambda_range :
+        max_iter :
+        max_cyclic_iter :
+        a_init :
+        q_init :
+        rel_tol :
+
+        Returns
+        -------
+        val
+
+        """
+        logger.info(f"{current_process().name} working on {split}th split")
+        logger.debug(f"{current_process().name} working on {split}th split")
+        try:
+            y, shm_y = link_share_memory(info_y)
+            f, shm_f = link_share_memory(info_f)
+            r, shm_r = link_share_memory(info_r)
+            cv, shm_c = link_share_memory(info_cv)
+            pred, shm_pred = link_share_memory(info_pred)
+        except BaseException as e:
+            logger.error("Could not link to memory")
+            raise e
+
+        logger.debug(f"{current_process().name} successfully read the shared memory")
+        train, test = splits[split]
+        y_train, y_test = y[:, train], y[:, test]
+        xs_init_train = None
+        if not xs_init is None:
+            # only need training split for warm start since the validation step doesn't need initialization
+            _x_train = np.ascontiguousarray(xs_init[0][train, :]) 
+            x__train = np.ascontiguousarray(xs_init[1][train, :])
+            xs_init_train = (_x_train, x__train)
+        
+        logger.debug(f"{current_process().name} successfully split the data")
+        for i, la in enumerate(lr_a * np.sqrt(y.shape[-1])):
+            for j, lb in enumerate(lr_b * np.sqrt(y.shape[-1])):
+                la = la / np.sqrt(y_train.shape[-1])
+                lb = lb / np.sqrt(y_train.shape[-1])
+                logger.info(f"{current_process().name} {split} doing {la} and {lb}")
+                logger.debug(f"{current_process().name} {split} doing {la} and {lb}")
+                if i > 0:
+                    a_init = a_.copy()
+                    # q_init = q_upper.copy() * lambda_range[i-1] / lambda_range[i]
+                a_, q_upper, lls, _, _, _, xs, _ = \
+                    self._fit(y_train, f, r, lambda2=None, lb = lb, la = la, max_iter=max_iter,
+                            max_cyclic_iter=max_cyclic_iter,
+                            a_init=a_init, q_init=q_init.copy(), rel_tol=rel_tol, xs=xs_init_train, alpha=alpha, beta=beta)
+                # # different criteria for cross-validation
+                cv[0, split, i] = self.compute_ll_(y_test, (a_, f, q_upper, r))
+                cv[1, split, i] = la * self.compute_norm_one(a_)
+
+                # cv[2, split, i] = self.compute_ll(y_test, (a_, f, q_upper, r))
+                # cv[3, split, i] = self.compute_crossvalidation_metric(y_test, (a_, f, q_upper, r))
+                # cv[4, split, i] = self.compute_Q(y_test, (a_, f, q_upper, r))
+                # cv[5, split, i] = self.compute_logsum_q(y_test, max_iter=max_iter, max_cyclic_iter=max_cyclic_iter,
+                #                                  rel_tol=rel_tol, alpha=alpha, beta=beta, args=(a_, f, q_upper, r))
+                pred[split, i][:] = self.get_prediction(y, (a_, f, q_upper, r)).T
+
+        for shm in (shm_y, shm_f, shm_r, shm_c):
+            shm.close()
+        return None
+
+    def fit(self, y, f, r, lambda_range=None, lambda_b = None, max_iter=500, max_cyclic_iter=3, 
             a_init=None, q_init=None, xs_init=None, rel_tol=1e-5, 
             restriction=None, alpha=0.0, beta=0.0, use_es=True, verbose=False):
         logger.info(f"fit max iter = {max_iter}")
@@ -608,7 +688,7 @@ class NeuraLVARCV(NeuraLVAR):
         shared_r, info_r, shm_r = create_shared_mem(r)
         shared_cv_mat, info_cv, shm_c = create_shared_mem(cv_mat)
         shared_pred_mat, info_pred, shm_p = create_shared_mem(pred_mat)
-        initargs = (info_y, info_f, info_r, info_cv, info_pred, cvsplits, lambda_range,
+        initargs = (info_y, info_f, info_r, info_cv, info_pred, cvsplits, lambda_range, lambda_b,
                     max_iter, max_cyclic_iter, a_init, q_init, rel_tol, alpha, beta, xs_init, verbose)
 
         logger.info('Starting cross-validation')

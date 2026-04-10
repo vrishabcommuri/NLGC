@@ -498,10 +498,13 @@ def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2,
     print(f'median of x {np.median(x)}')
     y = x.dot(f.T)
     px = y.dot(y.T).trace()
-
+    # test = linalg.norm(np.dot(y, y.T) / y.shape[1], ord='fro')
+    print(f'Px: {px}')
+    print(f'x_test: {x_test}')
     noise = np.random.standard_normal(y.shape)
     
     pn = noise.dot(noise.T).trace()
+    print(f'Pn{pn}')
     multiplier = 1e2 * pn / px
     print(f'pn {pn}')
     print(f'px {px}')
@@ -537,7 +540,7 @@ use_es: bool
 verbose: bool
         Default: False, Run GC extraction with verbose mode or not
 '''
-def nlgc_map_opt(M, G, r, order, self_history=None, var_thr=1.0, n_segments=1, lambda_range=None, max_iter=500,
+def nlgc_map_opt(M, G, r, order, self_history=None, var_thr=1.0, n_segments=1, lambda_range=None, lb = None, max_iter=500,
                  max_cyclic_iter=3, tol=1e-5, sparsity_factor=0.0, cv=5, n_eigenmodes = 2, xs_init = None, use_es = False, patch_idx = None, verbose = False):
     n, nnx = G.shape
     len_patch_idx = nnx // n_eigenmodes
@@ -559,7 +562,7 @@ def nlgc_map_opt(M, G, r, order, self_history=None, var_thr=1.0, n_segments=1, l
         print(nnx)
         d_raw_, bias_r_, bias_f_, model_f, conv_flag_ = \
             _gc_extraction(M[:, n * tt: (n + 1) * tt], G, r, p=order, p1=self_history, n_eigenmodes=n_eigenmodes,
-                           ROIs=ROI_list, cv=cv, lambda_range=lambda_range, max_iter=max_iter,
+                           ROIs=ROI_list, cv=cv, lambda_range=lambda_range, lambda1 = lb, max_iter=max_iter,
                            max_cyclic_iter=max_cyclic_iter, tol=tol, sparsity_factor=sparsity_factor,
                            use_lapack=True, use_es=use_es, var_thr=var_thr, xs_init = xs_init, verbose = verbose)
         d_raw[n] = d_raw_
@@ -639,7 +642,7 @@ save_dir: string
 '''
 def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, band = "wide", fs = 50, natures = 'all', target_spec_rad = .45,
         root = None, subject_id = None, session_name = None, trans = None, order = 2, t = 500, n_eigenmodes = 1,
-        n_segments = 1, loose = 0.0, depth = 0.0, pca = True, rank = None, lambda_range = None,
+        n_segments = 1, loose = 0.0, depth = 0.0, pca = True, rank = None, lambda_range = None, lb = None,
         max_iter = 500, max_cyclic_iter = 3, tol = 1e-5, sparsity_factor = 0.0, cv = 5 ,var_thr = 1.0, alpha = .1, 
         m_active = 10, n_links = 10, warm_start = False, self_history = None, passed_evoked = None, use_es = False, 
         verbose = False, diff_lf = False, patch_idx = None, save_dir = None, run_ggc = False, ggc_kwargs = None):
@@ -753,6 +756,7 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
         param_dict = {
             'best_lambda': temp_obj._model_f[0].lambda_,
             'lambda_range': lambda_range,
+            'lb': lb,
             'order': order,
             'n_eigenmodes': n_eigenmodes,
             't': t,

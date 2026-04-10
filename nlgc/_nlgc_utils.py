@@ -138,12 +138,12 @@ def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, var_thr=1.0, ROIs=[], alpha=0
     n, m = f.shape
     nx = m // n_eigenmodes
 
-    if lambda1 is not None:
-        assert(lambda2 is not None)
-    if lambda2 is not None:
-        assert(lambda1 is not None)
-        if verbose:
-            print("individual lambdas specified for a and b coeffcients, ignoring lambda range")
+    # if lambda1 is not None:
+    #     assert(lambda2 is not None)
+    # if lambda2 is not None:
+    #     assert(lambda1 is not None)
+        # if verbose:
+        #     print("individual lambdas specified for a and b coeffcients, ignoring lambda range")
 
     kwargs = {
         'use_es': use_es,
@@ -182,9 +182,8 @@ def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, var_thr=1.0, ROIs=[], alpha=0
             print(y.shape, xs_init[0].shape)
         model_f.fit(y, f, r * np.eye(n), lambda_range, a_init=a_init, q_init=q_init.copy(), xs_init = xs_init, **kwargs)
     else:
-        model_f = NeuraLVAR(p, p1, n_eigenmodes, use_lapack=use_lapack)
-        lambda_range = lambda_range[0]
-        model_f.fit(y, f, r * np.eye(n), lambda_range, lb=lambda1, la=lambda2, a_init=a_init, q_init=q_init.copy(), xs_init = xs_init, **kwargs)
+        model_f = NeuraLVARCV(p, p1, n_eigenmodes, 10, cv, n_jobs, use_lapack=use_lapack)
+        model_f.fit(y, f, r * np.eye(n), lambda_range, lambda_b =lambda1, a_init=a_init, q_init=q_init.copy(), xs_init = xs_init, **kwargs)
 
     bias_f = model_f.compute_bias(y)
 

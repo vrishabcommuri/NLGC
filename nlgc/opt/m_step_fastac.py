@@ -13,6 +13,9 @@ def g(x, lam):
     cost = lam*(np.sum(np.abs(x)))
     return cost
 
+def g_indepdiag(x, lb, la):
+    cost = lb*(np.sum(np.abs(np.diag(x)))) + la*(np.sum(np.abs(x)) - np.sum(np.abs(np.diag(x))))
+    return cost
 
 def gradf(x, s1, s2):
     temp1 = x.dot(s2)
@@ -26,6 +29,25 @@ def f(x, s1, s2):
 
 def proxg(x,t, p1, p, m, zeroed_index, n_eigenmodes):
     a = shrink(x, t)
+
+    # #************* make the self history = 0 from lag p1***********
+    for k in range(p1, p):
+        a.flat[k * m::(p * m + 1)] = 0.0
+    # # *************************************************************
+    if zeroed_index is not None:
+        a[zeroed_index] = 0.0
+
+    "************* make the cross history between eigenmodes = 0 from lag p1***********"
+    for l in range(0, m, n_eigenmodes):
+        for u in range(n_eigenmodes):
+            for v in range(n_eigenmodes):
+                if v != u:
+                    a[l+v, l+u::m] = 0
+    "*********************************************************************"
+    return a
+
+def proxg_indepdiag(x, t1, t2, p1, p, m, zeroed_index, n_eigenmodes):
+    a = shrink_indepdiag(x, t1, t2)
 
     # #************* make the self history = 0 from lag p1***********
     for k in range(p1, p):
@@ -125,10 +147,10 @@ def solve_for_a_indepdiag(q, s1, s2, a, p1, lb, la, max_iter=5000, tol=1e-3, zer
             q_ = q_[:, None]
         target_ = np.asarray(zeroed_index[0]) - min(zeroed_index[0])
         source = np.asarray(zeroed_index[1])
-        a_, changes = _solve_for_a_indepdiag(q_, s1_, s2, a_, p1, lb, la, max_iter=max_iter, tol=tol,
+        a_ = _solve_for_a_indepdiag(q_, s1_, s2, a_, p1, lb, la, max_iter=max_iter, tol=tol,
                                    zeroed_index=(target_, source), n_eigenmodes=n_eigenmodes)
         a[target] = a_
-        return a, changes
+        return a
 
 
 # @njit(cache=True)
@@ -202,83 +224,6 @@ def _solve_for_a(q, s1, s2, a, p1, lambda2, max_iter=5000, tol=1e-3, zeroed_inde
 
     return a
 
-    # changes = np.zeros(max_iter+1)
-    # fs = np.zeros(max_iter+1)
-    # changes[0] = 1
-    # num = 1
-    # f_old = -2 * np.einsum('ij,ji->i', a.T, s1).sum() + np.einsum('ij,ji->i', a.T, a.dot(s2)).sum()
-    # fs[0] = f_old
-    # temp1 = a.dot(s2)
-    # for i in range(max_iter):
-    #     if i % 250 == 0:
-    #         logger.info(f"{current_process().name}: iterate {i}/{max_iter}")
-    #     if changes[i] < tol or num == 0:
-    #         break
-    #     _a[:] = a
-    #     # Calculate gradient
-    #     grad = temp1
-    #     grad -= s1
-    #     grad *= 2
-
-    #     # # old implementation of aggregate eigenmodes
-    #     # grad = _take_care(grad, n_eigenmodes)
-
-    #     # Find opt step-size
-    #     warnings.filterwarnings('error')
-    #     try:
-    #         # tau = 0.5 * (grad * grad).sum() / (np.diag(grad.dot(s2.dot(grad.T))) * qinv.ravel()).sum()
-    #         temp2 = grad.dot(s2.T)
-    #         den = ((temp2 * grad).sum(axis=1)).sum()
-    #         num = (grad * grad).sum()
-    #         tau = 0.5 * num / den
-    #         tau = max(tau, tau_max)
-    #     except Warning:
-    #         raise RuntimeError(f'Q possibly contains negative value {q.min()}')
-    #     warnings.filterwarnings('ignore')
-
-    #     while True:
-    #         # Forward step
-    #         temp = _a.copy()
-    #         temp -= tau * grad
-
-    #         # Backward (proximal) step
-    #         a = shrink(temp, lambda2 * tau)
-
-    #         # #************* make the self history = 0 from lag p1***********
-    #         for k in range(p1, p):
-    #             a.flat[k * m::(p * m + 1)] = 0.0
-    #         # # *************************************************************
-    #         if zeroed_index is not None:
-    #             a[zeroed_index] = 0.0
-
-    #         "************* make the cross history between eigenmodes = 0 from lag p1***********"
-    #         for l in range(0, m, n_eigenmodes):
-    #             for u in range(n_eigenmodes):
-    #                 for v in range(n_eigenmodes):
-    #                     if v != u:
-    #                         a[l+v, l+u::m] = 0
-    #         "*********************************************************************"
-
-    #         temp1 = a.dot(s2)
-    #         f_new = -2 * np.einsum('ij,ji->i', a.T, s1).sum() + np.einsum('ij,ji->i', a.T, temp1).sum()
-    #         diff = (a - _a)
-    #         f_new_upper = f_old + (grad * diff).sum() + (diff ** 2).sum() / (2 * tau)
-    #         if f_new < f_new_upper or tau / tau_max < 1e-10:
-    #             break
-    #         else:
-    #             tau /= 2
-
-    #     num = np.sum(diff ** 2)
-    #     den = np.sum(_a ** 2)
-    #     f_old = f_new
-    #     changes[i+1] = 1 if den == 0 else np.sqrt(num / den)
-
-    #     fs[i+1] = f_old
-
-    # a = a / d[None, :]
-    # a = a / q_inv_sqrt
-
-    # return a, changes
 
 
 @vectorize([float32(float32, float32),
@@ -317,12 +262,6 @@ def _solve_for_a_indepdiag(q, s1, s2, a, p1, lambda_b, lambda_a, max_iter=5000, 
     a : ndarray of shape (n_sources, n_sources*order)
     changes : list of floats
     """
-    # if lambda2 == 0:
-    #     try:
-    #         a = linalg.solve(s2, s1.T, assume_a='pos') # s1 * (s2 ** -1)
-    #     except linalg.LinAlgError:
-    #         a = linalg.solve(s2, s1.T, assume_a='sym') # s1 * (s2 ** -1)
-    #     return a.T, None
 
     eps = np.finfo(s1.dtype).eps
     q = np.diag(q)
@@ -342,86 +281,124 @@ def _solve_for_a_indepdiag(q, s1, s2, a, p1, lambda_b, lambda_a, max_iter=5000, 
     h_norm = np.linalg.eigvalsh(s2).max()
     tau_max = 0.99 / h_norm
 
-    _a = np.empty_like(a)
-    temp = np.empty_like(a)
+    # _a = np.empty_like(a)
+    # temp = np.empty_like(a)
     m = a.shape[0]
     p = a.shape[1] // m
 
-    changes = np.zeros(max_iter+1)
-    fs = np.zeros(max_iter+1)
-    changes[0] = 1
-    num = 1
-    f_old = -2 * np.einsum('ij,ji->i', a.T, s1).sum() + np.einsum('ij,ji->i', a.T, a.dot(s2)).sum()
-    fs[0] = f_old
-    temp1 = a.dot(s2)
-    for i in range(max_iter):
-        if changes[i] < tol or num == 0:
-            break
-        _a[:] = a
-        # Calculate gradient
-        grad = temp1
-        grad -= s1
-        grad *= 2
 
-        # # old implementation of aggregate eigenmodes
-        # grad = _take_care(grad, n_eigenmodes)
 
-        # Find opt step-size
-        warnings.filterwarnings('error')
-        try:
-            # tau = 0.5 * (grad * grad).sum() / (np.diag(grad.dot(s2.dot(grad.T))) * qinv.ravel()).sum()
-            temp2 = grad.dot(s2.T)
-            den = ((temp2 * grad).sum(axis=1)).sum()
-            num = (grad * grad).sum()
-            tau = 0.5 * num / den
-            tau = max(tau, tau_max)
-        except Warning:
-            raise RuntimeError(f'Q possibly contains negative value {q.min()}')
-        warnings.filterwarnings('ignore')
+    def gfunct(x): return g_indepdiag(x, lambda_b, lambda_a)
+    def funct(x): return f(x,s1,s2)
+    def proxg_funct(x, t): return proxg_indepdiag(x,lambda_b*t,lambda_a*t,p1,p,m,zeroed_index, n_eigenmodes)
+    def grad_funct(x): return gradf(x, s1, s2)
 
-        while True:
-            # Forward step
-            temp = _a.copy()
-            temp -= tau * grad
+    fasta = Fasta(funct, gfunct, grad_funct, proxg_funct, beta = .5, n_iter = max_iter)
+    fasta.learn(a, tol)
 
-            # Backward (proximal) step
-            a = shrink_indepdiag(temp, lambda_b * tau, lambda_a * tau)
-
-            # #************* make the self history = 0 from lag p1***********
-            for k in range(p1, p):
-                a.flat[k * m::(p * m + 1)] = 0.0
-            # # *************************************************************
-            if zeroed_index is not None:
-                a[zeroed_index] = 0.0
-
-            "************* make the cross history between eigenmodes = 0 from lag p1***********"
-            for l in range(0, m, n_eigenmodes):
-                for u in range(n_eigenmodes):
-                    for v in range(n_eigenmodes):
-                        if v != u:
-                            a[l+v, l+u::m] = 0
-            "*********************************************************************"
-
-            temp1 = a.dot(s2)
-            f_new = -2 * np.einsum('ij,ji->i', a.T, s1).sum() + np.einsum('ij,ji->i', a.T, temp1).sum()
-            diff = (a - _a)
-            f_new_upper = f_old + (grad * diff).sum() + (diff ** 2).sum() / (2 * tau)
-            if f_new < f_new_upper or tau / tau_max < 1e-10:
-                break
-            else:
-                tau /= 2
-
-        num = np.sum(diff ** 2)
-        den = np.sum(_a ** 2)
-        f_old = f_new
-        changes[i+1] = 1 if den == 0 else np.sqrt(num / den)
-
-        fs[i+1] = f_old
-
-    a = a / d[None, :]
+    a = fasta.coefs_ / d[None, :]
     a = a / q_inv_sqrt
 
-    return a, changes
+    return a
+
+    # eps = np.finfo(s1.dtype).eps
+    # q = np.diag(q)
+    # qinv = 1 / q
+    # qinv = np.expand_dims(qinv, -1)
+    # q_inv_sqrt = np.sqrt(qinv)
+
+    # d = np.sqrt(np.diag(s2))
+    # s2 = s2 / d[:, None]
+    # s2 = s2 / d[None, :]
+    # s1 = s1 / d[None, :]
+    # a = a * d[None, :]
+
+    # a = a * q_inv_sqrt
+    # s1 = s1 * q_inv_sqrt
+
+    # h_norm = np.linalg.eigvalsh(s2).max()
+    # tau_max = 0.99 / h_norm
+
+    # _a = np.empty_like(a)
+    # temp = np.empty_like(a)
+    # m = a.shape[0]
+    # p = a.shape[1] // m
+
+    # changes = np.zeros(max_iter+1)
+    # fs = np.zeros(max_iter+1)
+    # changes[0] = 1
+    # num = 1
+    # f_old = -2 * np.einsum('ij,ji->i', a.T, s1).sum() + np.einsum('ij,ji->i', a.T, a.dot(s2)).sum()
+    # fs[0] = f_old
+    # temp1 = a.dot(s2)
+    # for i in range(max_iter):
+    #     if changes[i] < tol or num == 0:
+    #         break
+    #     _a[:] = a
+    #     # Calculate gradient
+    #     grad = temp1
+    #     grad -= s1
+    #     grad *= 2
+
+    #     # # old implementation of aggregate eigenmodes
+    #     # grad = _take_care(grad, n_eigenmodes)
+
+    #     # Find opt step-size
+    #     warnings.filterwarnings('error')
+    #     try:
+    #         # tau = 0.5 * (grad * grad).sum() / (np.diag(grad.dot(s2.dot(grad.T))) * qinv.ravel()).sum()
+    #         temp2 = grad.dot(s2.T)
+    #         den = ((temp2 * grad).sum(axis=1)).sum()
+    #         num = (grad * grad).sum()
+    #         tau = 0.5 * num / den
+    #         tau = max(tau, tau_max)
+    #     except Warning:
+    #         raise RuntimeError(f'Q possibly contains negative value {q.min()}')
+    #     warnings.filterwarnings('ignore')
+
+    #     while True:
+    #         # Forward step
+    #         temp = _a.copy()
+    #         temp -= tau * grad
+
+    #         # Backward (proximal) step
+    #         a = shrink_indepdiag(temp, lambda_b * tau, lambda_a * tau)
+
+    #         # #************* make the self history = 0 from lag p1***********
+    #         for k in range(p1, p):
+    #             a.flat[k * m::(p * m + 1)] = 0.0
+    #         # # *************************************************************
+    #         if zeroed_index is not None:
+    #             a[zeroed_index] = 0.0
+
+    #         "************* make the cross history between eigenmodes = 0 from lag p1***********"
+    #         for l in range(0, m, n_eigenmodes):
+    #             for u in range(n_eigenmodes):
+    #                 for v in range(n_eigenmodes):
+    #                     if v != u:
+    #                         a[l+v, l+u::m] = 0
+    #         "*********************************************************************"
+
+    #         temp1 = a.dot(s2)
+    #         f_new = -2 * np.einsum('ij,ji->i', a.T, s1).sum() + np.einsum('ij,ji->i', a.T, temp1).sum()
+    #         diff = (a - _a)
+    #         f_new_upper = f_old + (grad * diff).sum() + (diff ** 2).sum() / (2 * tau)
+    #         if f_new < f_new_upper or tau / tau_max < 1e-10:
+    #             break
+    #         else:
+    #             tau /= 2
+
+    #     num = np.sum(diff ** 2)
+    #     den = np.sum(_a ** 2)
+    #     f_old = f_new
+    #     changes[i+1] = 1 if den == 0 else np.sqrt(num / den)
+
+    #     fs[i+1] = f_old
+
+    # a = a / d[None, :]
+    # a = a / q_inv_sqrt
+
+    # return a, changes
 
 def shrink_indepdiag(x, t1, t2):
     nrows, ncols = x.shape
