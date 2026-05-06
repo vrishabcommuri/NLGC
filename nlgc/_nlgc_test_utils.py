@@ -310,11 +310,7 @@ a: ground truth a matrix which VAR model is trying to estimate, contains GC link
 '''
 
 
-def lead_field_generation_vol(root, subject_id, n_eigenmodes, loose=0.0, depth=0.0, pca=True, rank=None, trans = None):
-    full_empty_room_path = root + "meg/" + subject_id + "/" + subject_id + "_emptyroom-raw.fif"
-    raw_empty_room = mne.io.read_raw_fif(full_empty_room_path)
-    info = raw_empty_room.info
-    noise_cov = mne.compute_raw_covariance(raw_empty_room, tmin=0, tmax=None)
+
 
     
 # Assume folder setup follows eelbrain pipeline
@@ -333,16 +329,30 @@ def lead_field_generation(root, subject_id, src_space, n_eigenmodes, loose=0.0, 
             trans_file = "fsaverage"
     else:
         trans_file = trans
-    bem_folder= root + "/bem/" + subject_id + "/"
-    subjects_dir = root
+    bem_folder= root + "/mri/" + subject_id + "/bem/"
+    print(bem_folder)
+    subjects_dir = root + "/mri/"
+    print(src_space)
     if src_space == 'surf':
         fwd_origin = mne.make_forward_solution(info, trans_file, src = bem_folder + subject_id + "-ico-4-src.fif",
                                             bem = bem_folder + subject_id  + "-inner_skull-bem-sol.fif")
         fwd_target = mne.make_forward_solution(info, trans_file, src = bem_folder + subject_id  + "-ico-1-src.fif",
                                             bem = bem_folder + subject_id + "-inner_skull-bem-sol.fif")
+        fwd_origin = mne.convert_forward_solution(
+            fwd_origin,
+            surf_ori=True,      # align dipoles to cortical surface normals
+            force_fixed=True,   # reduce to 1 orientation per source (fixed)
+            use_cps=True
+        )
+        fwd_target = mne.convert_forward_solution(
+            fwd_target,
+            surf_ori=True,      # align dipoles to cortical surface normals
+            force_fixed=True,   # reduce to 1 orientation per source (fixed)
+            use_cps=True
+        )
     elif src_space == 'vol' or src_space == 'mixed':
-        src_origin = mne.setup_volume_source_space(subject = subject_id, pos = 5.0, subjects_dir = subjects_dir, surface = bem_folder + 'inner_skull.surf')
-        src_target = mne.setup_volume_source_space(subject = subject_id, pos = 20.0, subjects_dir = subjects_dir, surface = bem_folder + 'inner_skull.surf')
+        src_origin = mne.setup_volume_source_space(subject = subject_id, pos = 10.0, subjects_dir = subjects_dir, surface = bem_folder + 'inner_skull.surf')
+        src_target = mne.setup_volume_source_space(subject = subject_id, pos = 40.0, subjects_dir = subjects_dir, surface = bem_folder + 'inner_skull.surf')
         if src_space == 'mixed':
             surf_src = mne.setup_source_space(subject = subject_id, spacing = 'ico4', surface = 'white', subjects_dir = subjects_dir, add_dist = 'patch', verbose = None)
             src_origin = surf_src + src_origin
@@ -354,9 +364,290 @@ def lead_field_generation(root, subject_id, src_space, n_eigenmodes, loose=0.0, 
     mode='svd_flip')
     G_normalizing_factor = np.sqrt(np.sum(G ** 2, axis=0))
     G /= G_normalizing_factor
-
+    print(f'G shape: {G.shape}')
     return G, info, noise_cov, fwd_origin, weights
 
+
+
+def _voxel_block(v, n_orient=3):
+    """Return slice for RAS components of voxel v."""
+    return slice(n_orient * v, n_orient * (v + 1))
+
+
+def _make_3d_coupling(strength=0.15, mode="mixed", rng=None):
+    """
+    Create a 3x3 voxel-to-voxel coupling block.
+    Rows = target RAS components
+    Cols = source RAS components
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    if mode == "same_axis":
+        B = np.eye(3)
+
+    elif mode == "cross_axis":
+        # R->A, A->S, S->R style cross-orientation coupling
+        B = np.array([
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ])
+
+    elif mode == "mixed":
+        B = rng.normal(size=(3, 3))
+        B /= np.linalg.norm(B, ord="fro") + 1e-12
+
+    else:
+        raise ValueError(f"Unknown coupling mode: {mode}")
+
+    return strength * B
+
+
+def _companion_spectral_radius(a):
+    """
+    Compute spectral radius of VAR companion matrix.
+    a shape: (p, m, m)
+    x[t] = sum_k a[k] @ x[t-k-1] + u[t]
+    """
+    p, m, _ = a.shape
+
+    companion = np.zeros((p * m, p * m), dtype=float)
+    companion[:m, :] = np.concatenate(a, axis=1)
+
+    if p > 1:
+        companion[m:, :-m] = np.eye((p - 1) * m)
+
+    eigvals = np.linalg.eigvals(companion)
+    return np.max(np.abs(eigvals))
+
+
+def _stabilize_var(a, target_spec_rad=0.9, max_iter=20):
+    """
+    Rescale VAR coefficients if companion spectral radius is too large.
+    """
+    a = a.copy()
+
+    for _ in range(max_iter):
+        rho = _companion_spectral_radius(a)
+
+        if rho < target_spec_rad:
+            return a, rho
+
+        scale = target_spec_rad / (rho + 1e-12)
+        a *= 0.98 * scale
+
+    rho = _companion_spectral_radius(a)
+    return a, rho
+
+
+def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes = 2, G=None, p=2, t=500, n_active_voxels=10, n_links=10, target_spec_rad=0.9, coupling_mode="mixed",
+    process_noise_active=0.1, process_noise_inactive=0.001, measurement_noise_scale=1e2, plot_psd=False,):
+
+    if p < 1:
+        raise ValueError("p should be at least 1")
+
+    rng = np.random.default_rng(seed)
+    np.random.seed(seed)
+
+    n_orient = 3
+
+    if G is None:
+        
+        n_sensors = 40
+        n_voxels = int(np.floor(2*n_sensors/(n_eigenmodes*n_orient)))
+        m = n_eigenmodes * n_orient
+
+        f = rng.normal(size=(n_sensors, m))
+        f /= np.sqrt(np.sum(f ** 2, axis=0, keepdims=True)) + 1e-12
+
+    else:
+        f = G
+        n_sensors, m = f.shape
+
+        if m % n_orient != 0:
+            raise ValueError(
+                f"G has {m} columns, which is not divisible by 3. "
+                "Expected G.shape = (n_sensors, 3*n_voxels)."
+            )
+
+        n_voxels = m // (n_eigenmodes * n_orient)
+
+    
+    print(f'n_sensors {n_sensors}')
+    print(f'n_voxels: {n_voxels}')
+    print(f'm: {m}')
+    
+
+    if n_active_voxels > n_voxels:
+        raise ValueError("n_active_voxels cannot exceed n_voxels")
+
+    print(f"G shape is {f.shape}")
+    print(f"n_voxels is {n_voxels}")
+    print(f"state dimension m = {m}")
+
+    burnin = max(200, 10 * fs, 10 * p * m)
+
+    q = process_noise_inactive * np.eye(m)
+    a = np.zeros((p, m, m), dtype=np.float64)
+
+    active_voxels = rng.choice(n_voxels, size=n_active_voxels, replace=False)
+    print(f"Active voxels: {active_voxels}")
+
+    if band == "wide":
+        for v in active_voxels:
+            block = _voxel_block(v, n_orient)
+
+            q[block, block] = process_noise_active * np.eye(n_orient)
+
+            # Independent AR(1)-style self-history for R/A/S
+            a[0, block, block] = target_spec_rad * np.eye(n_orient)
+
+    else:
+        band_dict = {
+            "delta": (0.1, 4),
+            "theta": (4, 8),
+            "alpha": (8, 12),
+            "beta": (13, 23),
+        }
+
+        if band not in band_dict:
+            raise ValueError(f"band {band} not implemented")
+
+        f_low, f_high = band_dict[band]
+
+        for v in active_voxels:
+            block = _voxel_block(v, n_orient)
+
+            q[block, block] = process_noise_active * np.eye(n_orient)
+
+            f0 = rng.uniform(f_low, f_high)
+            w0 = 2 * np.pi * f0 / fs
+
+            # AR(2) oscillator per RAS component
+            a[0, block, block] = target_spec_rad * 2 * np.cos(w0) * np.eye(n_orient)
+            a[1, block, block] = -(target_spec_rad ** 2) * np.eye(n_orient)
+
+    link_power = target_spec_rad / 4
+    print(f"Link Power {link_power}")
+
+    links = []
+
+    for link_idx in range(n_links):
+        source_v, target_v = rng.choice(active_voxels, size=2, replace=False)
+
+        source_block = _voxel_block(source_v, n_orient)
+        target_block = _voxel_block(target_v, n_orient)
+
+        links.append((target_v, source_v))
+
+        for lag in range(p):
+            strength = rng.uniform(0.05, link_power)
+
+            B = _make_3d_coupling(
+                strength=strength,
+                mode=coupling_mode,
+                rng=rng,
+            )
+
+            if natures == "all":
+                pass
+
+            elif natures == "excitatory":
+                B = np.abs(B)
+
+            elif natures == "inhibitory":
+                B = -np.abs(B)
+
+            elif natures == "sharpening1":
+                if lag % 2 == 0:
+                    B = np.abs(B)
+                else:
+                    B = -np.abs(B)
+
+            elif natures == "sharpening2":
+                if lag % 2 == 0:
+                    B = -np.abs(B)
+                else:
+                    B = np.abs(B)
+
+            else:
+                raise ValueError(f"nature {natures} not implemented")
+
+            a[lag, target_block, source_block] = B
+
+    # Stabilize full VAR after adding off-diagonal 3D couplings
+    a, rho = _stabilize_var(a, target_spec_rad=target_spec_rad)
+    print(f"Final companion spectral radius: {rho:.4f}")
+
+    # Ground-truth voxel-level GC matrix
+    temp_JG = np.sum(np.abs(a), axis=0)  # (3N, 3N)
+    JG = np.zeros((n_voxels, n_voxels), dtype=bool)
+
+    for target_v in range(n_voxels):
+        target_block = _voxel_block(target_v, n_orient)
+
+        for source_v in range(n_voxels):
+            source_block = _voxel_block(source_v, n_orient)
+
+            if target_v == source_v:
+                continue
+
+            block_strength = temp_JG[target_block, source_block].sum()
+            JG[target_v, source_v] = block_strength > 0
+
+    T = burnin + t
+
+    u = rng.standard_normal((T, m))
+    L = linalg.cholesky(q, lower=True)
+    u = u @ L.T
+
+    x = np.zeros((T, m), dtype=np.float64)
+
+    for tt in range(p, T):
+        x[tt] = u[tt]
+
+        for lag in range(p):
+            x[tt] += a[lag] @ x[tt - lag - 1]
+
+    x = x[burnin:]
+
+    print("band", band, x.shape)
+
+    if plot_psd:
+        for comp in range(x.shape[1]):
+            plt.psd(x[:, comp], Fs=fs)
+        plt.title("Source/RAS component PSDs")
+        plt.show()
+
+    pow_actives = [np.mean(x[:, i] ** 2) for i in range(m)]
+
+    print(f"Max of f {np.max(f)}")
+    print(f"Mean of f {np.mean(f)}")
+    print(f"Median of f {np.median(f)}")
+    print(f"Min of f {np.min(f)}")
+
+    print(f"Max of x {np.max(x)}")
+    print(f"Median of x {np.median(x)}")
+
+    y = x @ f.T
+
+    px = np.trace(y @ y.T)
+
+    noise = rng.standard_normal(y.shape)
+    pn = np.trace(noise @ noise.T)
+
+    multiplier = measurement_noise_scale * pn / (px + 1e-12)
+
+    print(f"pn {pn}")
+    print(f"px {px}")
+    print(f"Multiplier {multiplier}")
+    print(f"Max noise/sqrt measurement noise {np.max(noise / np.sqrt(multiplier))}")
+
+    y += noise / np.sqrt(multiplier)
+    r_cov = 1 / multiplier
+
+    return f, y, x, r_cov, p, JG, pow_actives, a
 
 
 def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2, G = None, p = 2, t = 500, m_active = 10, n_links = 10, target_spec_rad = .9):
@@ -379,7 +670,7 @@ def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2,
 
         print(f'G shape is {G.shape}')
 
-        n_patches = m // n_eigenmodes
+        n_patches = m // (n_eigenmodes)
 
     burnin = max(200, 10*fs, 10* p * m)
     
@@ -666,13 +957,17 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
         weights, G, label_vertidx, label_names, gain_info, whitener = _prepare_eigenmodes(info, fwd, noise_cov, src_target, 
                                                                             n_eigenmodes=n_eigenmodes, loose=loose, depth=depth, pca=pca, rank=rank, mode='svd_flip')
     elif (lead_field_gen):
-        G, info, noise_cov, fwd, weights = lead_field_generation(root, subject_id, n_eigenmodes, loose, depth, pca, rank, trans)
+        G, info, noise_cov, fwd, weights = lead_field_generation(root, subject_id, src_space, n_eigenmodes, loose, depth, pca, rank, trans)
     elif (type(lf) != type(None)):
         print('Using passed in lead field')
         G = lf
     else:
         G = None
-    f, y, x, r_cov, p, JG, pow_actives, a = data_generation(seed, band, fs, natures, n_eigenmodes, G, order, t, m_active, n_links, target_spec_rad)
+    if src_space == 'surf':
+        f, y, x, r_cov, p, JG, pow_actives, a = data_generation(seed, band, fs, natures, n_eigenmodes, G, order, t, m_active, n_links, target_spec_rad)
+    else:
+        f, y, x, r_cov, p, JG, pow_actives, a = vol_data_generation(seed = seed, band = band, fs = fs, natures = natures, n_eigenmodes = n_eigenmodes, G = G, p = order, t = t
+                                                                    ,n_active_voxels = m_active, n_links = n_links, target_spec_rad = target_spec_rad)
     print("Completed data gen")
     plt.imshow(JG)
     plt.show()

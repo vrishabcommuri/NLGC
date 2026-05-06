@@ -330,11 +330,13 @@ def _prepare_eigenmodes(info, forward, noise_cov, labels, n_eigenmodes=2, loose=
 
     forward, gain, gain_info, whitener, source_weighting, mask = _prepare_gain(forward, info, noise_cov, pca,
                                                                                depth_dict, loose, rank)
-
+    # whiten the data
+    logger.info('Whitening data matrix.')
+    print('check orientation')
     if not is_fixed_orient(forward):
         print('The lead field is not fixed-orientation using mixed source space method')
         if isinstance(labels, Forward):
-            weights, G, label_vertidxw = _reduce_lead_field_vol(forward, labels, n_eigenmodes, data=gain.T)
+            weights, G, label_vertidx = _reduce_lead_field_vol(forward, labels, n_eigenmodes, data=gain.T)
             label_names = []
             for i, label in enumerate(labels['src']):
                 label_names.extend(map(lambda x: f'{i}-{x}', label['vertno']))
@@ -346,31 +348,30 @@ def _prepare_eigenmodes(info, forward, noise_cov, labels, n_eigenmodes=2, loose=
         else:
             raise ValueError('Not supported {:s}: labels are expected to be either an mne.SourceSpace or'
                              'mne.Forward object.'.format(labels))
-
-    # whiten the data
-    logger.info('Whitening data matrix.')
-    if isinstance(labels, Forward):
-        weights, G, label_vertidx, src_flip = _reduce_lead_field(forward, labels, n_eigenmodes, data=gain.T)
-        label_names = []
-        for i, label in enumerate(labels['src']):
-            label_names.extend(map(lambda x: f'{i}-{x}', label['vertno']))
-    elif isinstance(labels, SourceSpaces):
-        weights, G, label_vertidx, src_flip = _reduce_lead_field(forward, labels, n_eigenmodes, data=gain.T)
-        label_names = []
-        for i, label in enumerate(labels):
-            label_names.extend(map(lambda x: f'{i}-{x}', label['vertno']))
-    elif isinstance(labels, list):
-        if isinstance(labels[0], Label):
-            weights = None # not implemented
-            G, label_vertidx, src_flip = _extract_label_eigenmodes(forward, labels, gain.T, mode, n_eigenmodes,
-                                                                   allow_empty=True)
-            label_names = [label.name for label in labels]
-        else:
-            raise ValueError('Not supported {:s}: elements of labels are expected to be mne.Labels, '
-                             'if a list is provided.'.format(type(labels[0])))
     else:
-        raise ValueError('Not supported {:s}: labels are expected to be either an mne.SourceSpace or'
-                         'mne.Forward object or list of mne.Labels.'.format(labels))
+        print('fixed orientation')
+        if isinstance(labels, Forward):
+            weights, G, label_vertidx, src_flip = _reduce_lead_field(forward, labels, n_eigenmodes, data=gain.T)
+            label_names = []
+            for i, label in enumerate(labels['src']):
+                label_names.extend(map(lambda x: f'{i}-{x}', label['vertno']))
+        elif isinstance(labels, SourceSpaces):
+            weights, G, label_vertidx, src_flip = _reduce_lead_field(forward, labels, n_eigenmodes, data=gain.T)
+            label_names = []
+            for i, label in enumerate(labels):
+                label_names.extend(map(lambda x: f'{i}-{x}', label['vertno']))
+        elif isinstance(labels, list):
+            if isinstance(labels[0], Label):
+                weights = None # not implemented
+                G, label_vertidx, src_flip = _extract_label_eigenmodes(forward, labels, gain.T, mode, n_eigenmodes,
+                                                                    allow_empty=True)
+                label_names = [label.name for label in labels]
+            else:
+                raise ValueError('Not supported {:s}: elements of labels are expected to be mne.Labels, '
+                                'if a list is provided.'.format(type(labels[0])))
+        else:
+            raise ValueError('Not supported {:s}: labels are expected to be either an mne.SourceSpace or'
+                            'mne.Forward object or list of mne.Labels.'.format(labels))
 
     # test if there are empty columns
     sel = np.any(G, axis=0)
@@ -427,17 +428,27 @@ def _reduce_lead_field(forward, src, n_eigenmodes, data=None):
 def _reduce_lead_field_vol(forward, src, n_eigenmodes, data=None):
     import mne
     if data is None:
+        print('data is None')
         logger.info('Using the raw forward solution')
         data = forward['sol']['data'].view().reshape(np.sum([s['nuse'] for s in forward['src']]), 3, -1)
     print(f'Data shape is {data.shape}')
     if isinstance(src, mne.Forward):
         src = src['src']
 
+    data = data.view().reshape(np.sum([s['nuse'] for s in forward['src']]), 3, -1)
+
+    print(f'Data Reshaped shape is {data.shape}')
+    print(src)
+    print(forward['src'])
     groups, coarse_rr = _prepare_leadfield_reduction_vol(src, forward['src'])
-    group_eigenmodes = np.zeros(len(groups)*n_eigenmodes, data.shape[-1], dtype=data.dtype)
+ 
+    group_eigenmodes = np.zeros((len(groups)*n_eigenmodes*3, data.shape[-1]), dtype=data.dtype)
+    print(f'Group Eigenmodes Shape {group_eigenmodes.shape}')
+    
     weights = []
     
     for coarse_idx, members in groups.items():
+        print(f'coarse_idx: {coarse_idx}, and members: {members}')
         idxs = np.empty(0, dtype=int)
         for i in range(len(forward['src'])):
             if len(members[i]) > 0:
@@ -445,8 +456,11 @@ def _reduce_lead_field_vol(forward, src, n_eigenmodes, data=None):
             else:
                 continue
         subvoxels = data[idxs, :, :].reshape(-1, data.shape[-1])
-        eig_src_weights, this_group_eigenmodes, percentage_explained = _truncatedsvd(subvoxels, n_eigenmodes, return_pecentage_exaplained=True)
-        group_eigenmodes[coarse_idx * n_eigenmodes:(coarse_idx + 1) * n_eigenmodes] = this_group_eigenmodes
+        # subvoxels = data[idxs, :, :].transpose(1, 0, 2)
+        print(f'data shape per subvoxel: {data[idxs, :, :].shape}')
+        print(f'subvoxel shape: {subvoxels.shape}')
+        eig_src_weights, this_group_eigenmodes, percentage_explained = _truncatedsvd_vol(subvoxels, n_eigenmodes, return_pecentage_exaplained=True)
+        group_eigenmodes[coarse_idx * n_eigenmodes * 3:(coarse_idx + 1) * n_eigenmodes * 3] = this_group_eigenmodes
         print(f"patch {coarse_idx}: vertices {subvoxels.shape[0]} -> {n_eigenmodes} leadfield reduction explained {percentage_explained*100:.3f}% variance")
         weights.append(eig_src_weights)
     return weights, group_eigenmodes.T, groups
@@ -633,6 +647,33 @@ def _extract_label_eigenmodes(fwd, labels, data=None, mode='mean', n_eigenmodes=
 def _expand_roi_indices_as_tup(reg_idx, emod):
     return tuple(range(reg_idx * emod, reg_idx * emod + emod))
 
+
+def _truncatedsvd_vol(a, n_components=2, return_pecentage_exaplained=False):
+    if n_components > min(*a.shape):
+        raise ValueError('n_components={:d} should be smaller than '
+                         'min({:d}, {:d})'.format(n_components, *a.shape))
+    u, s, vh = linalg.svd(a, full_matrices=True, compute_uv=True,
+                          overwrite_a=True, check_finite=True,
+                          lapack_driver='gesdd')    
+    sensor_modes = vh[:n_components] * s[:n_components][:, None]
+    u4 = u[:, :n_components].reshape(-1, 3, n_components)
+    G = a.reshape(-1, 3, a.shape[-1])
+    print(f'G shape {G.shape}')
+    print(f'u4 shape {u4.shape}')
+    ras_modes = np.einsum("vrm,vrs->mrs", u4, G)
+    recon_check = ras_modes.sum(axis=1)
+    if not np.allclose(recon_check, sensor_modes, atol=1e-8, rtol=1e-6):
+        print("Warning: RAS-summed modes do not exactly match sensor_modes.")
+    print(f'RAS modes shape {ras_modes.shape}')
+    print(f'U shape {u.shape}')
+    print(f's shape {s.shape}')
+    print(f'vh shape {vh.shape}')
+    print(f'sensor_modes shape {sensor_modes.shape}')
+    ras_modes = ras_modes.reshape(n_components*3, ras_modes.shape[-1])
+    print(f'ras_modes shape {ras_modes}')
+    if return_pecentage_exaplained:
+        return u, ras_modes, s[:n_components].sum() / s.sum()
+    return u, ras_modes
 
 def _truncatedsvd(a, n_components=2, return_pecentage_exaplained=False):
     if n_components > min(*a.shape):

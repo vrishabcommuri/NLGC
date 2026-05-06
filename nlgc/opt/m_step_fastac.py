@@ -10,8 +10,10 @@ np.seterr(all='warn')
 import warnings
 
 def g(x, lam, m, p):
+    # print(f'x shape {x.shape}')
     N = m // 3
     A = x.reshape(m, p, m).transpose(1, 0, 2)  # p, m, m
+    # print(f'A shape is {A.shape}')
     B = A.reshape(p, N, 3, N, 3)  # p, N, 3, N, 3
     cost = lam*(np.sqrt((B ** 2).sum(axis=(2, 4))).sum())
     return cost
@@ -21,15 +23,26 @@ def gradf(x, s1, s2, Qinv):
     return 2 * (Qinv.dot(x.dot(s2)) - s1)
 
 def f(x, s1, s2, Qinv):
+
+    # print(f'x shape {x.shape}')
+    # print(f's1 shape {s1.shape}')
+    # print(f's2 shape {s2.shape}')
+    # print(f'Qinv shape {Qinv.shape}')
+
     U = Qinv.dot(x)
-    return -2 * np.einsum('ij,ji->i', U, s1).sum() + np.einsum('ij,ji->i', U.dot(s2), x).sum()
+
+    # print(f'U shape: {U.shape}')
+
+    return -2 * np.einsum('ij,ji->i', U.T, s1).sum() + np.einsum('ij,ji->i', x.T, U.dot(s2)).sum()
 
 def proxg(x, t, lam, p1, p, m, zeroed_index, n_eigenmodes):
 
     N = m // 3
-
+    # print(f'x shape {x.shape}')
+    
     # View as blocks: (p, N, 3, N, 3)
     A = x.reshape(m, p, m).transpose(1, 0, 2)     # (p, m, m)
+    # print(f'A shape is {A.shape}')
     B = A.reshape(p, N, 3, N, 3)                  # (p, N, 3, N, 3)
 
     # Frobenius norm per block: (p, N, N)
@@ -170,7 +183,9 @@ def _solve_for_a(q, s1, s2, a, p1, lambda2, max_iter=5000, tol=1e-3, zeroed_inde
         return a.T, None
 
     eps = np.finfo(s1.dtype).eps
+    # print(f'Q shape is {q.shape} and Q is {q}')
     qinv = linalg.inv(q)
+    # print(f'Qinv shape is {qinv.shape} and Qinv is {qinv}')
     d = np.sqrt(np.diag(s2))
     s2 = s2 / d[:, None]
     s2 = s2 / d[None, :]
@@ -188,6 +203,10 @@ def _solve_for_a(q, s1, s2, a, p1, lambda2, max_iter=5000, tol=1e-3, zeroed_inde
     m = a.shape[0]
     p = a.shape[1] // m
 
+
+    # print(f'm is: {m}')
+    # print(f'p  is {p}')
+    # print(f'a shape is {a.shape}')
 
 
     def gfunct(x): return g(x, lambda2, m, p)
@@ -381,7 +400,7 @@ def _take_care(a, n_eigenmodes):
     return a_
 
 
-def solve_for_q(q, s1, s2, s3, a, m, p, n_samples, lambda2, alpha=0, beta=0,):
+def solve_for_q(q, s1, s2, s3, a, lambda2, alpha=0, beta=0,):
     """One-step sol to learn q, state-noise covariance matrix
 
     Parameters
@@ -404,9 +423,24 @@ def solve_for_q(q, s1, s2, s3, a, m, p, n_samples, lambda2, alpha=0, beta=0,):
     This equivalent to alpha*n - 2 additional observations that sum to beta*n.
     """
     
-    sigma = s3 - a.dot(s1.T) - s1.dot(a.T) + a.dot(s2).dot(a.T)
-    q_ = (sigma + beta)/(n_samples + alpha)
-    rel_change = ((q - q_) ** 2).sum() / (q ** 2).sum()
+    # sigma = s3 - a.dot(s1.T) - s1.dot(a.T) + a.dot(s2).dot(a.T)
+    # q_ = (sigma + beta)/(n_samples + alpha)
+    # rel_change = ((q - q_) ** 2).sum() / (q ** 2).sum()
+
+    diag_indices = np.diag_indices_from(q)
+    q__ = q[diag_indices]
+    temp = np.einsum('ij,ji->i', a, s2.T)
+    temp3 = np.einsum('ij,ji->i', s2 - a.dot(s3), a.T)
+    if s1.ndim == 2:
+        q_ = s1[diag_indices]
+    else:
+        q_ = s1
+    q_ -= (temp + temp3)
+    q_ += beta
+    q_ /= (1 + alpha)
+    q[diag_indices] = np.abs(q_)
+    rel_change = ((q__ - q_) ** 2).sum() / (q__ ** 2).sum()
+
 
     return q, rel_change
 
