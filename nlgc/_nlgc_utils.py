@@ -430,7 +430,7 @@ def _reduce_lead_field_vol(forward, src, n_eigenmodes, data=None):
     if data is None:
         print('data is None')
         logger.info('Using the raw forward solution')
-        data = forward['sol']['data'].view().reshape(np.sum([s['nuse'] for s in forward['src']]), 3, -1)
+        data = np.swapaxes(forward['sol']['data'], 0, 1) 
     print(f'Data shape is {data.shape}')
     if isinstance(src, mne.Forward):
         src = src['src']
@@ -455,9 +455,8 @@ def _reduce_lead_field_vol(forward, src, n_eigenmodes, data=None):
                 idxs = np.append(idxs, np.array(members[i]) + int(np.sum([forward['src'][j]['nuse'] for j in range(i)])))
             else:
                 continue
-        subvoxels = data[idxs, :, :].reshape(-1, data.shape[-1])
-        # subvoxels = data[idxs, :, :].transpose(1, 0, 2)
-        print(f'data shape per subvoxel: {data[idxs, :, :].shape}')
+        ras_idxs = np.concatenate([3 * idxs[:, None] + np.arange(3)], axis=1).ravel()
+        subvoxels = data[ras_idxs]
         print(f'subvoxel shape: {subvoxels.shape}')
         eig_src_weights, this_group_eigenmodes, percentage_explained = _truncatedsvd_vol(subvoxels, n_eigenmodes, return_pecentage_exaplained=True)
         group_eigenmodes[coarse_idx * n_eigenmodes * 3:(coarse_idx + 1) * n_eigenmodes * 3] = this_group_eigenmodes
@@ -652,24 +651,49 @@ def _truncatedsvd_vol(a, n_components=2, return_pecentage_exaplained=False):
     if n_components > min(*a.shape):
         raise ValueError('n_components={:d} should be smaller than '
                          'min({:d}, {:d})'.format(n_components, *a.shape))
+    
+
+
+    n_total, n_sensors = a.shape
+    n_orient = 3
+    n_voxels = n_total // n_orient
+
+    ras_modes = np.empty(
+        (n_components * n_orient, n_sensors),
+        dtype=u4.dtype
+    )
+
     u, s, vh = linalg.svd(a, full_matrices=True, compute_uv=True,
                           overwrite_a=True, check_finite=True,
                           lapack_driver='gesdd')    
+    
     sensor_modes = vh[:n_components] * s[:n_components][:, None]
-    u4 = u[:, :n_components].reshape(-1, 3, n_components)
-    G = a.reshape(-1, 3, a.shape[-1])
+    
+    u4 = u[:, :n_components]
+
+    G = a.T
+
+    for m in range(n_components):
+        for r in range(n_orient):
+            cols = np.arange(r, n_total, n_orient)
+            # contribution from R/A/S slice
+            mode_r = G[:, cols] @ u4[cols, m]
+            ras_modes[m * 3 + r] = mode_r
+
     print(f'G shape {G.shape}')
     print(f'u4 shape {u4.shape}')
-    ras_modes = np.einsum("vrm,vrs->mrs", u4, G)
-    recon_check = ras_modes.sum(axis=1)
-    if not np.allclose(recon_check, sensor_modes, atol=1e-8, rtol=1e-6):
-        print("Warning: RAS-summed modes do not exactly match sensor_modes.")
+
+    # ras_modes = np.einsum("vrm,vrs->mrs", u4, G)
+
+    # recon_check = ras_modes.sum(axis=1)
+    # if not np.allclose(recon_check, sensor_modes, atol=1e-8, rtol=1e-6):
+    #     print("Warning: RAS-summed modes do not exactly match sensor_modes.")
     print(f'RAS modes shape {ras_modes.shape}')
     print(f'U shape {u.shape}')
     print(f's shape {s.shape}')
     print(f'vh shape {vh.shape}')
     print(f'sensor_modes shape {sensor_modes.shape}')
-    ras_modes = ras_modes.reshape(n_components*3, ras_modes.shape[-1])
+    # ras_modes = ras_modes.reshape(n_components*3, ras_modes.shape[-1])
     print(f'ras_modes shape {ras_modes}')
     if return_pecentage_exaplained:
         return u, ras_modes, s[:n_components].sum() / s.sum()
