@@ -351,8 +351,8 @@ def lead_field_generation(root, subject_id, src_space, n_eigenmodes, loose=0.0, 
             use_cps=True
         )
     elif src_space == 'vol' or src_space == 'mixed':
-        src_origin = mne.setup_volume_source_space(subject = subject_id, pos = 10.0, subjects_dir = subjects_dir, surface = bem_folder + 'inner_skull.surf')
-        src_target = mne.setup_volume_source_space(subject = subject_id, pos = 40.0, subjects_dir = subjects_dir, surface = bem_folder + 'inner_skull.surf')
+        src_origin = mne.setup_volume_source_space(subject = subject_id, pos = 15.0, subjects_dir = subjects_dir, surface = bem_folder + 'inner_skull.surf')
+        src_target = mne.setup_volume_source_space(subject = subject_id, pos = 30.0, subjects_dir = subjects_dir, surface = bem_folder + 'inner_skull.surf')
         if src_space == 'mixed':
             surf_src = mne.setup_source_space(subject = subject_id, spacing = 'ico4', surface = 'white', subjects_dir = subjects_dir, add_dist = 'patch', verbose = None)
             src_origin = surf_src + src_origin
@@ -542,6 +542,7 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
         links.append((target_v, source_v))
 
         for lag in range(p):
+            print(f'lag: {lag}')
             strength = rng.uniform(0.05, link_power)
 
             B = _make_3d_coupling(

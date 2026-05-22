@@ -435,7 +435,6 @@ def _reduce_lead_field_vol(forward, src, n_eigenmodes, data=None):
     if isinstance(src, mne.Forward):
         src = src['src']
 
-    data = data.view().reshape(np.sum([s['nuse'] for s in forward['src']]), 3, -1)
 
     print(f'Data Reshaped shape is {data.shape}')
     print(src)
@@ -658,10 +657,7 @@ def _truncatedsvd_vol(a, n_components=2, return_pecentage_exaplained=False):
     n_orient = 3
     n_voxels = n_total // n_orient
 
-    ras_modes = np.empty(
-        (n_components * n_orient, n_sensors),
-        dtype=u4.dtype
-    )
+
 
     u, s, vh = linalg.svd(a, full_matrices=True, compute_uv=True,
                           overwrite_a=True, check_finite=True,
@@ -670,6 +666,11 @@ def _truncatedsvd_vol(a, n_components=2, return_pecentage_exaplained=False):
     sensor_modes = vh[:n_components] * s[:n_components][:, None]
     
     u4 = u[:, :n_components]
+
+    ras_modes = np.empty(
+        (n_components * n_orient, n_sensors),
+        dtype=u4.dtype
+    )
 
     G = a.T
 

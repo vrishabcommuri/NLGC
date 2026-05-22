@@ -10,13 +10,35 @@ np.seterr(all='warn')
 import warnings
 
 def g(x, lam, m, p):
-    # print(f'x shape {x.shape}')
-    N = m // 3
-    A = x.reshape(m, p, m).transpose(1, 0, 2)  # p, m, m
-    # print(f'A shape is {A.shape}')
-    B = A.reshape(p, N, 3, N, 3)  # p, N, 3, N, 3
-    cost = lam*(np.sqrt((B ** 2).sum(axis=(2, 4))).sum())
-    return cost
+    #x is shaped as (m, m*p)
+    n_orient = 3
+
+    # number of voxels
+    N = m // n_orient
+
+    cost = 0.0
+    for lag in range(p):
+        # decide col offset since cols are p*m
+        col_offset = lag*m
+        for target_v in range(N):
+            # Which the rows to take and index every n_orient
+            rows = target_v * n_orient + np.arange(n_orient)
+
+            for source_v in range(N):
+                # cols similarly but include col_offset
+                cols = col_offset + source_v*n_orient + np.arange(n_orient)
+
+                # retrieve block from x
+                block = x[np.ix_(rows, cols)]
+
+                # sum norm of block to create cost
+                cost += np.sqrt((block ** 2).sum())
+    
+    # A = x.reshape(m, p, m).transpose(1, 0, 2)  # p, m, m
+    # # print(f'A shape is {A.shape}')
+    # B = A.reshape(p, N, 3, N, 3)  # p, N, 3, N, 3
+    # cost = 2*lam*(np.sqrt((B ** 2).sum(axis=(2, 4))).sum())
+    return 2 * lam * cost
 
 
 def gradf(x, s1, s2, Qinv):
@@ -37,27 +59,59 @@ def f(x, s1, s2, Qinv):
 
 def proxg(x, t, lam, p1, p, m, zeroed_index, n_eigenmodes):
 
+
+    n_orient = 3
+    a = np.zeros_like(x)
+
+    # Number of voxels
     N = m // 3
+
+    thresh = t * lam
+
+    for lag in range(p):
+        # decide col offset since cols are p*m
+        col_offset = lag*m
+        for target_v in range(N):
+            # Which the rows to take and index every 3
+            rows = target_v * 3 + np.arange(n_orient)
+
+            for source_v in range(N):
+                # cols similarly but include col_offset
+                cols = col_offset + source_v*n_orient + np.arange(n_orient)
+
+                # retrieve block from x
+                block = x[np.ix_(rows, cols)]
+
+                # Calculate norm
+                nrm = np.sqrt((block ** 2).sum())
+                
+                # Calculate scale factor based on thresh and norm
+                scale = np.maximum(1.0 - thresh / np.maximum(nrm, 1e-12), 0.0)
+
+                # create new a matrix where each block is scaled by scale
+                a[np.ix_(rows, cols)] = scale * block
+
+    # N = m // 3
     # print(f'x shape {x.shape}')
     
-    # View as blocks: (p, N, 3, N, 3)
-    A = x.reshape(m, p, m).transpose(1, 0, 2)     # (p, m, m)
+    # # View as blocks: (p, N, 3, N, 3)
+    # A = x.reshape(m, p, m).transpose(1, 0, 2)     # (p, m, m)
     # print(f'A shape is {A.shape}')
-    B = A.reshape(p, N, 3, N, 3)                  # (p, N, 3, N, 3)
+    # B = A.reshape(p, N, 3, N, 3)                  # (p, N, 3, N, 3)
 
-    # Frobenius norm per block: (p, N, N)
-    nrm = np.sqrt((B ** 2).sum(axis=(2, 4)))
+    # nrm = np.sqrt((B ** 2).sum(axis=(2, 4)))
+    # print(f'nrm shape {nrm.shape}')
 
-    # shrink factors: (p, N, N)
-    thresh = t * lam
-    scale = np.maximum(1.0 - thresh / np.maximum(nrm, 1e-12), 0.0)
+    # # shrink factors: (p, N, N)
+    # thresh = t * lam
+    # scale = np.maximum(1.0 - thresh / np.maximum(nrm, 1e-12), 0.0)
 
-    # apply scale to each 3x3 block (broadcast over the 3x3 axes)
-    B_shrunk = B * scale[:, :, None, :, None]
+    # # apply scale to each 3x3 block (broadcast over the 3x3 axes)
+    # B_shrunk = B * scale[:, :, None, :, None]
 
-    # reshape back to (m, m*p)
-    out_lag = B_shrunk.reshape(p, m, m)
-    a = out_lag.transpose(1, 0, 2).reshape(m, m * p)
+    # # reshape back to (m, m*p)
+    # out_lag = B_shrunk.reshape(p, m, m)
+    # a = out_lag.transpose(1, 0, 2).reshape(m, m * p)
     
     return a
 
