@@ -456,7 +456,7 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
         
         n_sensors = 40
         n_voxels = int(np.floor(2*n_sensors/(n_eigenmodes*n_orient)))
-        m = n_eigenmodes * n_orient
+        m = n_eigenmodes * n_orient * n_voxels
 
         f = rng.normal(size=(n_sensors, m))
         f /= np.sqrt(np.sum(f ** 2, axis=0, keepdims=True)) + 1e-12
@@ -528,7 +528,7 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
             a[0, block, block] = target_spec_rad * 2 * np.cos(w0) * np.eye(n_orient)
             a[1, block, block] = -(target_spec_rad ** 2) * np.eye(n_orient)
 
-    link_power = target_spec_rad / 4
+    link_power = target_spec_rad / 2
     print(f"Link Power {link_power}")
 
     links = []
@@ -971,6 +971,9 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
                                                                     ,n_active_voxels = m_active, n_links = n_links, target_spec_rad = target_spec_rad)
     print("Completed data gen")
     plt.imshow(JG)
+    plt.show()
+    a_concat = np.concatenate(a[:], axis = 1)
+    plt.imshow(a_concat, cmap = 'seismic')
     plt.show()
     print('Start nglc_map_opt')
 
