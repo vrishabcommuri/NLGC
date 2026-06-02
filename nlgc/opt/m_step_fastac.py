@@ -4,40 +4,20 @@ from scipy import linalg
 from numba import jit, njit, float32, float64, uint, vectorize
 from mne.utils import logger
 from multiprocessing import current_process
+import time
+import os
 from ._fastac import Fasta
 
 np.seterr(all='warn')
 import warnings
 
 def g(x, lam, m, p):
-    #x is shaped as (m, m*p)
+
     n_orient = 3
-
-    # number of voxels
     N = m // n_orient
+    B = x.reshape(N, n_orient, p, N, n_orient)
+    cost = np.sqrt(np.sum(B * B, axis=(1, 4), keepdims=True)).sum()
 
-    cost = 0.0
-    for lag in range(p):
-        # decide col offset since cols are p*m
-        col_offset = lag*m
-        for target_v in range(N):
-            # Which the rows to take and index every n_orient
-            rows = target_v * n_orient + np.arange(n_orient)
-
-            for source_v in range(N):
-                # cols similarly but include col_offset
-                cols = col_offset + source_v*n_orient + np.arange(n_orient)
-
-                # retrieve block from x
-                block = x[np.ix_(rows, cols)]
-
-                # sum norm of block to create cost
-                cost += np.sqrt((block ** 2).sum())
-    
-    # A = x.reshape(m, p, m).transpose(1, 0, 2)  # p, m, m
-    # # print(f'A shape is {A.shape}')
-    # B = A.reshape(p, N, 3, N, 3)  # p, N, 3, N, 3
-    # cost = 2*lam*(np.sqrt((B ** 2).sum(axis=(2, 4))).sum())
     return 2 * lam * cost
 
 
@@ -58,60 +38,21 @@ def f(x, s1, s2, Qinv):
     return -2 * np.einsum('ij,ji->i', U.T, s1).sum() + np.einsum('ij,ji->i', x.T, U.dot(s2)).sum()
 
 def proxg(x, t, lam, p1, p, m, zeroed_index, n_eigenmodes):
-
-
+    
     n_orient = 3
-    a = np.zeros_like(x)
-
-    # Number of voxels
-    N = m // 3
-
+    N = m // n_orient
     thresh = t * lam
 
-    for lag in range(p):
-        # decide col offset since cols are p*m
-        col_offset = lag*m
-        for target_v in range(N):
-            # Which the rows to take and index every 3
-            rows = target_v * 3 + np.arange(n_orient)
+    B = x.reshape(N, n_orient, p, N, n_orient)
 
-            for source_v in range(N):
-                # cols similarly but include col_offset
-                cols = col_offset + source_v*n_orient + np.arange(n_orient)
+    norms = np.sqrt(np.sum(B * B, axis=(1, 4), keepdims=True))
 
-                # retrieve block from x
-                block = x[np.ix_(rows, cols)]
+    scale = 1.0 - thresh / np.maximum(norms, 1e-12)
+    np.maximum(scale, 0.0, out=scale)
 
-                # Calculate norm
-                nrm = np.sqrt((block ** 2).sum())
-                
-                # Calculate scale factor based on thresh and norm
-                scale = np.maximum(1.0 - thresh / np.maximum(nrm, 1e-12), 0.0)
-
-                # create new a matrix where each block is scaled by scale
-                a[np.ix_(rows, cols)] = scale * block
-
-    # N = m // 3
-    # print(f'x shape {x.shape}')
-    
-    # # View as blocks: (p, N, 3, N, 3)
-    # A = x.reshape(m, p, m).transpose(1, 0, 2)     # (p, m, m)
-    # print(f'A shape is {A.shape}')
-    # B = A.reshape(p, N, 3, N, 3)                  # (p, N, 3, N, 3)
-
-    # nrm = np.sqrt((B ** 2).sum(axis=(2, 4)))
-    # print(f'nrm shape {nrm.shape}')
-
-    # # shrink factors: (p, N, N)
-    # thresh = t * lam
-    # scale = np.maximum(1.0 - thresh / np.maximum(nrm, 1e-12), 0.0)
-
-    # # apply scale to each 3x3 block (broadcast over the 3x3 axes)
-    # B_shrunk = B * scale[:, :, None, :, None]
-
-    # # reshape back to (m, m*p)
-    # out_lag = B_shrunk.reshape(p, m, m)
-    # a = out_lag.transpose(1, 0, 2).reshape(m, m * p)
+    a = np.empty_like(x, dtype = float)
+    Bout = a.reshape(N, n_orient, p, N, n_orient)
+    np.multiply(B, scale, out=Bout)
     
     return a
 
@@ -261,7 +202,8 @@ def _solve_for_a(q, s1, s2, a, p1, lambda2, max_iter=5000, tol=1e-3, zeroed_inde
     # print(f'm is: {m}')
     # print(f'p  is {p}')
     # print(f'a shape is {a.shape}')
-
+    print(f'Pre Run FASTA with lambda {lambda2}')
+    start_time = time.time()
 
     def gfunct(x): return g(x, lambda2, m, p)
     def funct(x): return f(x,s1, s2, qinv)
@@ -272,6 +214,11 @@ def _solve_for_a(q, s1, s2, a, p1, lambda2, max_iter=5000, tol=1e-3, zeroed_inde
     fasta.learn(a, tol)
 
     a = fasta.coefs_ / d[None, :]
+    end_time = time.time()
+
+
+    total_time = end_time - start_time
+    print(f'Post Run FASTA with lambda {lambda2} and time {total_time}, and PID {os.getpid()}')
 
     return a
 

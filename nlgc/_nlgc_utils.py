@@ -135,7 +135,7 @@ class NLGC:
 
 def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, var_thr=1.0, ROIs=[], alpha=0, beta=0,
         lambda_range=None, lambda1=None, lambda2=None, max_iter=500, max_cyclic_iter=3,
-        tol=1e-5, sparsity_factor=0.0, cv=5, use_lapack=True, use_es=True, xs_init = None, verbose=False):
+        tol=1e-5, sparsity_factor=0.0, cv=5, use_lapack=True, use_es=True, xs_init = None, a_init = None, verbose=False):
     n, m = f.shape
     nx = m // n_eigenmodes
 
@@ -175,8 +175,11 @@ def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, var_thr=1.0, ROIs=[], alpha=0
     else:
         q_val = 0.0001
     q_init = q_val * np.eye(m)
-    a_init = None
 
+    print('Start creating models')
+    if a_init != None:
+        a_concat = np.concatenate(a_init[:], axis = 1)
+        plt.imshow(a_concat)
     if len(lambda_range) > 1 and lambda1 is None:
         model_f = NeuraLVARCV(p, p1, n_eigenmodes, 10, cv, n_jobs, use_lapack=use_lapack)
         if xs_init != None:
@@ -186,6 +189,8 @@ def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, var_thr=1.0, ROIs=[], alpha=0
         model_f = NeuraLVAR(p, p1, n_eigenmodes, use_lapack=use_lapack)
         lambda_range = lambda_range[0]
         model_f.fit(y, f, r * np.eye(n), lambda_range, lb=lambda1, la=lambda2, a_init=a_init, q_init=q_init.copy(), xs_init = xs_init, **kwargs)
+    
+    print('Finished fitting models')
 
     bias_f = model_f.compute_bias(y)
 
@@ -212,6 +217,9 @@ def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, var_thr=1.0, ROIs=[], alpha=0
         sorted_pow_ratio /= sorted_pow_ratio[-1]
         idx = ((sorted_pow_ratio > var_thr) != 0).argmax()
         ROIs = sorted_idx[:idx + 1]
+
+    
+    print('Checking links')
 
     links_to_check = []
     for i, j in itertools.product(ROIs, repeat=2):
@@ -276,6 +284,8 @@ def _learn_reduced_model(i, j, y, f, r, lambda_f, a, q, n, p, p1, n_eigenmodes, 
         **kwargs):
     target = _expand_roi_indices_as_tup(j, n_eigenmodes)
     source = _expand_roi_indices_as_tup(i, n_eigenmodes)
+    print(f'target: {target}')
+    print(f'source {source}')
     link = '->'.join(map(lambda x: ','.join(map(str, x)), (source, target)))
     a_init = a.copy()
     a_init[:, target, source] = 0.0

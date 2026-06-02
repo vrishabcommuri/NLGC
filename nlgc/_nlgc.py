@@ -22,7 +22,7 @@ from ._nlgc_test_utils import run_GT_sim
 
 def nlgc_map(name, evoked, forward, noise_cov, labels, order, self_history=None, n_eigenmodes=2, alpha=0.0, beta=0.0,
         patch_idx=[], n_segments=1, loose=0.0, depth=0.0, pca=True, rank=None, lambda_range=None, lambda1=None, lambda2=None,
-        max_iter=500, max_cyclic_iter=3, tol=1e-5, sparsity_factor=0.0, cv=5, use_lapack=True, use_es=True, var_thr=1.0, verbose=False, warm_start = False):
+        max_iter=500, max_cyclic_iter=3, tol=1e-5, sparsity_factor=0.0, cv=5, use_lapack=True, use_es=True, var_thr=1.0, a_init = None, verbose=False, warm_start = False):
     """NLGC connectivity map estimation
 
     This function estimates the causal connectivity map across sources given the MEG measurements, forward model,
@@ -166,7 +166,7 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, order, self_history=None,
                            alpha=alpha, beta=beta, cv=cv, lambda_range=lambda_range, lambda1=lambda1, 
                            lambda2=lambda2, max_iter=max_iter,
                            max_cyclic_iter=max_cyclic_iter, tol=tol, sparsity_factor=sparsity_factor,
-                           use_lapack=use_lapack, use_es=use_es, var_thr=var_thr, xs_init=stc_init, verbose=verbose)
+                           use_lapack=use_lapack, use_es=use_es, var_thr=var_thr, xs_init=stc_init, a_init = a_init, verbose=verbose)
         d_raw[this_segment] = d_raw_
         bias_r[this_segment] = bias_r_
         bias_f[this_segment] = bias_f_

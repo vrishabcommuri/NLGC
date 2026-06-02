@@ -262,5 +262,6 @@ class Fasta:
         end = time.time()
         self.coefs_ = coefs_current
         self.objective_value = objective_next + self.g(coefs_current)
+        print(f"total time elapsed : {end - start}s")
         if verbose:
             logger.debug(f"total time elapsed : {end - start}s")
