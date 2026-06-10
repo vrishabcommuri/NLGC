@@ -11,48 +11,68 @@ from ._fastac import Fasta
 np.seterr(all='warn')
 import warnings
 
-def g(x, lam, m, p):
+def g(x, lam, m, p, n_orients = 1):
+    if n_orients > 1:
+        N = m // n_orients
+        B = x.reshape(N, n_orients, p, N, n_orients)
+        cost = 2 * lam * (np.sqrt(np.sum(B * B, axis=(1, 4), keepdims=True)).sum())
+    else:
+        cost = lam*(np.sum(np.abs(x)))
+    return cost
 
-    n_orient = 3
-    N = m // n_orient
-    B = x.reshape(N, n_orient, p, N, n_orient)
-    cost = np.sqrt(np.sum(B * B, axis=(1, 4), keepdims=True)).sum()
 
-    return 2 * lam * cost
+def gradf(x, s1, s2, Qinv, n_orients = 1):
+    if n_orients > 1:
+        return 2 * (Qinv.dot(x.dot(s2)) - s1)
+    else:
+        temp1 = x.dot(s2)
+        grad = temp1
+        grad -= s1
+        grad *= 2
+        return grad
 
+def f(x, s1, s2, Qinv, n_orients = 1):
 
-def gradf(x, s1, s2, Qinv):
-    return 2 * (Qinv.dot(x.dot(s2)) - s1)
+    if n_orients > 1:
+        U = Qinv.dot(x)
+        out = -2 * np.einsum('ij,ji->i', U.T, s1).sum() + np.einsum('ij,ji->i', x.T, U.dot(s2)).sum()
+    else:
+        out = -2 * np.einsum('ij,ji->i', x.T, s1).sum() + np.einsum('ij,ji->i', x.T, x.dot(s2)).sum()
 
-def f(x, s1, s2, Qinv):
+    return out
 
-    # print(f'x shape {x.shape}')
-    # print(f's1 shape {s1.shape}')
-    # print(f's2 shape {s2.shape}')
-    # print(f'Qinv shape {Qinv.shape}')
+def proxg(x, t, lam, p1, p, m, zeroed_index, n_eigenmodes, n_orients = 1):
+    if n_orients > 1:
+        N = m // n_orients
+        thresh = t * lam
 
-    U = Qinv.dot(x)
+        B = x.reshape(N, n_orients, p, N, n_orients)
 
-    # print(f'U shape: {U.shape}')
+        norms = np.sqrt(np.sum(B * B, axis=(1, 4), keepdims=True))
 
-    return -2 * np.einsum('ij,ji->i', U.T, s1).sum() + np.einsum('ij,ji->i', x.T, U.dot(s2)).sum()
+        scale = 1.0 - thresh / np.maximum(norms, 1e-12)
+        np.maximum(scale, 0.0, out=scale)
 
-def proxg(x, t, lam, p1, p, m, zeroed_index, n_eigenmodes):
-    
-    n_orient = 3
-    N = m // n_orient
-    thresh = t * lam
+        a = np.empty_like(x, dtype = float)
+        Bout = a.reshape(N, n_orients, p, N, n_orients)
+        np.multiply(B, scale, out=Bout)
+    else:
+        a = shrink(x, t)
 
-    B = x.reshape(N, n_orient, p, N, n_orient)
+        # #************* make the self history = 0 from lag p1***********
+        for k in range(p1, p):
+            a.flat[k * m::(p * m + 1)] = 0.0
+        # # *************************************************************
+        if zeroed_index is not None:
+            a[zeroed_index] = 0.0
 
-    norms = np.sqrt(np.sum(B * B, axis=(1, 4), keepdims=True))
-
-    scale = 1.0 - thresh / np.maximum(norms, 1e-12)
-    np.maximum(scale, 0.0, out=scale)
-
-    a = np.empty_like(x, dtype = float)
-    Bout = a.reshape(N, n_orient, p, N, n_orient)
-    np.multiply(B, scale, out=Bout)
+        "************* make the cross history between eigenmodes = 0 from lag p1***********"
+        for l in range(0, m, n_eigenmodes):
+            for u in range(n_eigenmodes):
+                for v in range(n_eigenmodes):
+                    if v != u:
+                        a[l+v, l+u::m] = 0
+        "*********************************************************************"
     
     return a
 
@@ -105,11 +125,11 @@ def calculate_ss(x_bar, s_bar, b, m, p):
 
 
 def solve_for_a(q, s1, s2, a, p1, lambda2, max_iter=5000, tol=1e-3, zeroed_index=None, update_only_target=False,
-        n_eigenmodes=1):
+        n_eigenmodes=1, n_orients = 1):
     # print('Use new FASTA')
     if not update_only_target or zeroed_index is None:
         return _solve_for_a(q, s1, s2, a, p1, lambda2, max_iter=max_iter, tol=tol, zeroed_index=zeroed_index,
-                            n_eigenmodes=n_eigenmodes)
+                            n_eigenmodes=n_eigenmodes, n_orients = n_orients)
     else:
         target = np.unique(zeroed_index[0])
         s1_ = s1[target]
@@ -120,12 +140,12 @@ def solve_for_a(q, s1, s2, a, p1, lambda2, max_iter=5000, tol=1e-3, zeroed_index
         target_ = np.asarray(zeroed_index[0]) - min(zeroed_index[0])
         source = np.asarray(zeroed_index[1])
         a = _solve_for_a(q_, s1_, s2, a_, p1, lambda2, max_iter=max_iter, tol=tol,
-                                   zeroed_index=(target_, source), n_eigenmodes=n_eigenmodes)
+                                   zeroed_index=(target_, source), n_eigenmodes=n_eigenmode, n_orients = n_orients)
         a[target] = a_
         return a
 
 def solve_for_a_indepdiag(q, s1, s2, a, p1, lb, la, max_iter=5000, tol=1e-3, zeroed_index=None, update_only_target=False,
-        n_eigenmodes=1):
+        n_eigenmodes=1, n_orients = 1):
     if not update_only_target or zeroed_index is None:
         return _solve_for_a_indepdiag(q, s1, s2, a, p1, lb, la, max_iter=max_iter, tol=tol, zeroed_index=zeroed_index,
                             n_eigenmodes=n_eigenmodes)
@@ -145,7 +165,7 @@ def solve_for_a_indepdiag(q, s1, s2, a, p1, lb, la, max_iter=5000, tol=1e-3, zer
 
 
 # @njit(cache=True)
-def _solve_for_a(q, s1, s2, a, p1, lambda2, max_iter=5000, tol=1e-3, zeroed_index=None, n_eigenmodes=1):
+def _solve_for_a(q, s1, s2, a, p1, lambda2, max_iter=5000, tol=1e-3, zeroed_index=None, n_eigenmodes=1, n_orients = 1):
     """Gradient descent to learn a, state-transition matrix
 
     Parameters
@@ -205,10 +225,10 @@ def _solve_for_a(q, s1, s2, a, p1, lambda2, max_iter=5000, tol=1e-3, zeroed_inde
     print(f'Pre Run FASTA with lambda {lambda2}')
     start_time = time.time()
 
-    def gfunct(x): return g(x, lambda2, m, p)
-    def funct(x): return f(x,s1, s2, qinv)
-    def proxg_funct(x, t): return proxg(x,t, lambda2, p1, p, m,zeroed_index, n_eigenmodes)
-    def grad_funct(x): return gradf(x, s1, s2, qinv)
+    def gfunct(x): return g(x, lambda2, m, p, n_orients)
+    def funct(x): return f(x,s1, s2, qinv, n_orients)
+    def proxg_funct(x, t): return proxg(x,t, lambda2, p1, p, m,zeroed_index, n_eigenmodes, n_orients)
+    def grad_funct(x): return gradf(x, s1, s2, qinv, n_orients)
 
     fasta = Fasta(funct, gfunct, grad_funct, proxg_funct, beta = .5, n_iter = max_iter)
     fasta.learn(a, tol)
@@ -233,7 +253,7 @@ def shrink(x, t):
         return 0
 
 
-def _solve_for_a_indepdiag(q, s1, s2, a, p1, lambda_b, lambda_a, max_iter=5000, tol=1e-3, zeroed_index=None, n_eigenmodes=1):
+def _solve_for_a_indepdiag(q, s1, s2, a, p1, lambda_b, lambda_a, max_iter=5000, tol=1e-3, zeroed_index=None, n_eigenmodes=1, n_orients = 1):
     """Gradient descent to learn a, state-transition matrix
 
     Parameters

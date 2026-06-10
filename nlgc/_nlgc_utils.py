@@ -62,7 +62,7 @@ class NLGC:
     biar_r: numpy array (n_sources * n_sources)
         reduced model bias matrix, [.]_{i,j} corresponds to link j->i
     """
-    def __init__(self, subject, nx, ny, t, p, n_eigenmodes, n_segments, d_raw, bias_f, bias_r,
+    def __init__(self, subject, nx, ny, t, p, n_eigenmodes, n_orients, n_segments, d_raw, bias_f, bias_r,
                  model_f, conv_flag, label_names, label_vertidx, forward_orig, whitener, eig_src_weights, debug=None):
 
         self.subject = subject
@@ -71,6 +71,7 @@ class NLGC:
         self.t = t
         self.p = p
         self.n_eigenmodes = n_eigenmodes
+        self.n_orients = n_orients
         self.n_segments = n_segments
         self.d_raw = d_raw
         self.bias_f = bias_f
@@ -110,7 +111,10 @@ class NLGC:
         alpha : float
             individual-level confidence interval
             """
-        return fdr_control(self.avg_debiased_dev, self.p * (self.n_eigenmodes**2), alpha)
+        
+        eff_eigenmodes = self.n_orients * self.n_eigenmodes
+
+        return fdr_control(self.avg_debiased_dev, self.p * (eff_eigenmodes**2), alpha)
 
     def pickle_as(self, filename):
         """saving the object as a pickle
@@ -133,11 +137,13 @@ class NLGC:
 
 
 
-def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, var_thr=1.0, ROIs=[], alpha=0, beta=0,
+def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, n_orients = 1, var_thr=1.0, ROIs=[], alpha=0, beta=0,
         lambda_range=None, lambda1=None, lambda2=None, max_iter=500, max_cyclic_iter=3,
         tol=1e-5, sparsity_factor=0.0, cv=5, use_lapack=True, use_es=True, xs_init = None, a_init = None, verbose=False):
+    
+    eff_eigenmodes = n_eigenmodes * n_orients
     n, m = f.shape
-    nx = m // n_eigenmodes
+    nx = m // (eff_eigenmodes)
 
     if lambda1 is not None:
         assert(lambda2 is not None)
@@ -181,12 +187,12 @@ def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, var_thr=1.0, ROIs=[], alpha=0
         a_concat = np.concatenate(a_init[:], axis = 1)
         plt.imshow(a_concat)
     if len(lambda_range) > 1 and lambda1 is None:
-        model_f = NeuraLVARCV(p, p1, n_eigenmodes, 10, cv, n_jobs, use_lapack=use_lapack)
+        model_f = NeuraLVARCV(p, p1, n_eigenmodes, n_orients, 10, cv, n_jobs, use_lapack=use_lapack)
         if xs_init != None:
             print(y.shape, xs_init[0].shape)
         model_f.fit(y, f, r * np.eye(n), lambda_range, a_init=a_init, q_init=q_init.copy(), xs_init = xs_init, **kwargs)
     else:
-        model_f = NeuraLVAR(p, p1, n_eigenmodes, use_lapack=use_lapack)
+        model_f = NeuraLVAR(p, p1, n_eigenmodes, n_orients, use_lapack=use_lapack)
         lambda_range = lambda_range[0]
         model_f.fit(y, f, r * np.eye(n), lambda_range, lb=lambda1, la=lambda2, a_init=a_init, q_init=q_init.copy(), xs_init = xs_init, **kwargs)
     
@@ -209,9 +215,9 @@ def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, var_thr=1.0, ROIs=[], alpha=0
 
     if var_thr < 1:
         x_ = np.sum(model_f._parameters[4][:, :m] ** 2, axis=0)
-        total_power = np.zeros(m // n_eigenmodes)
-        for n in range(n_eigenmodes):
-            total_power += x_[n::n_eigenmodes]
+        total_power = np.zeros(m // eff_eigenmodes)
+        for n in range(eff_eigenmodes):
+            total_power += x_[n::eff_eigenmodes]
         sorted_idx = np.argsort(total_power)[::-1]
         sorted_pow_ratio = np.cumsum(total_power[sorted_idx])
         sorted_pow_ratio /= sorted_pow_ratio[-1]
@@ -227,8 +233,8 @@ def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, var_thr=1.0, ROIs=[], alpha=0
         if i == j:
             continue
         # Exclude small cross-regression cases
-        target = _expand_roi_indices_as_tup(j, n_eigenmodes)
-        source = _expand_roi_indices_as_tup(i, n_eigenmodes)
+        target = _expand_roi_indices_as_tup(j, eff_eigenmodes)
+        source = _expand_roi_indices_as_tup(i, eff_eigenmodes)
         if sparsity[target,:][:,source].sum() <= sparsity_factor * sparsity[target,:][:,target].sum():
             continue
         # Append rest of the links to check
@@ -244,7 +250,7 @@ def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, var_thr=1.0, ROIs=[], alpha=0
     shared_ll_r, info_ll_r, shm_ll_r = create_shared_mem(dev_raw)
     shared_conv_flag, info_conv_flag, shm_conv_flag = create_shared_mem(dev_raw)
     shared_args = (info_y, info_f, info_bias_r, info_ll_r, info_conv_flag)  # shared memory
-    args = (r, lambda_f, a_f, q_f, p, p1, n_eigenmodes, use_lapack)  # can be passed directly
+    args = (r, lambda_f, a_f, q_f, p, p1, n_eigenmodes, n_orients, use_lapack)  # can be passed directly
 
     # Parallel
     if len(links_to_check) == 0:
@@ -280,16 +286,18 @@ def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, var_thr=1.0, ROIs=[], alpha=0
     return dev_raw, bias_r, bias_f, model_f, conv_flag
 
 
-def _learn_reduced_model(i, j, y, f, r, lambda_f, a, q, n, p, p1, n_eigenmodes, use_lapack, alpha, beta,
+def _learn_reduced_model(i, j, y, f, r, lambda_f, a, q, n, p, p1, n_eigenmodes, n_orients, use_lapack, alpha, beta,
         **kwargs):
-    target = _expand_roi_indices_as_tup(j, n_eigenmodes)
-    source = _expand_roi_indices_as_tup(i, n_eigenmodes)
+    
+    eff_eigenmodes = n_eigenmodes * n_orients
+    target = _expand_roi_indices_as_tup(j, eff_eigenmodes)
+    source = _expand_roi_indices_as_tup(i, eff_eigenmodes)
     print(f'target: {target}')
     print(f'source {source}')
     link = '->'.join(map(lambda x: ','.join(map(str, x)), (source, target)))
     a_init = a.copy()
     a_init[:, target, source] = 0.0
-    model_r = NeuraLVAR(p, p1, n_eigenmodes, use_lapack=use_lapack)
+    model_r = NeuraLVAR(p, p1, n_eigenmodes, n_orients, use_lapack=use_lapack)
     if isinstance(r, list):
         assert(len(r) == 2)
         cov = scipy.linalg.block_diag(r[0] * np.eye(n//2), r[1] * np.eye(n//2))
@@ -304,7 +312,7 @@ def _learn_reduced_model(i, j, y, f, r, lambda_f, a, q, n, p, p1, n_eigenmodes, 
 
 
 def _learn_reduced_model_parallel(link_index, info_y, info_f, info_bias_r, info_ll_r, info_conv_flag, r, lambda_f, a, q,
-        p, p1, n_eigenmodes, use_lapack, alpha, beta, **kwargs):
+        p, p1, n_eigenmodes, n_orients, use_lapack, alpha, beta, **kwargs):
     try:
         y, shm_y = link_share_memory(info_y)
         f, shm_f = link_share_memory(info_f)
@@ -318,7 +326,7 @@ def _learn_reduced_model_parallel(link_index, info_y, info_f, info_bias_r, info_
     n = f.shape[0]
     j, i = link_index
     logger.debug(f"{current_process().name} working on {i, j}th link")
-    ll, bias, flag = _learn_reduced_model(i, j, y, f, r, lambda_f, a, q, n, p, p1, n_eigenmodes, use_lapack,
+    ll, bias, flag = _learn_reduced_model(i, j, y, f, r, lambda_f, a, q, n, p, p1, n_eigenmodes, n_orients, use_lapack,
                                           alpha, beta, **kwargs)
     ll_r[j, i] = ll
     bias_r[j, i] = bias
@@ -327,7 +335,7 @@ def _learn_reduced_model_parallel(link_index, info_y, info_f, info_bias_r, info_
         shm.close()
 
 
-def _prepare_eigenmodes(info, forward, noise_cov, labels, n_eigenmodes=2, loose=0.0, depth=0.0, pca=True, rank=None,
+def _prepare_eigenmodes(info, forward, noise_cov, labels, n_eigenmodes=2, n_orients = 1, loose=0.0, depth=0.0, pca=True, rank=None,
         mode='svd_flip'):
     if not is_fixed_orient(forward):
         depth_dict = None
@@ -344,14 +352,16 @@ def _prepare_eigenmodes(info, forward, noise_cov, labels, n_eigenmodes=2, loose=
     logger.info('Whitening data matrix.')
     print('check orientation')
     if not is_fixed_orient(forward):
+        if n_orients <= 1:
+            raise ValueError('Number of orientations is less than or equal to 1 for not fixed orientation forward. Please use accurate number of orientations')
         print('The lead field is not fixed-orientation using mixed source space method')
         if isinstance(labels, Forward):
-            weights, G, label_vertidx = _reduce_lead_field_vol(forward, labels, n_eigenmodes, data=gain.T)
+            weights, G, label_vertidx = _reduce_lead_field_vol(forward, labels, n_eigenmodes, n_orients, data=gain.T)
             label_names = []
             for i, label in enumerate(labels['src']):
                 label_names.extend(map(lambda x: f'{i}-{x}', label['vertno']))
         elif isinstance(labels, SourceSpaces):
-            weights, G, label_vertidx = _reduce_lead_field_vol(forward, labels, n_eigenmodes, data=gain.T)
+            weights, G, label_vertidx = _reduce_lead_field_vol(forward, labels, n_eigenmodes, n_orients, data=gain.T)
             label_names = []
             for i, label in enumerate(labels):
                 label_names.extend(map(lambda x: f'{i}-{x}', label['vertno']))
@@ -359,14 +369,16 @@ def _prepare_eigenmodes(info, forward, noise_cov, labels, n_eigenmodes=2, loose=
             raise ValueError('Not supported {:s}: labels are expected to be either an mne.SourceSpace or'
                              'mne.Forward object.'.format(labels))
     else:
+        if n_orients != 1:
+            raise ValueError('Number of orientations is not 1 but is using fixed orientation')
         print('fixed orientation')
         if isinstance(labels, Forward):
-            weights, G, label_vertidx, src_flip = _reduce_lead_field(forward, labels, n_eigenmodes, data=gain.T)
+            weights, G, label_vertidx, src_flip = _reduce_lead_field(forward, labels, n_eigenmodes, n_orients, data=gain.T)
             label_names = []
             for i, label in enumerate(labels['src']):
                 label_names.extend(map(lambda x: f'{i}-{x}', label['vertno']))
         elif isinstance(labels, SourceSpaces):
-            weights, G, label_vertidx, src_flip = _reduce_lead_field(forward, labels, n_eigenmodes, data=gain.T)
+            weights, G, label_vertidx, src_flip = _reduce_lead_field(forward, labels, n_eigenmodes, n_orients, data=gain.T)
             label_names = []
             for i, label in enumerate(labels):
                 label_names.extend(map(lambda x: f'{i}-{x}', label['vertno']))
@@ -391,7 +403,8 @@ def _prepare_eigenmodes(info, forward, noise_cov, labels, n_eigenmodes=2, loose=
         src_flip = [i for select, i in zip(sel, src_flip) if select]
     discarded_labels = []
     j = 0
-    for i, sel_ in enumerate(sel[::n_eigenmodes]):
+    eff_eigenmodes = n_eigenmodes * n_orients
+    for i, sel_ in enumerate(sel[::eff_eigenmodes]):
         if not sel_:
             discarded_labels.append(labels.pop(i - j))
             label_vertidx.pop(i - j)
@@ -404,7 +417,7 @@ def _prepare_eigenmodes(info, forward, noise_cov, labels, n_eigenmodes=2, loose=
     return weights, G, label_vertidx, label_names, gain_info, whitener
 
 
-def _reduce_lead_field(forward, src, n_eigenmodes, data=None):
+def _reduce_lead_field(forward, src, n_eigenmodes, n_orients, data=None):
     import mne
     if data is None:
         logger.info('Using the raw forward solution')
@@ -435,7 +448,7 @@ def _reduce_lead_field(forward, src, n_eigenmodes, data=None):
     return weights, group_eigenmodes.T, grouped_vertidx, src_flips
 
 
-def _reduce_lead_field_vol(forward, src, n_eigenmodes, data=None):
+def _reduce_lead_field_vol(forward, src, n_eigenmodes, n_orients, data=None):
     import mne
     if data is None:
         print('data is None')
@@ -451,7 +464,7 @@ def _reduce_lead_field_vol(forward, src, n_eigenmodes, data=None):
     print(forward['src'])
     groups, coarse_rr = _prepare_leadfield_reduction_vol(src, forward['src'])
  
-    group_eigenmodes = np.zeros((len(groups)*n_eigenmodes*3, data.shape[-1]), dtype=data.dtype)
+    group_eigenmodes = np.zeros((len(groups)*n_eigenmodes * n_orients, data.shape[-1]), dtype=data.dtype)
     print(f'Group Eigenmodes Shape {group_eigenmodes.shape}')
     
     weights = []
@@ -467,8 +480,8 @@ def _reduce_lead_field_vol(forward, src, n_eigenmodes, data=None):
         ras_idxs = np.concatenate([3 * idxs[:, None] + np.arange(3)], axis=1).ravel()
         subvoxels = data[ras_idxs]
         print(f'subvoxel shape: {subvoxels.shape}')
-        eig_src_weights, this_group_eigenmodes, percentage_explained = _truncatedsvd_vol(subvoxels, n_eigenmodes, return_pecentage_exaplained=True)
-        group_eigenmodes[coarse_idx * n_eigenmodes * 3:(coarse_idx + 1) * n_eigenmodes * 3] = this_group_eigenmodes
+        eig_src_weights, this_group_eigenmodes, percentage_explained = _truncatedsvd_vol(subvoxels, n_eigenmodes, n_orients, return_pecentage_exaplained=True)
+        group_eigenmodes[coarse_idx * n_eigenmodes * n_orients:(coarse_idx + 1) * n_eigenmodes * n_orients] = this_group_eigenmodes
         print(f"patch {coarse_idx}: vertices {subvoxels.shape[0]} -> {n_eigenmodes} leadfield reduction explained {percentage_explained*100:.3f}% variance")
         weights.append(eig_src_weights)
     return weights, group_eigenmodes.T, groups
@@ -652,11 +665,12 @@ def _extract_label_eigenmodes(fwd, labels, data=None, mode='mean', n_eigenmodes=
         return label_eigenmodes.T, label_vertidx, src_flip
 
 
-def _expand_roi_indices_as_tup(reg_idx, emod):
-    return tuple(range(reg_idx * emod, reg_idx * emod + emod))
+def _expand_roi_indices_as_tup(reg_idx, emod, n_orients = 1):
+    eff_emod = emod* n_orients
+    return tuple(range(reg_idx * eff_emod, reg_idx * eff_emod + eff_emod))
 
 
-def _truncatedsvd_vol(a, n_components=2, return_pecentage_exaplained=False):
+def _truncatedsvd_vol(a, n_components=2, n_orients = 3, return_pecentage_exaplained=False):
     if n_components > min(*a.shape):
         raise ValueError('n_components={:d} should be smaller than '
                          'min({:d}, {:d})'.format(n_components, *a.shape))
@@ -664,8 +678,7 @@ def _truncatedsvd_vol(a, n_components=2, return_pecentage_exaplained=False):
 
 
     n_total, n_sensors = a.shape
-    n_orient = 3
-    n_voxels = n_total // n_orient
+    n_voxels = n_total // n_orients
 
 
 
@@ -678,15 +691,15 @@ def _truncatedsvd_vol(a, n_components=2, return_pecentage_exaplained=False):
     u4 = u[:, :n_components]
 
     ras_modes = np.empty(
-        (n_components * n_orient, n_sensors),
+        (n_components * n_orients, n_sensors),
         dtype=u4.dtype
     )
 
     G = a.T
 
     for m in range(n_components):
-        for r in range(n_orient):
-            cols = np.arange(r, n_total, n_orient)
+        for r in range(n_orients):
+            cols = np.arange(r, n_total, n_orients)
             # contribution from R/A/S slice
             mode_r = G[:, cols] @ u4[cols, m]
             ras_modes[m * 3 + r] = mode_r

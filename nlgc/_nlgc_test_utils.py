@@ -315,7 +315,7 @@ a: ground truth a matrix which VAR model is trying to estimate, contains GC link
 
     
 # Assume folder setup follows eelbrain pipeline
-def lead_field_generation(root, subject_id, src_space, n_eigenmodes, loose=0.0, depth=0.0, pca=True, rank=None, trans = None):
+def lead_field_generation(root, subject_id, src_space, n_eigenmodes, n_orients, loose=0.0, depth=0.0, pca=True, rank=None, trans = None):
     full_empty_room_path = root + "meg/" + subject_id + "/" + subject_id + "_emptyroom-raw.fif"
     raw_empty_room = mne.io.read_raw_fif(full_empty_room_path)
     info = raw_empty_room.info
@@ -361,7 +361,7 @@ def lead_field_generation(root, subject_id, src_space, n_eigenmodes, loose=0.0, 
         fwd_origin = mne.make_forward_solution(info = info, trans = trans_file, src = src_origin, bem = bem_folder + subject_id + "-inner_skull-bem-sol.fif", ignore_ref = True)
         fwd_target = mne.make_forward_solution(info = info, trans = trans_file, src = src_target, bem = bem_folder + subject_id + "-inner_skull-bem-sol.fif", ignore_ref = True)
     # fwd_origin_data = fwd_origin['sol']
-    weights, G, label_vertidx, label_names, gain_info, whitener = _prepare_eigenmodes(info, fwd_origin, noise_cov, fwd_target, n_eigenmodes=n_eigenmodes, loose=loose, depth=depth, pca=pca, rank=rank,
+    weights, G, label_vertidx, label_names, gain_info, whitener = _prepare_eigenmodes(info, fwd_origin, noise_cov, fwd_target, n_eigenmodes=n_eigenmodes, n_orients = n_orients, loose=loose, depth=depth, pca=pca, rank=rank,
     mode='svd_flip')
     G_normalizing_factor = np.sqrt(np.sum(G ** 2, axis=0))
     G /= G_normalizing_factor
@@ -451,13 +451,13 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
     rng = np.random.default_rng(seed)
     np.random.seed(seed)
 
-    n_orient = 3
+    n_orients = 3
 
     if G is None:
         
         n_sensors = 40
-        n_voxels = int(np.floor(2*n_sensors/(n_eigenmodes*n_orient)))
-        m = n_eigenmodes * n_orient * n_voxels
+        n_voxels = int(np.floor(2*n_sensors/(n_eigenmodes*n_orients)))
+        m = n_eigenmodes * n_orients * n_voxels
 
         f = rng.normal(size=(n_sensors, m))
         f /= np.sqrt(np.sum(f ** 2, axis=0, keepdims=True)) + 1e-12
@@ -466,13 +466,13 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
         f = G
         n_sensors, m = f.shape
 
-        if m % n_orient != 0:
+        if m % n_orients != 0:
             raise ValueError(
                 f"G has {m} columns, which is not divisible by 3. "
                 "Expected G.shape = (n_sensors, 3*n_voxels)."
             )
 
-        n_voxels = m // (n_eigenmodes * n_orient)
+        n_voxels = m // (n_eigenmodes * n_orients)
 
     
     print(f'n_sensors {n_sensors}')
@@ -497,12 +497,12 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
 
     if band == "wide":
         for v in active_voxels:
-            block = _voxel_block(v, n_orient)
+            block = _voxel_block(v, n_orients)
 
-            q[block, block] = process_noise_active * np.eye(n_orient)
+            q[block, block] = process_noise_active * np.eye(n_orients)
 
             # Independent AR(1)-style self-history for R/A/S
-            a[0, block, block] = target_spec_rad * np.eye(n_orient)
+            a[0, block, block] = target_spec_rad * np.eye(n_orients)
 
     else:
         band_dict = {
@@ -518,16 +518,16 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
         f_low, f_high = band_dict[band]
 
         for v in active_voxels:
-            block = _voxel_block(v, n_orient)
+            block = _voxel_block(v, n_orients)
 
-            q[block, block] = process_noise_active * np.eye(n_orient)
+            q[block, block] = process_noise_active * np.eye(n_orients)
 
             f0 = rng.uniform(f_low, f_high)
             w0 = 2 * np.pi * f0 / fs
 
             # AR(2) oscillator per RAS component
-            a[0, block, block] = target_spec_rad * 2 * np.cos(w0) * np.eye(n_orient)
-            a[1, block, block] = -(target_spec_rad ** 2) * np.eye(n_orient)
+            a[0, block, block] = target_spec_rad * 2 * np.cos(w0) * np.eye(n_orients)
+            a[1, block, block] = -(target_spec_rad ** 2) * np.eye(n_orients)
 
     link_power = target_spec_rad / 2
     print(f"Link Power {link_power}")
@@ -537,8 +537,8 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
     for link_idx in range(n_links):
         source_v, target_v = rng.choice(active_voxels, size=2, replace=False)
 
-        source_block = _voxel_block(source_v, n_orient)
-        target_block = _voxel_block(target_v, n_orient)
+        source_block = _voxel_block(source_v, n_orients)
+        target_block = _voxel_block(target_v, n_orients)
 
         links.append((target_v, source_v))
 
@@ -587,10 +587,10 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
     JG = np.zeros((n_voxels, n_voxels), dtype=bool)
 
     for target_v in range(n_voxels):
-        target_block = _voxel_block(target_v, n_orient)
+        target_block = _voxel_block(target_v, n_orients)
 
         for source_v in range(n_voxels):
-            source_block = _voxel_block(source_v, n_orient)
+            source_block = _voxel_block(source_v, n_orients)
 
             if target_v == source_v:
                 continue
@@ -840,9 +840,9 @@ verbose: bool
         Default: False, Run GC extraction with verbose mode or not
 '''
 def nlgc_map_opt(M, G, r, order, self_history=None, var_thr=1.0, n_segments=1, lambda_range=None, max_iter=500,
-                 max_cyclic_iter=3, tol=1e-5, sparsity_factor=0.0, cv=5, n_eigenmodes = 2, xs_init = None, a_init = None, use_es = False, patch_idx = None, verbose = False):
+                 max_cyclic_iter=3, tol=1e-5, sparsity_factor=0.0, cv=5, n_eigenmodes = 2, n_orients = 1, xs_init = None, a_init = None, use_es = False, patch_idx = None, verbose = False):
     n, nnx = G.shape
-    len_patch_idx = nnx // n_eigenmodes
+    len_patch_idx = nnx // (n_eigenmodes * n_orients)
     _, t = M.shape
     tt = t // n_segments
     print(f'r is {r}')
@@ -860,7 +860,7 @@ def nlgc_map_opt(M, G, r, order, self_history=None, var_thr=1.0, n_segments=1, l
         print(lambda_range)
         print(nnx)
         d_raw_, bias_r_, bias_f_, model_f, conv_flag_ = \
-            _gc_extraction(M[:, n * tt: (n + 1) * tt], G, r, p=order, p1=self_history, n_eigenmodes=n_eigenmodes,
+            _gc_extraction(M[:, n * tt: (n + 1) * tt], G, r, p=order, p1=self_history, n_eigenmodes=n_eigenmodes, n_orients= n_orients,
                            ROIs=ROI_list, cv=cv, lambda_range=lambda_range, max_iter=max_iter,
                            max_cyclic_iter=max_cyclic_iter, tol=tol, sparsity_factor=sparsity_factor,
                            use_lapack=True, use_es=use_es, var_thr=var_thr, xs_init = xs_init, a_init = a_init, verbose = verbose)
@@ -869,7 +869,7 @@ def nlgc_map_opt(M, G, r, order, self_history=None, var_thr=1.0, n_segments=1, l
         bias_f[n] = bias_f_
         models.append(model_f)
         conv_flag[n] = conv_flag_
-        nlgc_obj = NLGC('Simulation_rnd', len_patch_idx, n, t, order, n_eigenmodes, n_segments, d_raw, bias_f, bias_r,
+        nlgc_obj = NLGC('Simulation_rnd', len_patch_idx, n, t, order, n_eigenmodes, n_orients, n_segments, d_raw, bias_f, bias_r,
                          models, conv_flag, [], [], None, None, None, None)
 
 
@@ -940,7 +940,7 @@ save_dir: string
         Default: None, Pass in directory for saving analytics and model/data
 '''
 def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, band = "wide", fs = 50, natures = 'all', target_spec_rad = .45,
-        root = None, subject_id = None, session_name = None, trans = None, order = 2, t = 500, n_eigenmodes = 1,
+        root = None, subject_id = None, session_name = None, trans = None, order = 2, t = 500, n_eigenmodes = 1, n_orients = 1,
         n_segments = 1, loose = 0.0, depth = 0.0, pca = True, rank = None, lambda_range = None,
         max_iter = 500, max_cyclic_iter = 3, tol = 1e-5, sparsity_factor = 0.0, cv = 5 ,var_thr = 1.0, alpha = .1, 
         m_active = 10, n_links = 10, warm_start = False, self_history = None, passed_evoked = None, use_es = False, 
@@ -957,7 +957,7 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
         src_target = mne.read_source_spaces(passed_evoked['src_target'])
         info = evoked[0].info
         weights, G, label_vertidx, label_names, gain_info, whitener = _prepare_eigenmodes(info, fwd, noise_cov, src_target, 
-                                                                            n_eigenmodes=n_eigenmodes, loose=loose, depth=depth, pca=pca, rank=rank, mode='svd_flip')
+                                                                            n_eigenmodes=n_eigenmodes, n_orients = n_orients, loose=loose, depth=depth, pca=pca, rank=rank, mode='svd_flip')
     elif (lead_field_gen):
         G, info, noise_cov, fwd, weights = lead_field_generation(root, subject_id, src_space, n_eigenmodes, loose, depth, pca, rank, trans)
     elif (type(lf) != type(None)):
@@ -1014,7 +1014,7 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
     if run_ggc == False or (run_ggc and ggc_kwargs != None and ggc_kwargs['model_params'] == None):
         temp_obj = nlgc_map_opt(y.T, f, r=r_cov, order=p, self_history=p, lambda_range=lambda_range, n_segments=n_segments,
                                     var_thr=var_thr, max_iter=max_iter, max_cyclic_iter=max_cyclic_iter, tol=tol,
-                                    sparsity_factor=sparsity_factor, n_eigenmodes = n_eigenmodes, xs_init = stc_init, a_init = a_init, use_es = use_es, patch_idx = patch_idx, verbose = verbose)
+                                    sparsity_factor=sparsity_factor, n_eigenmodes = n_eigenmodes, n_orients = n_orients, xs_init = stc_init, a_init = a_init, use_es = use_es, patch_idx = patch_idx, verbose = verbose)
     else:
         temp_obj = ggc_kwargs['model']
     end_time = time.time()

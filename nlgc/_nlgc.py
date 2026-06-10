@@ -22,7 +22,7 @@ from ._nlgc_test_utils import run_GT_sim
 
 def nlgc_map(name, evoked, forward, noise_cov, labels, order, self_history=None, n_eigenmodes=2, alpha=0.0, beta=0.0,
         patch_idx=[], n_segments=1, loose=0.0, depth=0.0, pca=True, rank=None, lambda_range=None, lambda1=None, lambda2=None,
-        max_iter=500, max_cyclic_iter=3, tol=1e-5, sparsity_factor=0.0, cv=5, use_lapack=True, use_es=True, var_thr=1.0, a_init = None, verbose=False, warm_start = False):
+        max_iter=500, max_cyclic_iter=3, tol=1e-5, sparsity_factor=0.0, cv=5, use_lapack=True, use_es=True, var_thr=1.0, cv_type = 'seeded', verbose=False, warm_start = False, n_orients = 1):
     """NLGC connectivity map estimation
 
     This function estimates the causal connectivity map across sources given the MEG measurements, forward model,
@@ -77,6 +77,8 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, order, self_history=None,
         the threshold to limit the number of reduced models by considering only the possible links between the active
         sources which explain 'var_thr' of the total power
         (default = 1, i.e., all sources)
+    cv_type: str
+        the type of cv either using seeded lambda or 
     
 
     Returns
@@ -90,10 +92,9 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, order, self_history=None,
     if not is_fixed_orient(forward):
         raise ValueError(f"Cannot work with free orientation forward: {forward}")
 
-
         
     weights, G, label_vertidx, label_names, gain_info, whitener = \
-        _prepare_eigenmodes(evoked.info, forward, noise_cov, labels, n_eigenmodes, loose, depth, pca, rank)
+        _prepare_eigenmodes(evoked.info, forward, noise_cov, labels, n_eigenmodes, n_orients, loose, depth, pca, rank)
 
 
     stc_init = None
@@ -162,18 +163,19 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, order, self_history=None,
         d_raw_, bias_r_, bias_f_, model_f, conv_flag_ = \
             _gc_extraction(M[:, this_segment * tt: (this_segment + 1) * tt], G, r, p=order, p1=self_history,
                            n_eigenmodes=n_eigenmodes,
+                           n_orients = n_orients,
                            ROIs=patch_idx,
                            alpha=alpha, beta=beta, cv=cv, lambda_range=lambda_range, lambda1=lambda1, 
                            lambda2=lambda2, max_iter=max_iter,
                            max_cyclic_iter=max_cyclic_iter, tol=tol, sparsity_factor=sparsity_factor,
-                           use_lapack=use_lapack, use_es=use_es, var_thr=var_thr, xs_init=stc_init, a_init = a_init, verbose=verbose)
+                           use_lapack=use_lapack, use_es=use_es, var_thr=var_thr, xs_init=stc_init, verbose=verbose)
         d_raw[this_segment] = d_raw_
         bias_r[this_segment] = bias_r_
         bias_f[this_segment] = bias_f_
         models.append(model_f)
         conv_flag[this_segment] = conv_flag_
 
-    nlgc_obj = NLGC(name, nx, n, t, order, n_eigenmodes, n_segments, d_raw, bias_f, bias_r, models,
+    nlgc_obj = NLGC(name, nx, n, t, order, n_eigenmodes, n_orients, n_segments, d_raw, bias_f, bias_r, models,
                     conv_flag, label_names, label_vertidx, forward, whitener, weights)
 
     return nlgc_obj

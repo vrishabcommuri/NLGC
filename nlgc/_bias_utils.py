@@ -9,7 +9,7 @@ from scipy import linalg
 from .opt.m_step import calculate_ss
 
 
-def sample_path_bias(q, a, x_bar, zeroed_index, n_eigenmodes):
+def sample_path_bias(q, a, x_bar, zeroed_index, n_eigenmodes, n_orients):
     """Computes the bias in the deviance
 
     Parameters
@@ -27,6 +27,7 @@ def sample_path_bias(q, a, x_bar, zeroed_index, n_eigenmodes):
     t, dxm = x_bar.shape
     _, dtot = a.shape
     p = dtot // dxm
+    eff_eigenmodes = n_eigenmodes * n_orients
 
     bias = 0
     qd = np.diag(q)
@@ -58,9 +59,9 @@ def sample_path_bias(q, a, x_bar, zeroed_index, n_eigenmodes):
         #         ldotdot = np.delete(ldotdot, removed_idx, axis=1)
 
         # FIX removing cross-talk components (that forced to be zero)
-        # for l in range(0, dxm, n_eigenmodes):
-        #     for u in range(n_eigenmodes):
-        #         for v in range(n_eigenmodes):
+        # for l in range(0, dxm, eff_eigenmodes):
+        #     for u in range(eff_eigenmodes):
+        #         for v in range(eff_eigenmodes):
         #             if v != u and idx_src == l + v:
         #                 removed_idx = list(range(l + u, dtot, dxm))
         #                 print(f"removed_idx = {removed_idx}")
@@ -78,9 +79,9 @@ def sample_path_bias(q, a, x_bar, zeroed_index, n_eigenmodes):
         #                 print(f"ldotdot.shape after delete2 = {ldotdot.shape}")
 
         delete_idxs = []
-        for l in range(0, dxm, n_eigenmodes):
-            for u in range(n_eigenmodes):
-                for v in range(n_eigenmodes):
+        for l in range(0, dxm, eff_eigenmodes):
+            for u in range(eff_eigenmodes):
+                for v in range(eff_eigenmodes):
                     if v != u and idx_src == l + v:
                         removed_idx = list(range(l + u, dtot, dxm))
                         if zeroed_index is not None:

@@ -43,7 +43,7 @@ class NeuraLVAR:
     _zeroed_index = None
     restriction = None
 
-    def __init__(self, order, self_history=None, n_eigenmodes=None, copy=True, standardize=False, normalize=False,
+    def __init__(self, order, self_history=None, n_eigenmodes=None, n_orients = None, copy=True, standardize=False, normalize=False,
             use_lapack=True):
         if standardize is not False and normalize is not False:
             raise ValueError(f"both standardize={standardize} and normalize={normalize} cannot be specified")
@@ -61,6 +61,7 @@ class NeuraLVAR:
         self._self_histoty = order if self_history is None else self_history
         self._use_lapack = use_lapack
         self._n_eigenmodes = 1 if n_eigenmodes is None else n_eigenmodes
+        self._n_orients = 1 if n_orients is None else n_orients
 
     def _fit(self, y, f, r, lambda2=None, lb=None, la=None, max_iter=500, max_cyclic_iter=3, a_init=None, q_init=None,
             rel_tol=0.01, xs=None, alpha=0.0, beta=0.0, fixed_a=False, fixed_q=False, verbose=False):
@@ -157,11 +158,11 @@ class NeuraLVAR:
                     if lb is not None and la is not None:
                         a_upper, changes = solve_for_a_indepdiag(q_upper, s1, s2, a_upper, p1, lb=lb, la=la, max_iter=max_iter,
                                                    tol=min(1e-4, rel_tol), zeroed_index=zeroed_index,
-                                                   update_only_target=False, n_eigenmodes=self._n_eigenmodes)
+                                                   update_only_target=False, n_eigenmodes=self._n_eigenmodes, n_orients = self._n_orients)
                     else:
                         a_upper = solve_for_a(q_upper, s1, s2, a_upper, p1, lambda2=lambda2, max_iter=max_iter,
                                                    tol=min(1e-4, rel_tol), zeroed_index=zeroed_index,
-                                                   update_only_target=False, n_eigenmodes=self._n_eigenmodes)
+                                                   update_only_target=False, n_eigenmodes=self._n_eigenmodes, n_orients = self._n_orients)
                 if not fixed_q:
                     q_upper, rel_q_change = solve_for_q(q_upper, s3, s1, s2, a_upper, lambda2=lambda2, alpha=alpha,
                                                         beta=beta)
@@ -304,7 +305,7 @@ class NeuraLVAR:
         a, f, q, r, *rest = self._parameters
         y, a_, a_upper, f_, q_, q_upper, _, r, (_x, x_), m, n, p, use_lapack = self._prep_for_sskf(y, a, f, q, r)
         x_, s, s_, b, s_hat, ll_ = sskf(y, a_, f_, q_, r, xs=(_x, x_), use_lapack=use_lapack)
-        bias = sample_path_bias(q_upper, a_upper, x_[:, :m], self._zeroed_index, self._n_eigenmodes)
+        bias = sample_path_bias(q_upper, a_upper, x_[:, :m], self._zeroed_index, self._n_eigenmodes, self._n_orients)
         return bias
 
     def compute_bias_idx(self, y, source):
@@ -476,12 +477,12 @@ class NeuraLVARCV(NeuraLVAR):
     mse_path = None
     es_path = None
 
-    def __init__(self, order, self_history, n_eigenmodes, max_n_mus, cv, n_jobs, copy=True, standardize=False,
+    def __init__(self, order, self_history, n_eigenmodes, n_orients, max_n_mus, cv, n_jobs, copy=True, standardize=False,
             normalize=False, use_lapack=True):
         self.max_n_mus = max_n_mus
         self.cv = cv
         self.n_jobs = n_jobs
-        NeuraLVAR.__init__(self, order, self_history, n_eigenmodes, copy, standardize, normalize, use_lapack)
+        NeuraLVAR.__init__(self, order, self_history, n_eigenmodes, n_orients, copy, standardize, normalize, use_lapack)
 
     def _cvfit(self, split, info_y, info_f, info_r, info_cv, info_pred, splits, lambda_range, max_iter=500,
             max_cyclic_iter=3, a_init=None, q_init=None, rel_tol=1e-5, alpha=0.0, beta=0.0, xs_init=None, verbose=False):
