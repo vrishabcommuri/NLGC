@@ -144,12 +144,12 @@ class NeuraLVAR:
                     break
 
             s1, s2, s3, t = calculate_ss(x_, s_, b, m, p)
-            if (i % 10 == 0 and self.restriction is None):
-                plt.imshow(s1, cmap = 'seismic')
-                plt.show()
-                a_concat = np.concatenate(self._unravel_a(a_upper)[:], axis = 1)
-                plt.imshow(a_concat, cmap = 'seismic')
-                plt.show()
+            # if (i % 10 == 0 and self.restriction is None):
+            #     plt.imshow(s1, cmap = 'seismic')
+            #     plt.show()
+            #     a_concat = np.concatenate(self._unravel_a(a_upper)[:], axis = 1)
+            #     plt.imshow(a_concat, cmap = 'seismic')
+            #     plt.show()
             beta = 2 * beta / t
             alpha = 2 * (alpha + 1) / t if alpha else alpha
 

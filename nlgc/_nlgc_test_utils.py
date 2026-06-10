@@ -441,6 +441,10 @@ def _stabilize_var(a, target_spec_rad=0.9, max_iter=20):
     rho = _companion_spectral_radius(a)
     return a, rho
 
+def _voxel_mode_block(v, n_eigenmodes, n_orients=3):
+    block_size = n_eigenmodes * n_orients
+    return slice(v * block_size, (v + 1) * block_size)
+
 
 def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes = 2, G=None, p=2, t=500, n_active_voxels=10, n_links=10, target_spec_rad=0.9, coupling_mode="mixed",
     process_noise_active=0.1, process_noise_inactive=0.001, measurement_noise_scale=1e2, plot_psd=False,):
@@ -492,7 +496,7 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
     q = process_noise_inactive * np.eye(m)
     a = np.zeros((p, m, m), dtype=np.float64)
 
-    active_voxels = rng.choice(n_voxels, size=n_active_voxels, replace=False)
+    active_voxels = rng.choice(n_voxels*n_eigenmodes, size=n_active_voxels, replace=False)
     print(f"Active voxels: {active_voxels}")
 
     if band == "wide":
@@ -583,20 +587,19 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
     print(f"Final companion spectral radius: {rho:.4f}")
 
     # Ground-truth voxel-level GC matrix
-    temp_JG = np.sum(np.abs(a), axis=0)  # (3N, 3N)
+    temp_JG = np.sum(np.abs(a), axis=0)
     JG = np.zeros((n_voxels, n_voxels), dtype=bool)
 
     for target_v in range(n_voxels):
-        target_block = _voxel_block(target_v, n_orients)
+        target_block = _voxel_mode_block(target_v, n_eigenmodes, n_orients)
 
         for source_v in range(n_voxels):
-            source_block = _voxel_block(source_v, n_orients)
+            source_block = _voxel_mode_block(source_v, n_eigenmodes, n_orients)
 
             if target_v == source_v:
                 continue
 
-            block_strength = temp_JG[target_block, source_block].sum()
-            JG[target_v, source_v] = block_strength > 0
+            JG[target_v, source_v] = temp_JG[target_block, source_block].sum() > 0
 
     T = burnin + t
 
@@ -1095,6 +1098,7 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
     plt.show()
     plt.imshow(J)
     plt.show()
+    a_concat = np.concatenate(a[:], axis = 1)
     plt.imshow(a_concat, cmap = 'seismic')
     plt.show()
     a_model = temp_obj._model_f[0]._parameters[0]
