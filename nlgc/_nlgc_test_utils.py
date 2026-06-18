@@ -524,7 +524,7 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
         for v in active_voxels:
             block = _voxel_block(v, n_orients)
 
-            q[block, block] = process_noise_active * np.eye(n_orients)
+            q[block, block] = process_noise_active * np.eye(n_orients) # Look into making this randn but make sure that the array is positive definite and symmetric
 
             f0 = rng.uniform(f_low, f_high)
             w0 = 2 * np.pi * f0 / fs

@@ -79,6 +79,9 @@ def sskf(y, a, f, q, r, xs=None, use_lapack=True):
     b = b.T  # Smoother Gain
     s_hat = s - b.dot(_s).dot(b.T)  # See README what this means!
     s_ = linalg.solve_discrete_lyapunov(b, s_hat)
+    s_ = 0.5 * (s_ + s_.T)
+    print("S min diag:", np.diag(s_).min())
+
     if (np.diag(s_) <= 0).any():
         raise ValueError('diag(s_) values are not non-negative!')
     # s_ = s + b.dot(s - _s).dot(b.T)     # Approximation from Elvira's paper

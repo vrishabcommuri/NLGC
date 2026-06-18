@@ -164,7 +164,7 @@ class NeuraLVAR:
                                                    tol=min(1e-4, rel_tol), zeroed_index=zeroed_index,
                                                    update_only_target=False, n_eigenmodes=self._n_eigenmodes, n_orients = self._n_orients)
                 if not fixed_q:
-                    q_upper, rel_q_change = solve_for_q(q_upper, s3, s1, s2, a_upper, lambda2=lambda2, alpha=alpha,
+                    q_upper, rel_q_change = solve_for_q(q =q_upper, s3 = s3, s1 = s1, s2 = s2, a = a_upper, m = f.shape[1], p = self._order, n_samples = x_.shape[0], lambda2=lambda2, alpha=alpha,
                                                         beta=beta)
                 if rel_q_change < rel_tol:
                     break
@@ -254,6 +254,14 @@ class NeuraLVAR:
 
     def compute_norm_one(self, a_):
         return np.sum(np.absolute(a_))
+
+    def compute_two_one_norm(self, a_):
+        print(f'a_ shape is {a_.shape}')
+        p = a_.shape[0]
+        m = a_.shape[1]
+        N = m // 3
+        B = a_.reshape(N, 3, p, N, 3)
+        return (np.sqrt(np.sum(B * B, axis=(1, 4), keepdims=True)).sum())
 
     def compute_crossvalidation_metric(self, y, args=None):
         """Returns log(p(y|args=(a, f, q, r))).
@@ -556,13 +564,12 @@ class NeuraLVARCV(NeuraLVAR):
             # # different criteria for cross-validation
             cv[0, split, i] = self.compute_ll_(y_test, (a_, f, q_upper, r))
             cv[1, split, i] = lambda2 * self.compute_norm_one(a_)
-
             # cv[2, split, i] = self.compute_ll(y_test, (a_, f, q_upper, r))
-            # cv[3, split, i] = self.compute_crossvalidation_metric(y_test, (a_, f, q_upper, r))
+            # cv[1, split, i] = self.compute_crossvalidation_metric(y_test, (a_, f, q_upper, r))
             # cv[4, split, i] = self.compute_Q(y_test, (a_, f, q_upper, r))
-            # cv[5, split, i] = self.compute_logsum_q(y_test, max_iter=max_iter, max_cyclic_iter=max_cyclic_iter,
+            # cv[1, split, i] = self.compute_logsum_q(y_test, max_iter=max_iter, max_cyclic_iter=max_cyclic_iter,
             #                                  rel_tol=rel_tol, alpha=alpha, beta=beta, args=(a_, f, q_upper, r))
-            pred[split, i][:] = self.get_prediction(y, (a_, f, q_upper, r)).T
+            pred[split, i][:] = self.get_prediction(y_test, (a_, f, q_upper, r)).T
 
         for shm in (shm_y, shm_f, shm_r, shm_c):
             shm.close()

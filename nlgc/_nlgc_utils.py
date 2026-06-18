@@ -183,9 +183,9 @@ def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, n_orients = 1, var_thr=1.0, R
     q_init = q_val * np.eye(m)
 
     print('Start creating models')
-    if a_init != None:
-        a_concat = np.concatenate(a_init[:], axis = 1)
-        plt.imshow(a_concat)
+    # if a_init != None:
+    #     a_concat = np.concatenate(a_init[:], axis = 1)
+    #     plt.imshow(a_concat)
     if len(lambda_range) > 1 and lambda1 is None:
         model_f = NeuraLVARCV(p, p1, n_eigenmodes, n_orients, 10, cv, n_jobs, use_lapack=use_lapack)
         if xs_init != None:
@@ -481,6 +481,7 @@ def _reduce_lead_field_vol(forward, src, n_eigenmodes, n_orients, data=None):
         subvoxels = data[ras_idxs]
         print(f'subvoxel shape: {subvoxels.shape}')
         eig_src_weights, this_group_eigenmodes, percentage_explained = _truncatedsvd_vol(subvoxels, n_eigenmodes, n_orients, return_pecentage_exaplained=True)
+        print(f'this_group_eigenmodes shape {this_group_eigenmodes.shape}')
         group_eigenmodes[coarse_idx * n_eigenmodes * n_orients:(coarse_idx + 1) * n_eigenmodes * n_orients] = this_group_eigenmodes
         print(f"patch {coarse_idx}: vertices {subvoxels.shape[0]} -> {n_eigenmodes} leadfield reduction explained {percentage_explained*100:.3f}% variance")
         weights.append(eig_src_weights)

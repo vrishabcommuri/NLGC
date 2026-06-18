@@ -421,7 +421,7 @@ def _take_care(a, n_eigenmodes):
     return a_
 
 
-def solve_for_q(q, s1, s2, s3, a, lambda2, alpha=0, beta=0,):
+def solve_for_q(q, s1, s2, s3, a, m, p, n_samples, lambda2, alpha=0, beta=0, n_orients = 3):
     """One-step sol to learn q, state-noise covariance matrix
 
     Parameters
@@ -443,27 +443,79 @@ def solve_for_q(q, s1, s2, s3, a, lambda2, alpha=0, beta=0,):
     non-zero alpha, beta values imposes Inv-Gamma(alpha*n/2 - 1, beta*n) prior on q's.
     This equivalent to alpha*n - 2 additional observations that sum to beta*n.
     """
+
+    print(f'beta {beta} and alpha {alpha}')
     
-    # sigma = s3 - a.dot(s1.T) - s1.dot(a.T) + a.dot(s2).dot(a.T)
+    sigma = s3 - a.dot(s1.T) - s1.dot(a.T) + a.dot(s2).dot(a.T)
+    sigma = .5 * (sigma + sigma.T)
+    m = sigma.shape[0]
+    n_blocks = m // n_orients
+
+    idx = np.arange(n_blocks)
+
+    S = sigma.reshape(n_blocks, n_orients, n_blocks, n_orients)
+
+    print(f'sigma shape is {sigma.shape}')
+
+    print(f'S shape is {S.shape}')
+
+    blocks = S[idx, :, idx, :].copy()
+
+    print(f'Block shape is {blocks.shape}')
+
+
+
+    blocks = (blocks + beta*np.eye(n_orients))           
+
+
+    q_ = np.zeros_like(sigma)
+    Q = q_.reshape(n_blocks, 3, n_blocks, 3)
+    Q[idx, :, idx, :] = blocks
+
+    print("Q min eig:", np.linalg.eigvalsh(q_).min())
+    print("Q min diag:", np.diag(q_).min())
+    print("Q max eig:", np.linalg.eigvalsh(q_).max())
+    print("Q max diag:", np.diag(q_).max())
+    print("Q max:", q_.max())
+
+    
     # q_ = (sigma + beta)/(n_samples + alpha)
-    # rel_change = ((q - q_) ** 2).sum() / (q ** 2).sum()
+    rel_change = ((q - q_) ** 2).sum() / (q ** 2).sum()
 
-    diag_indices = np.diag_indices_from(q)
-    q__ = q[diag_indices]
-    temp = np.einsum('ij,ji->i', a, s2.T)
-    temp3 = np.einsum('ij,ji->i', s2 - a.dot(s3), a.T)
-    if s1.ndim == 2:
-        q_ = s1[diag_indices]
-    else:
-        q_ = s1
-    q_ -= (temp + temp3)
-    q_ += beta
-    q_ /= (1 + alpha)
-    q[diag_indices] = np.abs(q_)
-    rel_change = ((q__ - q_) ** 2).sum() / (q__ ** 2).sum()
+    return q_, rel_change
+
+    
+
+    # q_ = 0.5 * (q_ + q_.T)
+
+    # eig_min = np.linalg.eigvalsh(q_).min()
 
 
-    return q, rel_change
+
+
+    # w, V = np.linalg.eigh(q_)
+    # w = np.maximum(w, 1e-15)
+    # q_ = V @ np.diag(w) @ V.T
+    # jitter = 1e-14
+
+    # if eig_min < jitter:
+    #     q_ += (jitter - eig_min) * np.eye(q_.shape[0])
+    # diag_indices = np.diag_indices_from(q)
+    # q__ = q[diag_indices]
+    # temp = np.einsum('ij,ji->i', a, s2.T)
+    # temp3 = np.einsum('ij,ji->i', s2 - a.dot(s3), a.T)
+    # if s1.ndim == 2:
+    #     q_ = s1[diag_indices]
+    # else:
+    #     q_ = s1
+    # q_ -= (temp + temp3)
+    # q_ += beta
+    # q_ /= (1 + alpha)
+    # q[diag_indices] = np.abs(q_)
+    # rel_change = ((q__ - q_) ** 2).sum() / (q__ ** 2).sum()
+    
+
+    return q_, rel_change
 
 
 def compute_cross_ll(x_, a, q, m, p):
@@ -649,7 +701,7 @@ def test_solve_for_a_and_q(t=1000):
     q_ = 1 * q.copy()
     for _ in range(100):
         a_, changes = solve_for_a(q_, s1, s2, a_, p, lambda2=0.1, max_iter=1000, tol=1e-8)
-        q_ = solve_for_q(q_, s3, s1, s2, a_, lambda2=0.1)
+        q_ = solve_for_q(q_, s3, s1, s2, a_, t, lambda2=0.1)
 
     a__ = np.zeros((m, m * p))
     a__[:] = 0 * np.reshape(np.swapaxes(a, 0, 1), (m, m * p))
@@ -659,7 +711,7 @@ def test_solve_for_a_and_q(t=1000):
     for _ in range(100):
         a__, changes = solve_for_a(q__, s1, s2, a__, p, lambda2=0.1, max_iter=1000, tol=1e-8,
                                    zeroed_index=[(i, i), (j, j + 3)], update_only_target=True)
-        q__ = solve_for_q(q__, s3, s1, s2, a__, lambda2=0.1)
+        q__ = solve_for_q(q__, s3, s1, s2, a__, t, lambda2=0.1)
 
     import itertools
     for i, j in itertools.product((0,1,2), repeat=2):
@@ -671,5 +723,5 @@ def test_solve_for_a_and_q(t=1000):
         for _ in range(100):
             a__, changes = solve_for_a(q__, s1, s2, a__, p, lambda2=0.1, max_iter=1000, tol=1e-8,
                                        zeroed_index=[(i,i), (j, j+3)])
-            q__ = solve_for_q(q__, s3, s1, s2, a__, lambda2=0.1)
+            q__ = solve_for_q(q__, s3, s1, s2, a__, t, lambda2=0.1)
         warnings.filterwarnings('ignore')

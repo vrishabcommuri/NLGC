@@ -9,6 +9,11 @@ from scipy import linalg
 from .opt.m_step import calculate_ss
 
 
+def _voxel_block(v, n_orient=3):
+    """Return slice for RAS components of voxel v."""
+    return slice(n_orient * v, n_orient * (v + 1))
+
+
 def sample_path_bias(q, a, x_bar, zeroed_index, n_eigenmodes, n_orients):
     """Computes the bias in the deviance
 
@@ -26,30 +31,42 @@ def sample_path_bias(q, a, x_bar, zeroed_index, n_eigenmodes, n_orients):
     """
     t, dxm = x_bar.shape
     _, dtot = a.shape
+    
     p = dtot // dxm
     eff_eigenmodes = n_eigenmodes * n_orients
 
     bias = 0
-    qd = np.diag(q)
     cx = np.zeros((t - p, dtot))
+    dxn_voxels = dxm // n_orients
 
+    for idx_v in range(dxn_voxels):
+        block = _voxel_block(idx_v, n_orients)
 
-    for idx_src in range(dxm):
-        ai = a[idx_src]
-
-        xi = x_bar[p:, idx_src]
-
+        ai = a[block, :]
+        print(f'dtot {dtot}')
+        print(f'dxm {dxm}')
+        print(f'ai shape {ai.shape}')
+        xi = x_bar[p:, block]
+        print(f'xi shape {xi.shape}')
+        print(f'cx shape {cx.shape}')
+        Q_block = q[block, block]
+        Q_inv_block = np.linalg.inv(Q_block)
 
         for k in range(p):
             cx[:, k * dxm:(k + 1) * dxm] = x_bar[p - 1 - k:t - 1 - k]
 
+
+        res = xi - cx.dot(ai.T)
+        print(f'res shape is {res.shape}')
         # gradient of log - likelihood
-        ldot = cx.T.dot(xi - cx.dot(ai)) / qd[idx_src]
+        ldot = Q_inv_block.dot(res.T.dot(cx))
 
         # hessian of log - likelihood
-        ldotdot = -cx.T.dot(cx) / qd[idx_src]
+        # ldotdot = -cx.T.dot(cx) / qd[block, block]
+        Hx = cx.T.dot(cx) 
+        ldotdot = -np.kron(Q_inv_block, Hx)
 
-
+        ldot = ldot.reshape(-1)
         # if zeroed_index is not None:
         #     x_index, y_index = zeroed_index
         #     if idx_src in x_index:
@@ -78,21 +95,58 @@ def sample_path_bias(q, a, x_bar, zeroed_index, n_eigenmodes, n_orients):
         #                 ldotdot = np.delete(ldotdot, removed_idx, axis=1)
         #                 print(f"ldotdot.shape after delete2 = {ldotdot.shape}")
 
-        delete_idxs = []
-        for l in range(0, dxm, eff_eigenmodes):
-            for u in range(eff_eigenmodes):
-                for v in range(eff_eigenmodes):
-                    if v != u and idx_src == l + v:
-                        removed_idx = list(range(l + u, dtot, dxm))
-                        if zeroed_index is not None:
-                            x_index, y_index = zeroed_index
-                            if idx_src in x_index:
-                                removed_idx.extend(list(np.asanyarray(y_index)[np.asanyarray(x_index) == idx_src]))
-                        delete_idxs.extend(removed_idx)
+        # delete_idxs = []
+        # for l in range(0, dxm, eff_eigenmodes):
+        #     for u in range(eff_eigenmodes):
+        #         for v in range(eff_eigenmodes):
+        #             if v != u and idx_v == l + v:
+        #                 removed_idx = list(range(l + u, dtot, dxm))
+        #                 if zeroed_index is not None:
+        #                     x_index, y_index = zeroed_index
+        #                     if idx_v in x_index:
+        #                         removed_idx.extend(list(np.asanyarray(y_index)[np.asanyarray(x_index) == idx_v]))
+        #                 delete_idxs.extend(removed_idx)
         
-        ldot = np.delete(ldot, delete_idxs)
-        ldotdot = np.delete(ldotdot, delete_idxs, axis=0)
-        ldotdot = np.delete(ldotdot, delete_idxs, axis=1)
+        # ldot = np.delete(ldot, delete_idxs)
+        # ldotdot = np.delete(ldotdot, delete_idxs, axis=0)
+        # ldotdot = np.delete(ldotdot, delete_idxs, axis=1)
+
+        # bias += ldot.dot(np.linalg.solve(ldotdot, ldot))
+
+
+
+        delete_idxs = []
+
+        # Large voxel block containing all eigenmodes and all RAS orientations
+        idx_large_voxel = idx_v // n_eigenmodes
+        voxel_start = idx_large_voxel * eff_eigenmodes
+
+        for l in range(voxel_start, voxel_start + eff_eigenmodes):
+            removed_idx = list(range(l, dtot, dxm))
+
+            if zeroed_index is not None:
+                x_index, y_index = zeroed_index
+                x_index = np.asarray(x_index)
+                y_index = np.asarray(y_index)
+
+                if l in x_index:
+                    removed_idx.extend(list(y_index[x_index == l]))
+
+            delete_idxs.extend(removed_idx)
+
+        # Expand deletes across the 3 target RAS equations
+        delete_idxs_3d = []
+
+        for r in range(n_orients):
+            for idx in delete_idxs:
+                delete_idxs_3d.append(r * dtot + idx)
+
+        delete_idxs_3d = sorted(set(delete_idxs_3d))
+
+        if len(delete_idxs_3d) > 0:
+            ldot = np.delete(ldot, delete_idxs_3d)
+            ldotdot = np.delete(ldotdot, delete_idxs_3d, axis=0)
+            ldotdot = np.delete(ldotdot, delete_idxs_3d, axis=1)
 
         bias += ldot.dot(np.linalg.solve(ldotdot, ldot))
     return bias
