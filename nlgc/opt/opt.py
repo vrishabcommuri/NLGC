@@ -21,6 +21,71 @@ from .m_step_fastac import (calculate_ss, solve_for_a, solve_for_q, compute_ll,
 # logging.basicConfig(filename=filename, level=logging.DEBUG)
 
 
+def _voxel_mode_block(v, n_eigenmodes, n_orients=3):
+    block_size = n_eigenmodes * n_orients
+    return slice(v * block_size, (v + 1) * block_size)
+
+
+def get_edge_norms_df(a_, n_eigenmodes, n_orients=3, threshold=1e-10):
+    """
+    Parameters
+    ----------
+    a_ : ndarray
+        Shape (p, m, m)
+
+    Returns
+    -------
+    edge_norms : ndarray
+        Shape (n_voxels, n_voxels)
+
+    df : int
+        Number of active voxel-to-voxel edges
+    """
+
+    p, m, _ = a_.shape
+
+    block_size = n_eigenmodes * n_orients
+    n_voxels = m // block_size
+
+    edge_norms = np.zeros((n_voxels, n_voxels))
+
+    for target_v in range(n_voxels):
+
+        target_block = _voxel_mode_block(
+            target_v,
+            n_eigenmodes,
+            n_orients
+        )
+
+        for source_v in range(n_voxels):
+
+            source_block = _voxel_mode_block(
+                source_v,
+                n_eigenmodes,
+                n_orients
+            )
+
+            block_strength = 0.0
+
+            for lag in range(p):
+
+                block = a_[
+                    lag,
+                    target_block,
+                    source_block
+                ]
+
+                block_strength += np.sum(block**2)
+
+            edge_norms[target_v, source_v] = np.sqrt(block_strength)
+
+    np.fill_diagonal(edge_norms, 0.0)
+
+    df = np.sum(edge_norms > threshold)
+
+    return edge_norms, df
+
+
 class NeuraLVAR:
     """Neural Latent Vector Auto-Regressive model
 
@@ -492,6 +557,8 @@ class NeuraLVARCV(NeuraLVAR):
         self.n_jobs = n_jobs
         NeuraLVAR.__init__(self, order, self_history, n_eigenmodes, n_orients, copy, standardize, normalize, use_lapack)
 
+
+
     def _cvfit(self, split, info_y, info_f, info_r, info_cv, info_pred, splits, lambda_range, max_iter=500,
             max_cyclic_iter=3, a_init=None, q_init=None, rel_tol=1e-5, alpha=0.0, beta=0.0, xs_init=None, verbose=False):
         
@@ -561,15 +628,27 @@ class NeuraLVARCV(NeuraLVAR):
                           max_cyclic_iter=max_cyclic_iter,
                           a_init=a_init, q_init=q_init.copy(), rel_tol=rel_tol, xs=xs_init_train, alpha=alpha, beta=beta)
 
+            _, t = y_train.shape
+            df = (abs(a_) > 1e-10).sum()
+            # edge_norms, df = get_edge_norms_df(a_, 2, 3, 1e-7)
+            print(f'df {df}')
+            ll = lls[0][-1]
+            aic = (2*df - 2*ll) / t
+            print(f'aic { aic}')
+            bic = (np.log(t)*df - 2*ll) / t
             # # different criteria for cross-validation
             cv[0, split, i] = self.compute_ll_(y_test, (a_, f, q_upper, r))
             cv[1, split, i] = lambda2 * self.compute_norm_one(a_)
+            cv[2, split, i] = aic
+            cv[3, split, i] = bic
+            cv[4, split, i] = df
+            cv[5, split, i] = ll
             # cv[2, split, i] = self.compute_ll(y_test, (a_, f, q_upper, r))
             # cv[1, split, i] = self.compute_crossvalidation_metric(y_test, (a_, f, q_upper, r))
             # cv[4, split, i] = self.compute_Q(y_test, (a_, f, q_upper, r))
             # cv[1, split, i] = self.compute_logsum_q(y_test, max_iter=max_iter, max_cyclic_iter=max_cyclic_iter,
             #                                  rel_tol=rel_tol, alpha=alpha, beta=beta, args=(a_, f, q_upper, r))
-            pred[split, i][:] = self.get_prediction(y_test, (a_, f, q_upper, r)).T
+            pred[split, i][:] = self.get_prediction(y, (a_, f, q_upper, r)).T
 
         for shm in (shm_y, shm_f, shm_r, shm_c):
             shm.close()
@@ -622,7 +701,7 @@ class NeuraLVARCV(NeuraLVAR):
             kf = self.cv
             cvsplits = [split for split in kf.split(y.T)]
 
-        cv_mat = np.zeros((2, len(cvsplits), len(lambda_range)), dtype=y.dtype)
+        cv_mat = np.zeros((6, len(cvsplits), len(lambda_range)), dtype=y.dtype)
         pred_mat = np.zeros((len(cvsplits), len(lambda_range)) + y.shape, dtype=y.dtype)
 
         # Use parallel processing
@@ -667,7 +746,8 @@ class NeuraLVARCV(NeuraLVAR):
                 best_lambda = lambda_range[index]
             logger.info(f'\nbest_regularizing parameter: {best_lambda} using es')
         else:
-            index = self.mse_path[1].mean(axis=0).argmax()
+            # index = self.mse_path[0].mean(axis=0).argmax()
+            index = self.mse_path[2].mean(axis=0).argmin()
             best_lambda = lambda_range[index]
             logger.info(f'\nbest_regularizing parameter: {best_lambda}')
 
