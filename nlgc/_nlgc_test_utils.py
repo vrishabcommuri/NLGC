@@ -962,7 +962,8 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
         weights, G, label_vertidx, label_names, gain_info, whitener = _prepare_eigenmodes(info, fwd, noise_cov, src_target, 
                                                                             n_eigenmodes=n_eigenmodes, n_orients = n_orients, loose=loose, depth=depth, pca=pca, rank=rank, mode='svd_flip')
     elif (lead_field_gen):
-        G, info, noise_cov, fwd, weights = lead_field_generation(root, subject_id, src_space, n_eigenmodes, loose, depth, pca, rank, trans)
+        G, info, noise_cov, fwd, weights = lead_field_generation(root = root, subject_id = subject_id, src_space = src_space, n_eigenmodes = n_eigenmodes,
+                                                                  n_orients = n_orients, loose = loose, depth = depth, pca = pca, rank = rank, trans = trans)
     elif (type(lf) != type(None)):
         print('Using passed in lead field')
         G = lf
