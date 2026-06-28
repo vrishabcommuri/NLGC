@@ -126,7 +126,6 @@ def calculate_ss(x_bar, s_bar, b, m, p):
 
 def solve_for_a(q, s1, s2, a, p1, lambda2, max_iter=5000, tol=1e-3, zeroed_index=None, update_only_target=False,
         n_eigenmodes=1, n_orients = 1):
-    # print('Use new FASTA')
     if not update_only_target or zeroed_index is None:
         return _solve_for_a(q, s1, s2, a, p1, lambda2, max_iter=max_iter, tol=tol, zeroed_index=zeroed_index,
                             n_eigenmodes=n_eigenmodes, n_orients = n_orients)
@@ -198,9 +197,7 @@ def _solve_for_a(q, s1, s2, a, p1, lambda2, max_iter=5000, tol=1e-3, zeroed_inde
         return a.T, None
 
     eps = np.finfo(s1.dtype).eps
-    # print(f'Q shape is {q.shape} and Q is {q}')
     qinv = linalg.inv(q)
-    # print(f'Qinv shape is {qinv.shape} and Qinv is {qinv}')
     d = np.sqrt(np.diag(s2))
     s2 = s2 / d[:, None]
     s2 = s2 / d[None, :]
@@ -219,9 +216,7 @@ def _solve_for_a(q, s1, s2, a, p1, lambda2, max_iter=5000, tol=1e-3, zeroed_inde
     p = a.shape[1] // m
 
 
-    # print(f'm is: {m}')
-    # print(f'p  is {p}')
-    # print(f'a shape is {a.shape}')
+
     print(f'Pre Run FASTA with lambda {lambda2}')
     start_time = time.time()
 
@@ -444,76 +439,43 @@ def solve_for_q(q, s1, s2, s3, a, m, p, n_samples, lambda2, alpha=0, beta=0, n_o
     This equivalent to alpha*n - 2 additional observations that sum to beta*n.
     """
 
-    print(f'beta {beta} and alpha {alpha}')
-    
-    sigma = s3 - a.dot(s1.T) - s1.dot(a.T) + a.dot(s2).dot(a.T)
-    sigma = .5 * (sigma + sigma.T)
-    m = sigma.shape[0]
-    n_blocks = m // n_orients
+    if n_orients == 3:
+        sigma = s3 - a.dot(s1.T) - s1.dot(a.T) + a.dot(s2).dot(a.T)
+        sigma = .5 * (sigma + sigma.T)
+        m = sigma.shape[0]
+        n_blocks = m // n_orients
 
-    idx = np.arange(n_blocks)
+        idx = np.arange(n_blocks)
 
-    S = sigma.reshape(n_blocks, n_orients, n_blocks, n_orients)
+        S = sigma.reshape(n_blocks, n_orients, n_blocks, n_orients)
 
-    print(f'sigma shape is {sigma.shape}')
-
-    print(f'S shape is {S.shape}')
-
-    blocks = S[idx, :, idx, :].copy()
-
-    print(f'Block shape is {blocks.shape}')
+        blocks = S[idx, :, idx, :].copy()
+        blocks = (blocks + beta*np.eye(n_orients))           
 
 
-
-    blocks = (blocks + beta*np.eye(n_orients))           
-
-
-    q_ = np.zeros_like(sigma)
-    Q = q_.reshape(n_blocks, 3, n_blocks, 3)
-    Q[idx, :, idx, :] = blocks
-
-    print("Q min eig:", np.linalg.eigvalsh(q_).min())
-    print("Q min diag:", np.diag(q_).min())
-    print("Q max eig:", np.linalg.eigvalsh(q_).max())
-    print("Q max diag:", np.diag(q_).max())
-    print("Q max:", q_.max())
-
-    
-    # q_ = (sigma + beta)/(n_samples + alpha)
-    rel_change = ((q - q_) ** 2).sum() / (q ** 2).sum()
-
-    return q_, rel_change
-
-    
-
-    # q_ = 0.5 * (q_ + q_.T)
-
-    # eig_min = np.linalg.eigvalsh(q_).min()
-
-
-
-
-    # w, V = np.linalg.eigh(q_)
-    # w = np.maximum(w, 1e-15)
-    # q_ = V @ np.diag(w) @ V.T
-    # jitter = 1e-14
-
-    # if eig_min < jitter:
-    #     q_ += (jitter - eig_min) * np.eye(q_.shape[0])
-    # diag_indices = np.diag_indices_from(q)
-    # q__ = q[diag_indices]
-    # temp = np.einsum('ij,ji->i', a, s2.T)
-    # temp3 = np.einsum('ij,ji->i', s2 - a.dot(s3), a.T)
-    # if s1.ndim == 2:
-    #     q_ = s1[diag_indices]
-    # else:
-    #     q_ = s1
-    # q_ -= (temp + temp3)
-    # q_ += beta
-    # q_ /= (1 + alpha)
-    # q[diag_indices] = np.abs(q_)
-    # rel_change = ((q__ - q_) ** 2).sum() / (q__ ** 2).sum()
-    
+        q_ = np.zeros_like(sigma)
+        Q = q_.reshape(n_blocks, 3, n_blocks, 3)
+        Q[idx, :, idx, :] = blocks
+        q_ /= (1 + alpha)
+        rel_change = ((q - q_) ** 2).sum() / (q ** 2).sum()
+        
+    elif n_orients == 1:
+        # TODO: Check this and make sure I am not supposed to return q and if this matches original
+        diag_indices = np.diag_indices_from(q)
+        q__ = q[diag_indices]
+        temp = np.einsum('ij,ji->i', a, s2.T)
+        temp3 = np.einsum('ij,ji->i', s2 - a.dot(s3), a.T)
+        if s1.ndim == 2:
+            q_ = s1[diag_indices]
+        else:
+            q_ = s1
+        q_ -= (temp + temp3)
+        q_ += beta
+        q_ /= (1 + alpha)
+        q[diag_indices] = np.abs(q_)
+        rel_change = ((q__ - q_) ** 2).sum() / (q__ ** 2).sum()
+    else: 
+        raise ValueError('n_orients is not a supported value')
 
     return q_, rel_change
 

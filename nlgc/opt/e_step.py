@@ -46,7 +46,6 @@ def sskf(y, a, f, q, r, xs=None, use_lapack=True):
         assert x_.flags['C_CONTIGUOUS']
 
     
-    print('SSKF before solve_discrete_are')
 
     try:
         _s = linalg.solve_discrete_are(a.T, f.T, q, r, balanced=False)           
@@ -58,7 +57,6 @@ def sskf(y, a, f, q, r, xs=None, use_lapack=True):
         except ValueError:
             _s, _, _ = control.dare(a.T, f.T, q, r, stabilizing=False, method=None)
 
-    print('SSKF post solve_discrete_are')
 
     temp = f.dot(_s)
     temp2 = temp.dot(f.T) + r
@@ -80,7 +78,6 @@ def sskf(y, a, f, q, r, xs=None, use_lapack=True):
     s_hat = s - b.dot(_s).dot(b.T)  # See README what this means!
     s_ = linalg.solve_discrete_lyapunov(b, s_hat)
     s_ = 0.5 * (s_ + s_.T)
-    print("S min diag:", np.diag(s_).min())
 
     if (np.diag(s_) <= 0).any():
         raise ValueError('diag(s_) values are not non-negative!')
@@ -177,7 +174,6 @@ def sskfcv(y, a, f, q, r, xs=None, use_lapack=True):
         assert _x.flags['C_CONTIGUOUS']
         assert x_.flags['C_CONTIGUOUS']
 
-    print('SSKFCV before solve_discrete_are')
 
 
     # try:
@@ -195,7 +191,6 @@ def sskfcv(y, a, f, q, r, xs=None, use_lapack=True):
             _s, _, _ = control.dare(a.T, f.T, q, r, stabilizing=False, method=None)
     
     
-    print('SSKFCV post solve_discrete_are')
 
     temp = f.dot(_s)
     temp2 = temp.dot(f.T) + r
@@ -294,7 +289,6 @@ def sskf_prediction(y, a, f, q, r, xs=None, use_lapack=True):
         assert _x.flags['C_CONTIGUOUS']
         assert x_.flags['C_CONTIGUOUS']
 
-    print('SSKF_PRED before solve_discrete_are')
 
 
     # try:
@@ -312,7 +306,6 @@ def sskf_prediction(y, a, f, q, r, xs=None, use_lapack=True):
             _s, _, _ = control.dare(a.T, f.T, q, r, stabilizing=False, method=None)
 
 
-    print('SSKF_PRED post solve_discrete_are')
 
     temp = f.dot(_s)
     temp2 = temp.dot(f.T) + r

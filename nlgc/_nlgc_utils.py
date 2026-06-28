@@ -182,21 +182,23 @@ def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, n_orients = 1, var_thr=1.0, R
         q_val = 0.0001
     q_init = q_val * np.eye(m)
 
-    print('Start creating models')
+    if verbose:
+        print('Start creating models')
     # if a_init != None:
     #     a_concat = np.concatenate(a_init[:], axis = 1)
     #     plt.imshow(a_concat)
     if len(lambda_range) > 1 and lambda1 is None:
         model_f = NeuraLVARCV(p, p1, n_eigenmodes, n_orients, 10, cv, n_jobs, use_lapack=use_lapack)
-        if xs_init != None:
-            print(y.shape, xs_init[0].shape)
+        if xs_init != None and verbose:
+            print(f'y shape and xs_init shape {y.shape}, {xs_init[0].shape}')
         model_f.fit(y, f, r * np.eye(n), lambda_range, a_init=a_init, q_init=q_init.copy(), xs_init = xs_init, **kwargs)
     else:
         model_f = NeuraLVAR(p, p1, n_eigenmodes, n_orients, use_lapack=use_lapack)
         lambda_range = lambda_range[0]
         model_f.fit(y, f, r * np.eye(n), lambda_range, lb=lambda1, la=lambda2, a_init=a_init, q_init=q_init.copy(), xs_init = xs_init, **kwargs)
     
-    print('Finished fitting models')
+    if verbose:
+        print('Finished fitting models')
 
     bias_f = model_f.compute_bias(y)
 
@@ -225,8 +227,6 @@ def _gc_extraction(y, f, r, p, p1, n_eigenmodes=2, n_orients = 1, var_thr=1.0, R
         ROIs = sorted_idx[:idx + 1]
 
     
-    print('Checking links')
-
     links_to_check = []
     for i, j in itertools.product(ROIs, repeat=2):
         # Exclude i == j cases
@@ -292,8 +292,6 @@ def _learn_reduced_model(i, j, y, f, r, lambda_f, a, q, n, p, p1, n_eigenmodes, 
     eff_eigenmodes = n_eigenmodes * n_orients
     target = _expand_roi_indices_as_tup(j, eff_eigenmodes)
     source = _expand_roi_indices_as_tup(i, eff_eigenmodes)
-    print(f'target: {target}')
-    print(f'source {source}')
     link = '->'.join(map(lambda x: ','.join(map(str, x)), (source, target)))
     a_init = a.copy()
     a_init[:, target, source] = 0.0
@@ -343,7 +341,7 @@ def _prepare_eigenmodes(info, forward, noise_cov, labels, n_eigenmodes=2, n_orie
         depth_dict = {'exp': depth, 'limit_depth_chs': 'whiten', 'combine_xyz': 'fro', 'limit': None}
 
     if not is_fixed_orient(forward) and loose == 0.0:
-        print('Loose orientation must be set to 1.0 to be applied to free-orientation forward solutions, changing it to 1.0. If unsure set loose to auto')
+        logger.info('Loose orientation must be set to 1.0 to be applied to free-orientation forward solutions, changing it to 1.0. If unsure set loose to auto')
         loose = 1.0
 
     forward, gain, gain_info, whitener, source_weighting, mask = _prepare_gain(forward, info, noise_cov, pca,
@@ -371,7 +369,7 @@ def _prepare_eigenmodes(info, forward, noise_cov, labels, n_eigenmodes=2, n_orie
     else:
         if n_orients != 1:
             raise ValueError('Number of orientations is not 1 but is using fixed orientation')
-        print('fixed orientation')
+        logger.info('Using fixed orientation')
         if isinstance(labels, Forward):
             weights, G, label_vertidx, src_flip = _reduce_lead_field(forward, labels, n_eigenmodes, n_orients, data=gain.T)
             label_names = []
@@ -423,7 +421,6 @@ def _reduce_lead_field(forward, src, n_eigenmodes, n_orients, data=None):
         logger.info('Using the raw forward solution')
         data = np.swapaxes(forward['sol']['data'], 0, 1)  # (n_sources, n_channels)
     data = data.copy()
-    print(f'Data shape is {data.shape}')
     if isinstance(src, mne.Forward):
         src = src['src']
 
@@ -442,7 +439,6 @@ def _reduce_lead_field(forward, src, n_eigenmodes, n_orients, data=None):
             lhweights.append([eig_src_weights, this_grouped_vertidx_no_offset])
         else:
             rhweights.append([eig_src_weights, this_grouped_vertidx_no_offset])
-        print(this_group_eigenmodes.shape)
     weights = [lhweights, rhweights]
     src_flips = [None] * sum(n_groups)
     return weights, group_eigenmodes.T, grouped_vertidx, src_flips
@@ -451,26 +447,18 @@ def _reduce_lead_field(forward, src, n_eigenmodes, n_orients, data=None):
 def _reduce_lead_field_vol(forward, src, n_eigenmodes, n_orients, data=None):
     import mne
     if data is None:
-        print('data is None')
         logger.info('Using the raw forward solution')
         data = np.swapaxes(forward['sol']['data'], 0, 1) 
-    print(f'Data shape is {data.shape}')
     if isinstance(src, mne.Forward):
         src = src['src']
 
-
-    print(f'Data Reshaped shape is {data.shape}')
-    print(src)
-    print(forward['src'])
     groups, coarse_rr = _prepare_leadfield_reduction_vol(src, forward['src'])
  
     group_eigenmodes = np.zeros((len(groups)*n_eigenmodes * n_orients, data.shape[-1]), dtype=data.dtype)
-    print(f'Group Eigenmodes Shape {group_eigenmodes.shape}')
     
     weights = []
     
     for coarse_idx, members in groups.items():
-        print(f'coarse_idx: {coarse_idx}, and members: {members}')
         idxs = np.empty(0, dtype=int)
         for i in range(len(forward['src'])):
             if len(members[i]) > 0:
@@ -705,21 +693,21 @@ def _truncatedsvd_vol(a, n_components=2, n_orients = 3, return_pecentage_exaplai
             mode_r = G[:, cols] @ u4[cols, m]
             ras_modes[m * 3 + r] = mode_r
 
-    print(f'G shape {G.shape}')
-    print(f'u4 shape {u4.shape}')
+    # print(f'G shape {G.shape}')
+    # print(f'u4 shape {u4.shape}')
 
     # ras_modes = np.einsum("vrm,vrs->mrs", u4, G)
 
     # recon_check = ras_modes.sum(axis=1)
     # if not np.allclose(recon_check, sensor_modes, atol=1e-8, rtol=1e-6):
     #     print("Warning: RAS-summed modes do not exactly match sensor_modes.")
-    print(f'RAS modes shape {ras_modes.shape}')
-    print(f'U shape {u.shape}')
-    print(f's shape {s.shape}')
-    print(f'vh shape {vh.shape}')
-    print(f'sensor_modes shape {sensor_modes.shape}')
+    # print(f'RAS modes shape {ras_modes.shape}')
+    # print(f'U shape {u.shape}')
+    # print(f's shape {s.shape}')
+    # print(f'vh shape {vh.shape}')
+    # print(f'sensor_modes shape {sensor_modes.shape}')
     # ras_modes = ras_modes.reshape(n_components*3, ras_modes.shape[-1])
-    print(f'ras_modes shape {ras_modes}')
+    # print(f'ras_modes shape {ras_modes}')
     if return_pecentage_exaplained:
         return u, ras_modes, s[:n_components].sum() / s.sum()
     return u, ras_modes

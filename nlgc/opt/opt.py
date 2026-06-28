@@ -192,7 +192,8 @@ class NeuraLVAR:
         Qvals = []
         source_fits = []
         for i in range(max_iter):
-            print(f'Iteration of EM: {i}')
+            if verbose:
+                print(f'Iteration of EM: {i}')
             a_[:m] = a_upper
             q_[non_zero_indices] = q_upper[non_zero_indices]
 
@@ -321,7 +322,6 @@ class NeuraLVAR:
         return np.sum(np.absolute(a_))
 
     def compute_two_one_norm(self, a_):
-        print(f'a_ shape is {a_.shape}')
         p = a_.shape[0]
         m = a_.shape[1]
         N = m // 3
@@ -602,7 +602,6 @@ class NeuraLVARCV(NeuraLVAR):
         logger.debug(f"{current_process().name} successfully read the shared memory")
         train, test = splits[split]
         y_train, y_test = y[:, train], y[:, test]
-        print(f'for split {split} train is {train} and test is {test}')
         xs_init_train = None
         if not xs_init is None:
             # only need training split for warm start since the validation step doesn't need initialization
@@ -610,19 +609,11 @@ class NeuraLVARCV(NeuraLVAR):
             x__train = np.ascontiguousarray(xs_init[1][train, :])
             xs_init_train = (_x_train, x__train)
         logger.debug(f"{current_process().name} successfully split the data")
-        print(lambda_range)
         for i, lambda2 in enumerate(lambda_range * np.sqrt(y.shape[-1])):
-            print((lambda_range * np.sqrt(y.shape[-1])))
-            print(f'lambda 2 before scaling is {lambda2} and it is divided by {np.sqrt(y_train.shape[-1])}')
             lambda2 = lambda2 / np.sqrt(y_train.shape[-1])
             logger.info(f"{current_process().name} {split} doing {lambda2}")
             logger.debug(f"{current_process().name} {split} doing {lambda2}")
-            # if i > 0:
-            #     a_init = a_.copy()
-            #     xs_init_train = tuple(arr.copy() for arr in xs)
-            #     # q_init = q_upper.copy() * lambda_range[i-1] / lambda_range[i]
-            # print(f'a_init {a_init}')
-            # print(f'xs: {xs_init_train}')
+
             a_, q_upper, lls, _, _, _, xs, _ = \
                 self._fit(y_train, f, r, lambda2=lambda2, max_iter=max_iter,
                           max_cyclic_iter=max_cyclic_iter,
@@ -630,11 +621,8 @@ class NeuraLVARCV(NeuraLVAR):
 
             _, t = y_train.shape
             df = (abs(a_) > 1e-10).sum()
-            # edge_norms, df = get_edge_norms_df(a_, 2, 3, 1e-7)
-            print(f'df {df}')
             ll = lls[0][-1]
             aic = (2*df - 2*ll) / t
-            print(f'aic { aic}')
             bic = (np.log(t)*df - 2*ll) / t
             # # different criteria for cross-validation
             cv[0, split, i] = self.compute_ll_(y_test, (a_, f, q_upper, r))
@@ -718,7 +706,6 @@ class NeuraLVARCV(NeuraLVAR):
         # Serial implementation
         # out = [self._cvfit(i, *initargs) for i in range(len(cvsplits))]
         # Parallel implementation
-        # print(f'cvsplits {cvsplits}')
         Parallel(n_jobs=self.n_jobs, verbose=10)(delayed(self._cvfit)(i, *initargs) for i in range(len(cvsplits)))
         logger.info('Done cross-validation')
 

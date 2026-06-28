@@ -86,6 +86,9 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, order, self_history=None,
     nlgc_obj : NLGC object
         contains the connectivity map and the some related parameters (see NLGC class for more info)
     """
+    
+    lambda_range.sort(reverse = True)
+    print(f'Sorted lambda range to be proper order (largest to smallest) {lambda_range}')
 
     _check_reference(evoked)
 
