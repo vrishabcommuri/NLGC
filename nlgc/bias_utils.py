@@ -6,7 +6,7 @@ import numpy as np
 import warnings
 from scipy import linalg
 
-from .opt.m_step import calculate_ss
+from .opt.proximal import calculate_ss
 
 
 def _voxel_block(v, n_orient=3):
@@ -14,7 +14,7 @@ def _voxel_block(v, n_orient=3):
     return slice(n_orient * v, n_orient * (v + 1))
 
 
-def sample_path_bias(q, a, x_bar, zeroed_index, n_eigenmodes, n_orients):
+def sample_path_bias(q, a, x_bar, A_mask, n_eigenmodes, n_orients):
     """Computes the bias in the deviance
 
     Parameters
@@ -43,21 +43,16 @@ def sample_path_bias(q, a, x_bar, zeroed_index, n_eigenmodes, n_orients):
         block = _voxel_block(idx_v, n_orients)
 
         ai = a[block, :]
-        print(f'dtot {dtot}')
-        print(f'dxm {dxm}')
-        print(f'ai shape {ai.shape}')
         xi = x_bar[p:, block]
-        print(f'xi shape {xi.shape}')
-        print(f'cx shape {cx.shape}')
+
         Q_block = q[block, block]
         Q_inv_block = np.linalg.inv(Q_block)
 
         for k in range(p):
             cx[:, k * dxm:(k + 1) * dxm] = x_bar[p - 1 - k:t - 1 - k]
 
-
         res = xi - cx.dot(ai.T)
-        print(f'res shape is {res.shape}')
+
         # gradient of log - likelihood
         ldot = Q_inv_block.dot(res.T.dot(cx))
 
@@ -67,53 +62,6 @@ def sample_path_bias(q, a, x_bar, zeroed_index, n_eigenmodes, n_orients):
         ldotdot = -np.kron(Q_inv_block, Hx)
 
         ldot = ldot.reshape(-1)
-        # if zeroed_index is not None:
-        #     x_index, y_index = zeroed_index
-        #     if idx_src in x_index:
-        #         removed_idx = list(np.asanyarray(y_index)[np.asanyarray(x_index) == idx_src])
-        #         ldot = np.delete(ldot, removed_idx)
-        #         ldotdot = np.delete(ldotdot, removed_idx, axis=0)
-        #         ldotdot = np.delete(ldotdot, removed_idx, axis=1)
-
-        # FIX removing cross-talk components (that forced to be zero)
-        # for l in range(0, dxm, eff_eigenmodes):
-        #     for u in range(eff_eigenmodes):
-        #         for v in range(eff_eigenmodes):
-        #             if v != u and idx_src == l + v:
-        #                 removed_idx = list(range(l + u, dtot, dxm))
-        #                 print(f"removed_idx = {removed_idx}")
-        #                 if zeroed_index is not None:
-        #                     print(f"zeroed_index = {zeroed_index}")
-        #                     x_index, y_index = zeroed_index
-        #                     if idx_src in x_index:
-        #                         removed_idx.extend(list(np.asanyarray(y_index)[np.asanyarray(x_index) == idx_src]))
-        #                     print(f"extended removed_idx = {removed_idx}")
-        #                 ldot = np.delete(ldot, removed_idx)
-        #                 print(f"ldot.shape after delete = {ldot.shape}")
-        #                 ldotdot = np.delete(ldotdot, removed_idx, axis=0)
-        #                 print(f"ldotdot.shape after delete1 = {ldotdot.shape}")
-        #                 ldotdot = np.delete(ldotdot, removed_idx, axis=1)
-        #                 print(f"ldotdot.shape after delete2 = {ldotdot.shape}")
-
-        # delete_idxs = []
-        # for l in range(0, dxm, eff_eigenmodes):
-        #     for u in range(eff_eigenmodes):
-        #         for v in range(eff_eigenmodes):
-        #             if v != u and idx_v == l + v:
-        #                 removed_idx = list(range(l + u, dtot, dxm))
-        #                 if zeroed_index is not None:
-        #                     x_index, y_index = zeroed_index
-        #                     if idx_v in x_index:
-        #                         removed_idx.extend(list(np.asanyarray(y_index)[np.asanyarray(x_index) == idx_v]))
-        #                 delete_idxs.extend(removed_idx)
-        
-        # ldot = np.delete(ldot, delete_idxs)
-        # ldotdot = np.delete(ldotdot, delete_idxs, axis=0)
-        # ldotdot = np.delete(ldotdot, delete_idxs, axis=1)
-
-        # bias += ldot.dot(np.linalg.solve(ldotdot, ldot))
-
-
 
         delete_idxs = []
 
@@ -121,16 +69,9 @@ def sample_path_bias(q, a, x_bar, zeroed_index, n_eigenmodes, n_orients):
         idx_large_voxel = idx_v // n_eigenmodes
         voxel_start = idx_large_voxel * eff_eigenmodes
 
-        for l in range(voxel_start, voxel_start + eff_eigenmodes):
-            removed_idx = list(range(l, dtot, dxm))
-
-            if zeroed_index is not None:
-                x_index, y_index = zeroed_index
-                x_index = np.asarray(x_index)
-                y_index = np.asarray(y_index)
-
-                if l in x_index:
-                    removed_idx.extend(list(y_index[x_index == l]))
+        for idx in range(voxel_start, voxel_start + eff_eigenmodes):
+            removed_idx = transition_mask_to_parameter_indices(A_mask, idx,
+                                                               dxm, dtot)
 
             delete_idxs.extend(removed_idx)
 
@@ -152,7 +93,7 @@ def sample_path_bias(q, a, x_bar, zeroed_index, n_eigenmodes, n_orients):
     return bias
 
 
-def bias_by_idx(idx_src, q, a, x_bar, s_bar, b, m, p, zeroed_index=None):
+def bias_by_idx(idx_src, q, a, x_bar, s_bar, b, m, p, A_mask=None):
     """Computes the bias in the deviance (proloy@umd.edu)
 
     Parameters
@@ -187,13 +128,13 @@ def bias_by_idx(idx_src, q, a, x_bar, s_bar, b, m, p, zeroed_index=None):
 
     ldotdot[:, :] = - s2 / qi
 
-    if zeroed_index is not None:
-        x_index, y_index = zeroed_index
-        if idx_src in x_index:
-            removed_idx = list(np.asanyarray(y_index)[np.asanyarray(x_index) == idx_src])
-            ldot = np.delete(ldot, removed_idx)
-            ldotdot = np.delete(ldotdot, removed_idx, axis=0)
-            ldotdot = np.delete(ldotdot, removed_idx, axis=1)
+    if A_mask is not None:
+        removed_idx = transition_mask_to_parameter_indices(A_mask, idx_src, 
+                                                           m, dtot)
+
+        ldot = np.delete(ldot, removed_idx)
+        ldotdot = np.delete(ldotdot, removed_idx, axis=0)
+        ldotdot = np.delete(ldotdot, removed_idx, axis=1)
 
     try:
         c, low = linalg.cho_factor(-ldotdot)
@@ -219,3 +160,19 @@ def debias_deviances(dev_raw, bias_f, bias_r):
     np.fill_diagonal(d, 0)
     d[d < 0] = 0
     return d
+
+
+def transition_mask_to_parameter_indices(A_mask, target_idx, dxm, dtot):
+    """
+    Return flattened companion-matrix parameter indices
+    removed by fixing transitions to zero.
+    """
+
+    removed = []
+
+    sources = np.where(A_mask[target_idx] == 0)[0]
+
+    for src in sources:
+        removed.extend(range(src, dtot, dxm))
+
+    return np.asarray(removed)

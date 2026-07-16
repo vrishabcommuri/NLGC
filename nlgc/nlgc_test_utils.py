@@ -3,7 +3,7 @@ import scipy
 from scipy import linalg
 import os
 import time
-from ._nlgc_utils import _gc_extraction , _prepare_eigenmodes, NLGC, surface_ico4_to_surface_eigs
+from .nlgc_utils import _gc_extraction , _prepare_eigenmodes, NLGC, surface_ico4_to_surface_eigs
 from mne.minimum_norm import apply_inverse, make_inverse_operator, InverseOperator
 from mne.source_space import SourceSpaces
 from mne.utils import (logger, _check_option, _validate_type)
