@@ -1,5 +1,6 @@
 import matplotlib.pyplot as plt
 import numpy as np
+import scipy
 
 def prepare_transition_matrix(A, n_sources=None, order=None):
     """
@@ -76,6 +77,7 @@ def plot_transition_comparison(
     figsize=(12, 5),
     cmap="seismic",
     show_colorbar=False,
+    bind_colorbars=True,
 ):
     """
     Plot two transition matrices with shared color scale.
@@ -98,10 +100,15 @@ def plot_transition_comparison(
         order=order,
     )
 
-    vmax = max(
-        np.max(np.abs(A_before)),
-        np.max(np.abs(A_after)),
-    )
+    if bind_colorbars:
+        vmax1 = max(
+            np.max(np.abs(A_before)),
+            np.max(np.abs(A_after)),
+        )
+        vmax2 = vmax1
+    else:
+        vmax1 = np.max(np.abs(A_before))
+        vmax2 = np.max(np.abs(A_after))
 
     fig, axes = plt.subplots(
         2,
@@ -114,7 +121,7 @@ def plot_transition_comparison(
         A_before,
         axes[0],
         title=titles[0],
-        vmax=vmax,
+        vmax=vmax1,
         cmap=cmap,
     )
 
@@ -122,7 +129,7 @@ def plot_transition_comparison(
         A_after,
         axes[1],
         title=titles[1],
-        vmax=vmax,
+        vmax=vmax2,
         cmap=cmap,
     )
 
@@ -134,6 +141,12 @@ def plot_transition_comparison(
         )
 
     return fig, axes
+
+def plot_transition_blurred(A, m, order):
+    A = A[:m].reshape(m, order, m).mean(axis=1)
+    A = scipy.signal.convolve2d(A, np.ones((3,3)), mode='same')
+    vm = np.abs(A).max()
+    plt.imshow(A, cmap='seismic', vmax=vm, vmin=-vm)
 
 
 def plot_transition_single(

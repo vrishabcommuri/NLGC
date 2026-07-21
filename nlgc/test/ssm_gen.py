@@ -172,6 +172,7 @@ def gen_sparse_var_ssm(
         )
         / np.sqrt(state_dim)
     )
+    F[:, state_dim//order:] = 0.0
 
     Q = np.zeros((state_dim, state_dim))
 

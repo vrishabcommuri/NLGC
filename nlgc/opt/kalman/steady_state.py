@@ -46,6 +46,7 @@ def solve_ss_covariance_newton_raphson(A, F, Q, R, P0, N0, maxiter=20, tol=1e-5,
         # clgain_k = rkinv @ f.T @ x_k @ a
         # replace inv with cholesky solve
         M = F.T @ X_k @ F + R
+        M = 0.5 * (M + M.T)
         L = jax.scipy.linalg.cholesky(M, lower=True)
         clgain_k = jax.scipy.linalg.cho_solve((L, True), F.T @ X_k @ A)
 
@@ -79,7 +80,7 @@ def solve_ss_covariance_newton_raphson(A, F, Q, R, P0, N0, maxiter=20, tol=1e-5,
             b,
             x0=N_k.ravel(),      # warm start from previous EM iteration
             tol=1e-8,
-            maxiter=50,
+            maxiter=10,
         )
 
         N_k = x.reshape(N, N)

@@ -3,10 +3,13 @@ from scipy import linalg
 from .steady_state import (solve_ss_covariance_qz, 
                            solve_ss_covariance_newton_raphson)
 from numpy.typing import NDArray
+import dataclasses
 from dataclasses import dataclass
 from typing import Union
 import jax
-import jax.numpy as jnp
+import jax.numpy as jnp  
+jax.config.update("jax_enable_x64", True)
+
 
 Array = NDArray[np.float64] | jnp.ndarray
 
@@ -25,10 +28,10 @@ class FilterResult:
 @jax.tree_util.register_dataclass
 @dataclass
 class RTSSmootherResult:
-    smoothed_state: Array
-    smoothed_cov: Array
-    smoother_gain: Array
-    negative_log_likelihood: float # copied from filter for convenience
+    smoothed_state: Union[Array, None] = None
+    smoothed_cov: Union[Array, None] = None
+    smoother_gain: Union[Array, None] = None
+    negative_log_likelihood: float = 0.0 # copied from filter for convenience
 
 @dataclass
 class DisturbanceSmootherResult:
@@ -36,6 +39,17 @@ class DisturbanceSmootherResult:
     disturbance_information: Array
     model_fit: float
     negative_log_likelihood: float # copied from filter for convenience
+
+
+def _copycast_rtssmoother_result_numpy(smoother_result):
+    return dataclasses.replace(
+            smoother_result,
+            smoothed_state = np.array(smoother_result.smoothed_state),
+            smoothed_cov = np.array(smoother_result.smoothed_cov),
+            smoother_gain = np.array(smoother_result.smoother_gain),
+            negative_log_likelihood = \
+                np.float64(smoother_result.negative_log_likelihood),
+    )
 
 
 @jax.jit
@@ -305,7 +319,7 @@ def rts_smoother_jax(y, F, R, em_state):
         b,
         x0=P_filt.ravel(),      
         tol=1e-8,
-        maxiter=50,
+        maxiter=20,
     )
 
     P_smoothed = x.reshape(N_sources, N_sources)

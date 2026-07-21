@@ -1,7 +1,3 @@
-# Author: Behrad Soleimani <behrad@umd.edu>
-# Author: Proloy Das <proloy@umd.edu>
-"Deviance calculation"
-
 import numpy as np
 import warnings
 from scipy import linalg
@@ -9,75 +5,87 @@ from scipy import linalg
 from .opt.proximal import calculate_ss
 
 
+def compute_bias(em_state, smoother_result, config):
+    m = em_state.N_sources_upper
+    A = em_state.A[:m]
+    Q = em_state.Q[:m, :m]
+    A_mask = em_state.A_mask[:m]
+    x = smoother_result.smoothed_state
+    P = smoother_result.smoothed_cov
+    B = smoother_result.smoother_gain
+    
+    bias = sample_path_bias(Q, A, x, P, B, A_mask, 
+                            config.latent.n_eigenmodes, 
+                            config.latent.n_orients, 
+                            m, config.latent.order)
+    return bias
+
+
+def compute_bias_idx(source, em_state, smoother_result, config):
+    p = config.latent.order
+    m = em_state.N_sources_upper
+    A = em_state.A[:m]
+    Q = em_state.Q[:m, :m]
+    A_mask = em_state.A_mask[:m]
+    x = smoother_result.smoothed_state
+    P = smoother_result.smoothed_cov
+    B = smoother_result.smoother_gain
+
+    if isinstance(source, int):
+        # Map region index to the actual row indices in the A matrix
+        # e.g., Region 0 -> Rows [0, 1, 2]
+        source = [source * config.latent.n_orients + i 
+                  for i in range(config.latent.n_orients)]
+        
+    bias = sum([bias_by_idx(i, Q, A, x, P, B, m, p, A_mask) 
+                for i in source])
+    return bias
+
+
 def _voxel_block(v, n_orient=3):
     """Return slice for RAS components of voxel v."""
     return slice(n_orient * v, n_orient * (v + 1))
 
 
-def sample_path_bias(q, a, x_bar, A_mask, n_eigenmodes, n_orients):
-    """Computes the bias in the deviance
-
-    Parameters
-    ----------
-    q:  ndarray of shape (n_sources*mo, n_sources*mo)
-    a:  ndarray of shape (n_sources*mo, n_sources*order*mo)
-    x_bar:  ndarray of shape (t, n_sources*mo)
-    idx_src: source index
-
-    Returns
-    -------
-    bias
-
-    """
-    t, dxm = x_bar.shape
+def sample_path_bias(q, a, x_bar, s_bar, b, A_mask, n_eigenmodes, n_orients, 
+                     m, p):
+    """Computes the expected complete-data bias in the deviance"""
     _, dtot = a.shape
     
-    p = dtot // dxm
-    eff_eigenmodes = n_eigenmodes * n_orients
+    s1, s2, s3, n = calculate_ss(x_bar, s_bar, b, m, p)
 
+    eff_eigenmodes = n_eigenmodes * n_orients
     bias = 0
-    cx = np.zeros((t - p, dtot))
-    dxn_voxels = dxm // n_orients
+    
+    dxn_voxels = m // n_orients
 
     for idx_v in range(dxn_voxels):
         block = _voxel_block(idx_v, n_orients)
 
         ai = a[block, :]
-        xi = x_bar[p:, block]
-
         Q_block = q[block, block]
         Q_inv_block = np.linalg.inv(Q_block)
 
-        for k in range(p):
-            cx[:, k * dxm:(k + 1) * dxm] = x_bar[p - 1 - k:t - 1 - k]
+        # residual 
+        diff = s1[block, :] - ai @ s2
+        
+        # gradient
+        ldot_matrix = Q_inv_block @ diff
+        ldot = ldot_matrix.reshape(-1)
 
-        res = xi - cx.dot(ai.T)
-
-        # gradient of log - likelihood
-        ldot = Q_inv_block.dot(res.T.dot(cx))
-
-        # hessian of log - likelihood
-        # ldotdot = -cx.T.dot(cx) / qd[block, block]
-        Hx = cx.T.dot(cx) 
-        ldotdot = -np.kron(Q_inv_block, Hx)
-
-        ldot = ldot.reshape(-1)
+        # Hessian 
+        ldotdot = -np.kron(Q_inv_block, s2)
 
         delete_idxs = []
 
-        # Large voxel block containing all eigenmodes and all RAS orientations
         idx_large_voxel = idx_v // n_eigenmodes
         voxel_start = idx_large_voxel * eff_eigenmodes
 
         for idx in range(voxel_start, voxel_start + eff_eigenmodes):
-            removed_idx = transition_mask_to_parameter_indices(A_mask, idx,
-                                                               dxm, dtot)
-
+            removed_idx = transition_mask_to_parameter_indices(A_mask, idx, m, dtot)
             delete_idxs.extend(removed_idx)
 
-        # Expand deletes across the 3 target RAS equations
         delete_idxs_3d = []
-
         for r in range(n_orients):
             for idx in delete_idxs:
                 delete_idxs_3d.append(r * dtot + idx)
@@ -89,7 +97,9 @@ def sample_path_bias(q, a, x_bar, A_mask, n_eigenmodes, n_orients):
             ldotdot = np.delete(ldotdot, delete_idxs_3d, axis=0)
             ldotdot = np.delete(ldotdot, delete_idxs_3d, axis=1)
 
-        bias += ldot.dot(np.linalg.solve(ldotdot, ldot))
+        step, _, _, _ = np.linalg.lstsq(-ldotdot, ldot, rcond=None)
+        bias += n * (ldot @ step)
+
     return bias
 
 
@@ -120,7 +130,7 @@ def bias_by_idx(idx_src, q, a, x_bar, s_bar, b, m, p, A_mask=None):
     ldot = np.empty((dtot))
     ldotdot = np.empty((dtot, dtot))
 
-    temp1 = s2.dot(ai)
+    temp1 = s2 @ ai
     temp1 -= s1[idx_src]
 
     ldot[:] = - temp1
@@ -139,13 +149,13 @@ def bias_by_idx(idx_src, q, a, x_bar, s_bar, b, m, p, A_mask=None):
     try:
         c, low = linalg.cho_factor(-ldotdot)
         temp = linalg.cho_solve((c, low), ldot)
-        bias = n * ldot.dot(temp)
+        bias = n * ldot @ temp
     except linalg.LinAlgError:
         warnings.warn('source-index {:d} ldotdot is not negative definite: '
                       'setting positive eigenvalues equal to zero, '
                       'result may not be accurate.'.format(idx_src), RuntimeWarning, stacklevel=2)
         e, v = linalg.eigh(-ldotdot)
-        temp = v.dot(ldot)
+        temp = v @ ldot
         idx = e > 0
         bias = np.sum(temp[idx] ** 2 / e[idx])
         bias *= n
@@ -167,12 +177,13 @@ def transition_mask_to_parameter_indices(A_mask, target_idx, dxm, dtot):
     Return flattened companion-matrix parameter indices
     removed by fixing transitions to zero.
     """
-
     removed = []
 
     sources = np.where(A_mask[target_idx] == 0)[0]
 
     for src in sources:
-        removed.extend(range(src, dtot, dxm))
+        # dxm and dtot must be integers for range() to work
+        removed.extend(range(int(src), int(dtot), int(dxm)))
 
-    return np.asarray(removed)
+    # FIX: Force dtype=int so empty arrays don't default to float64
+    return np.asarray(removed, dtype=int)

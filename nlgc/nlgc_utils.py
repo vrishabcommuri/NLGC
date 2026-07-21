@@ -6,17 +6,17 @@ import pickle
 import warnings
 from functools import reduce
 from joblib import Parallel, delayed
-from scipy import optimize, linalg
 from mne.utils import logger
 from nlgc.opt import (NeuraLVAR, NeuraLVARCV, create_shared_mem, 
                       link_share_memory)
 from nlgc.stat import fdr_control
 from nlgc.bias_utils import debias_deviances
-from nlgc.vmap_gc import batched_test_links
+from nlgc.parallel_gc import batched_test_links
 from nlgc.opt.proximal import instantiate_proximal_solvers
 from nlgc.utils.restriction import (roi_to_link_restriction, 
                                     _expand_roi_indices_as_tup)
-
+from nlgc.bias_utils import compute_bias
+from nlgc.config import ModelMultiprocessConfig
 
 class NLGC:
     """NLGC object
@@ -118,79 +118,137 @@ class NLGC:
             pickle.dump(self, filehandler)
 
 
-def gc_extraction(y, F, r, ROIs, em_state, config):
+def gc_extraction(y, F, R, ROIs, em_state, config):
     eff_eigenmodes = config.latent.n_eigenmodes * config.latent.n_orients
-    n, m = F.shape
-    R = r * np.eye(n)
+    
+    instantiate_proximal_solvers(config, em_state.N_sources_upper)
 
-    instantiate_proximal_solvers(config, m)
+    lambda_range = config.sparsity.lambda_range
 
-    lambda_range = config.validation.lambda_range
     if lambda_range is None:
         raise ValueError("lambda range must be a float or list of floats")
     
-    em_state.Q = _init_Q(y, F)
-
-    print('Start creating models')
+    if config.numerical.verbose:
+        print("running full model fit")
 
     if len(lambda_range) > 1:
         # pick best lambda from list
         model_f = NeuraLVARCV.from_config(config)
-        em_state, smoother_state = model_f.fit(y, F, R, copy.deepcopy(em_state))
+        em_state, smoother_result = model_f.fit(y, F, R, 
+                                                copy.deepcopy(em_state))
     else:
         model_f = NeuraLVAR.from_config(config)
         lambda_ = lambda_range[0]
-        em_state, smoother_state = model_f.fit(y, F, R, lambda_, 
+        em_state, smoother_result = model_f.fit(y, F, R, lambda_, 
                                                copy.deepcopy(em_state))
+        
+    lambda_ = model_f.lambda_
+        
+    if config.numerical.verbose:
+        print(f"finished full model fit in {em_state.em_iter} EM iterations")
     
-    print('Finished fitting models')
+    bias_f = compute_bias(em_state, smoother_result, config)
 
-    bias_f = model_f.compute_bias(em_state)
-
-    warnings.filterwarnings('ignore')
-
-
-    sparsity = np.linalg.norm(model_f._parameters[0], axis=0, ord=1) * \
-               np.diag(model_f._parameters[2])[None, :]
-
-    if config.sparsity.var_thr < 1:
-        x_ = np.sum(model_f._parameters[4][:, :m] ** 2, axis=0)
-        total_power = np.zeros(m // eff_eigenmodes)
-        for n in range(eff_eigenmodes):
-            total_power += x_[n::eff_eigenmodes]
-        sorted_idx = np.argsort(total_power)[::-1]
-        sorted_pow_ratio = np.cumsum(total_power[sorted_idx])
-        sorted_pow_ratio /= sorted_pow_ratio[-1]
-        idx = ((sorted_pow_ratio > config.sparsity.var_thr) != 0).argmax()
-        ROIs = sorted_idx[:idx + 1]
-
-    print('Checking links')
-
+    sparsity, ROIs = sparsity_mask(em_state, smoother_result, ROIs, config)
     links_to_check = roi_to_link_restriction(ROIs, sparsity, 
                                              eff_eigenmodes, config)
 
     if config.numerical.verbose:
         print(f"Checking {len(links_to_check)} links...")
     
-    if config.optimizer.vmap_gc:
-        dev_raw, bias_r, nonconv_flag = batched_test_links(links_to_check, 
-                                                           model_f, y, F, R, 
-                                                           em_state, config)
-    else:
+    if isinstance(config.parallel, ModelMultiprocessConfig):
         dev_raw, bias_r, nonconv_flag = multiprocess_test_links(links_to_check, 
-                                                                model_f, y, F, 
-                                                                R, em_state, 
+                                                                y, F, R, 
+                                                                lambda_,
+                                                                em_state, 
                                                                 config)
+    else:
+        dev_raw, bias_r, nonconv_flag = batched_test_links(links_to_check, 
+                                                           y, F, R, lambda_,
+                                                           em_state, config)
 
     return dev_raw, bias_r, bias_f, model_f, nonconv_flag
 
 
+def sparsity_mask(em_state, smoother_result, ROIs, config):
+    m = em_state.N_sources_upper
+    A = em_state.A[:m]
+    smoothed_state = smoother_result.smoothed_state
+    order = config.latent.order
+    n_orients = config.latent.n_orients
+    n_eigenmodes = config.latent.n_eigenmodes
+    eff_eigenmodes = n_orients * n_eigenmodes
+    energy_thresh = config.sparsity.negligible_candidate_link_energy_thr
 
-def multiprocess_test_links(links_to_check, model_f, y, F, R, em_state, config):
+    N = m // eff_eigenmodes
+
+    A_blocks = A.reshape(N, eff_eigenmodes, order, N, eff_eigenmodes)
+
+    block_strength = np.sqrt(np.sum(A_blocks**2, axis=(1,2,4)))
+
+    # don't include self-links in strength calculation
+    block_strength = block_strength * (~np.eye(N).astype(bool)).astype(float)
+
+    if config.sparsity.negligible_candidate_link_energy_thr < 1 and \
+            block_strength.sum() > 0:
+        link_power = block_strength.ravel() ** 2
+
+        sorted_idx = np.argsort(link_power)[::-1]
+
+        cumul_power = np.cumsum(link_power[sorted_idx])
+        cumul_power /= cumul_power[-1]
+
+        idx = np.searchsorted(cumul_power, energy_thresh)
+
+        keep_idx = sorted_idx[:idx + 1]
+
+        sparsity_mask = np.zeros_like(link_power, dtype=bool)
+        sparsity_mask[keep_idx] = 1.0
+
+        sparsity_mask = sparsity_mask.reshape(N, N)
+        if config.numerical.verbose:
+            print(f"retained {np.count_nonzero(sparsity_mask)}/"
+                  f"{np.count_nonzero(block_strength)} candidate "
+                  "links (dropped lowest  "
+                  f"{(1-energy_thresh)*100:.5f}% of total off diag energy)")
+            
+        sparsity = block_strength * sparsity_mask
+
+        np.count_nonzero(sparsity), np.count_nonzero(sparsity_mask)
+
+        assert np.count_nonzero(sparsity) == \
+               np.count_nonzero(sparsity_mask)
+    else:
+        sparsity = block_strength
+
+    if config.sparsity.var_thr < 1:
+        x = smoothed_state[:, :em_state.N_sources_upper]
+
+        # energy of each latent state
+        state_power = np.sum(x**2, axis=0)
+
+        # group all eigenmodes/orientations belonging to one ROI
+        N_roi = em_state.N_sources_upper // eff_eigenmodes
+
+        roi_power = state_power.reshape(N_roi, eff_eigenmodes).sum(axis=1)
+
+        sorted_idx = np.argsort(roi_power)[::-1]
+
+        cumul_power = np.cumsum(roi_power[sorted_idx])
+        cumul_power /= cumul_power[-1]
+
+        idx = np.searchsorted(cumul_power, config.sparsity.var_thr)
+
+        ROIs = sorted_idx[:idx + 1]
+
+    return sparsity, ROIs
+
+
+def multiprocess_test_links(links_to_check, y, F, R, lambda_, em_state, config):
     eff_eigenmodes = config.latent.n_eigenmodes * config.latent.n_orients
     n, m = F.shape
     nx = m // (eff_eigenmodes)
-    lambda_ = model_f.lambda_
+    fullmodel_log_likelihood = em_state.log_likelihood
 
     dev_raw = np.zeros((nx, nx))
     bias_r = np.zeros((nx, nx))
@@ -230,27 +288,10 @@ def multiprocess_test_links(links_to_check, model_f, y, F, R, em_state, config):
             print(f"\nUnlink shared-memory issue: {exc}")
 
     indices = tuple(z for z in zip(*links_to_check))
-    dev_raw[indices] = 2 * model_f.ll
+    dev_raw[indices] = 2 * fullmodel_log_likelihood
     dev_raw[indices] -= 2 * ll_r[indices]
 
     return dev_raw, bias_r, nonconv_flag
-
-
-def _init_Q(y, f):
-    n, m = f.shape
-    e, u = linalg.eigh(f.dot(f.T))
-    temp = u.T.dot(y)
-    c = (temp ** 2).sum(axis=1)
-
-    def fun(x):
-        return (c / (1 + x * e) ** 2).sum() - 1.2 * n * y.shape[1]
-
-    if fun(0) > 0:
-        q_val = optimize.newton(fun, 1)
-    else:
-        q_val = 0.0001
-
-    return q_val * np.eye(m)
 
 
 def _learn_reduced_model(i, j, y, F, R, lambda_f, em_state, config):
@@ -265,10 +306,10 @@ def _learn_reduced_model(i, j, y, F, R, lambda_f, em_state, config):
     link = '->'.join(map(lambda x: ','.join(map(str, x)), (source, target)))
     
     model_r = NeuraLVAR.from_config(config)
-    em_state, _ = model_r.fit(y, F, R, lambda_f, em_state, 
+    em_state, smoother_result = model_r.fit(y, F, R, lambda_f, em_state, 
                                             restriction=link)
-    bias = model_r.compute_bias(em_state)
-    ll = model_r.ll
+    bias = compute_bias(em_state, smoother_result, config)
+    ll = em_state.log_likelihood
     nonconv_flag = em_state.em_iter == config.optimizer.max_iter
     return ll, bias, nonconv_flag
 

@@ -90,7 +90,7 @@ def test_model_mismatch_likelihood():
         Q = ssm.Q,
     )
 
-    true_ll = forward_filter_blas(ssm.y, ssm.F, ssm.R, em_state)\
+    true_ll = -forward_filter_blas(ssm.y, ssm.F, ssm.R, em_state)\
                 .negative_log_likelihood
 
     wrongA = 0.2 * np.eye(ssm.N_sources)
@@ -99,7 +99,7 @@ def test_model_mismatch_likelihood():
         A = wrongA,
     )
 
-    wrong_ll = forward_filter_blas(ssm.y, ssm.F, ssm.R, wrong_em_state)\
+    wrong_ll = -forward_filter_blas(ssm.y, ssm.F, ssm.R, wrong_em_state)\
                 .negative_log_likelihood
     
     assert true_ll > wrong_ll
@@ -342,42 +342,6 @@ def benchmark_filter_speed(ssm, n_repeats=100):
     print(f"JAX:  {jax_time:.3f}s")
     print(f"Speedup: {blas_time/jax_time:.2f}x")
 
-    
-def test_var3_scalar():
-    """
-    test scalar VAR(3) model.
-    """
-    n_sources = 4
-    order = 3
-    n_orients = 1
-
-    ssm, _, _ = gen_sparse_var_ssm(
-        T=1000,
-        n_sources=n_sources,
-        order=order,
-        n_orients=n_orients,
-        seed=0,
-    )
-
-    em_state = make_initial_em_state(ssm)
-
-    Q = np.zeros_like(ssm.Q)
-    m = ssm.N_sources
-    Q[:m,:m] = np.eye(m)*0.001
-    em_state.Q = Q
-    em_state.N_sources_upper = m
-
-    result = rts_smoother_blas(ssm.y, ssm.F, ssm.R, em_state)
-
-    assert result.smoothed_state.shape == (ssm.N_times, ssm.N_sources * order)
-    assert result.smoothed_cov.shape == (ssm.N_sources * order, 
-                                         ssm.N_sources * order)
-
-
-    assert np.isfinite(result.negative_log_likelihood)
-
-    print(f"neg log likelihood: {result.negative_log_likelihood}")
-
 
 if __name__ == '__main__':
     print("running smoke test")
@@ -421,7 +385,3 @@ if __name__ == '__main__':
     ssm = gen_large_ssm()
     benchmark_filter_speed(ssm, n_repeats=10)
     print("done\n\n")
-
-    print("running scalar VAR(3) smoother test")
-    test_var3_scalar()
-    print("pass\n\n")

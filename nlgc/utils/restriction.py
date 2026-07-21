@@ -3,26 +3,22 @@ import itertools
 import jax.numpy as jnp
 import numpy as np
 
+
 def roi_to_link_restriction(ROIs, sparsity, eff_eigenmodes, config):
+    print(f"{np.count_nonzero(sparsity)}")
+    print(f"{len(ROIs)=}")
+    print(f"{config.sparsity.sparsity_factor=}")
     links_to_check = []
     for i, j in itertools.product(ROIs, repeat=2):
         # Exclude i == j cases
         if i == j:
             continue
-        # Exclude small cross-regression cases
-        target = _expand_roi_indices_as_tup(j, eff_eigenmodes)
-        source = _expand_roi_indices_as_tup(i, eff_eigenmodes)
-        if sparsity[target,:][:,source].sum() <= \
-           config.sparsity.sparsity_factor * sparsity[target,:][:,target].sum():
+
+        if sparsity[j, i] <= config.sparsity.sparsity_factor * sparsity[j, j]:
             continue
-        # Append rest of the links to check
+
         links_to_check.append((j, i))
     return links_to_check
-
-
-def _expand_roi_indices_as_tup(reg_idx, emod, n_orients = 1):
-    eff_emod = emod* n_orients
-    return tuple(range(reg_idx * eff_emod, reg_idx * eff_emod + eff_emod))
 
 
 def restriction_to_zeroed_index(restriction, m, p):
@@ -69,13 +65,16 @@ def link_tuples_to_zero_indices(links_to_check, em_state, config):
 
         target = _expand_roi_indices_as_tup(j, eff_eigenmodes)
         source = _expand_roi_indices_as_tup(i, eff_eigenmodes)
-        print(f'target: {target}')
-        print(f'source {source}')
         link = '->'.join(map(lambda x: ','.join(map(str, x)), (source, target)))
 
         zeroed_indices.append(restriction_to_zeroed_index(link, m, p))
 
     return zeroed_indices
+
+
+def _expand_roi_indices_as_tup(reg_idx, emod, n_orients = 1):
+    eff_emod = emod* n_orients
+    return tuple(range(reg_idx * eff_emod, reg_idx * eff_emod + eff_emod))
 
 
 def jax_expand_zeroindex_masks(zeroed_indices, em_state):

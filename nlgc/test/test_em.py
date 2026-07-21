@@ -43,7 +43,8 @@ def test_em_recovers_A():
     config = ModelConfig.from_legacy_kwargs({'order':1})
     lambda_ = 0.1
 
-    final_state, _ = em_blas(ssm.y, ssm.F, ssm.R, em_state, config, lambda_)
+    final_state, _ = em_blas(ssm.y, ssm.F, ssm.R, em_state, config, lambda_, 
+                             config.optimizer.n_warmup_iter)
     
     A_est = final_state.A
     A_true = ssm.A
@@ -84,7 +85,8 @@ def test_em_recovers_Q():
 
     em_state = make_initial_em_state(ssm)
 
-    final_state, _ = em_blas(ssm.y, ssm.F, ssm.R, em_state, config, lambda_=0.0)
+    final_state, _ = em_blas(ssm.y, ssm.F, ssm.R, em_state, config, lambda_=0.0,
+                             N_iter=config.optimizer.n_warmup_iter)
 
     Q_est = final_state.Q
     Q_true = ssm.Q
@@ -125,7 +127,8 @@ def test_em_jax_matches_blas():
     em_state_blas = make_initial_em_state(ssm)
 
     intermediate_state_blas, _ = em_blas(ssm.y, ssm.F, ssm.R, em_state_blas, 
-                                  config, lambda_=0.0)
+                                  config, lambda_=0.0, 
+                                  N_iter=config.optimizer.n_warmup_iter)
     
     
     # do 25 blas iterations (default) for final
@@ -137,11 +140,13 @@ def test_em_jax_matches_blas():
                                     jnp.array(ssm.F), 
                                     jnp.array(ssm.R), 
                                     em_state_jax, 
-                                    config, lambda_=0.0)
+                                    config, lambda_=0.0, 
+                                    N_iter=config.optimizer.n_warmup_iter)
     
     final_state_blas, _ = em_blas(ssm.y, ssm.F, ssm.R, 
                                          intermediate_state_blas, 
-                                         config, lambda_=0.0)
+                                         config, lambda_=0.0,
+                                         N_iter=config.optimizer.n_warmup_iter)
 
     np.testing.assert_allclose(
         final_state_jax.A,
@@ -172,7 +177,8 @@ def test_em_likelihood_increases():
 
 
         em_state, _ = em_blas(ssm.y, ssm.F, ssm.R, em_state, config, 
-                              lambda_=0.0)
+                              lambda_=0.0, 
+                              N_iter=config.optimizer.n_warmup_iter)
 
         likelihoods.append(em_state.log_likelihood)
 
@@ -197,10 +203,12 @@ def test_em_lambda_controls_sparsity():
     em_state1 = make_initial_em_state(ssm)
 
     no_penalty_state, _ = em_blas(ssm.y, ssm.F, ssm.R, em_state0, config, 
-                                  lambda_=0.0)
+                                  lambda_=0.0, 
+                                  N_iter=config.optimizer.n_warmup_iter)
 
     sparse_state, _ = em_blas(ssm.y, ssm.F, ssm.R, em_state1, config, 
-                              lambda_=1.0)
+                              lambda_=1.0,
+                              N_iter=config.optimizer.n_warmup_iter)
 
     assert np.linalg.norm(sparse_state.A) < np.linalg.norm(no_penalty_state.A)
     print(f"sparse A norm {np.linalg.norm(sparse_state.A):.3f} < "
@@ -225,7 +233,8 @@ def test_em_A_mask_enforced():
         "n_warmup_iter":30,
     })
 
-    result, _ = em_blas(ssm.y, ssm.F, ssm.R, em_state, config, lambda_=0.0)
+    result, _ = em_blas(ssm.y, ssm.F, ssm.R, em_state, config, lambda_=0.0, 
+                        N_iter=config.optimizer.n_warmup_iter)
 
     assert result.A[0,0] == 0.0
 
@@ -332,9 +341,16 @@ def test_em_var3_scalar():
     plt.show()
 
 
-def test_em_var_vector(n_sources=4, n_sensors=8, n_orients=3, 
-                       order=3, T=2000, lambda_=0.2, plot_transition=True,
-                       **ssm_kwargs):
+def test_em_var_vector(
+        n_sources=4, 
+        n_sensors=8, 
+        n_orients=3, 
+        order=3,
+        T=2000, 
+        lambda_=0.2, 
+        plot_transition=True,
+        **ssm_kwargs
+):
     """
     test EM recovery for a sparse VAR(3) model with 3 orientations.
     """
@@ -368,6 +384,7 @@ def test_em_var_vector(n_sources=4, n_sensors=8, n_orients=3,
         {
             "order": order,
             "n_orients": n_orients,
+            "verbose": True,
         }
     )
     start = time.perf_counter()
@@ -482,62 +499,62 @@ def test_em_var_vector_huge():
                        T=5000,
                        lambda_=0.05,
                        sparsity=0.075,
-                       plot_transition=False)
+                       plot_transition=True)
     
     print(f"runtime: {runtime:.3f}s")
     
 
 if __name__ == '__main__':
-    # instantiate_proximal_solvers({
-    #     'n_orients': 1,
-    #     'order': 1,
-    #     'alpha': 0.0,
-    #     'beta': 0.0,
-    # }, N_sources=4)
+    instantiate_proximal_solvers({
+        'n_orients': 1,
+        'order': 1,
+        'alpha': 0.0,
+        'beta': 0.0,
+    }, N_sources=4)
 
-    # print("running test EM recovers small ssm A parameter")
-    # test_em_recovers_A()
-    # print("pass\n\n")
+    print("running test EM recovers small ssm A parameter")
+    test_em_recovers_A()
+    print("pass\n\n")
 
-    # print("running test EM recovers small ssm Q parameter")
-    # test_em_recovers_Q()
-    # print("pass\n\n")
+    print("running test EM recovers small ssm Q parameter")
+    test_em_recovers_Q()
+    print("pass\n\n")
 
-    # print("running test jax vs blas EM equality")
-    # test_em_jax_matches_blas()
-    # print("pass\n\n")
+    print("running test jax vs blas EM equality")
+    test_em_jax_matches_blas()
+    print("pass\n\n")
 
-    # print("running test E< likelihood increasing monotonicity")
-    # test_em_likelihood_increases()
-    # print("pass\n\n")
+    print("running test EM likelihood increasing monotonicity")
+    test_em_likelihood_increases()
+    print("pass\n\n")
 
-    # print("running test EM lambda increases sparsity")
-    # test_em_lambda_controls_sparsity()
-    # print("pass\n\n")
+    print("running test EM lambda increases sparsity")
+    test_em_lambda_controls_sparsity()
+    print("pass\n\n")
 
-    # print("running test EM scalar GC mask")
-    # test_em_A_mask_enforced()
-    # print("pass\n\n")
+    print("running test EM scalar GC mask")
+    test_em_A_mask_enforced()
+    print("pass\n\n")
 
-    # print("running test EM stability")
-    # test_em_stable()
-    # print("pass\n\n")
+    print("running test EM stability")
+    test_em_stable()
+    print("pass\n\n")
 
-    # print("running test EM scalar VAR(3)")
-    # test_em_var3_scalar()
-    # print("pass\n\n")
+    print("running test EM scalar VAR(3)")
+    test_em_var3_scalar()
+    print("pass\n\n")
 
-    # print("running test EM vector VAR(3)")
-    # test_em_var_vector()
-    # print("pass\n\n")
+    print("running test EM vector VAR(3)")
+    test_em_var_vector()
+    print("pass\n\n")
 
-    # print("running test EM vector VAR(3) medium") 
-    # test_em_var_vector_medium()
-    # print("pass\n\n")
+    print("running test EM vector VAR(3) medium") 
+    test_em_var_vector_medium()
+    print("pass\n\n")
 
-    # print("running test EM vector VAR(2) large") 
-    # test_em_var_vector_large()
-    # print("pass\n\n")
+    print("running test EM vector VAR(2) large") 
+    test_em_var_vector_large()
+    print("pass\n\n")
 
     print("running test EM vector VAR(2) huge") 
     test_em_var_vector_huge()

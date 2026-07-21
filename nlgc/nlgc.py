@@ -3,10 +3,9 @@ from mne.forward import is_fixed_orient
 from mne.minimum_norm.inverse import _check_reference
 from scipy import linalg
 from nlgc.utils.leadfield import prepare_eigenmodes
-from nlgc.utils.warm_start import warm_start_sources
 from nlgc.nlgc_utils import gc_extraction, NLGC
 from nlgc.config import ModelConfig
-from nlgc.opt.em import EMState
+from nlgc.utils.initialize import initialize_em_state
 
 
 def nlgc_map(name, evoked, forward, noise_cov, labels, patch_idx, 
@@ -95,24 +94,10 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, patch_idx,
 
     if not is_fixed_orient(forward):
         raise ValueError(f"Can't work with free orientation forward: {forward}")
-
         
     weights, G, label_vertidx, label_names, gain_info, whitener = \
             prepare_eigenmodes(evoked.info, forward, noise_cov, labels, config)
 
-    
-    em_state = EMState()
-    if config.optimizer.warm_start:
-        em_state.smoothed_state = warm_start_sources(evoked, forward, noise_cov, 
-                                                     weights, config)
-        
-        # !!! TODO the smoothed state will just be overwritten after the first
-        # iter since the kf marginal likelihood p(y|theta) doesn't depend on x
-        # (x is not a parameter!). we need to treat the "smoothed state" above
-        # as oracle and then fit a simple VAR model to it to obtain warm-start
-        # parameter estimates for A and Q; those can then be loaded into
-        # em_state above. this can be done with pymc VAR and find_map.
-    
     # get the data
     sel = [evoked.ch_names.index(name) for name in gain_info['ch_names']]
     M = evoked.data[sel]
@@ -149,9 +134,20 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, patch_idx,
         if config.numerical.verbose:
             print('Segment: ', this_segment + 1)
             print(f"nlgc_map max iter = {config.optimizer.max_iter}")
+
+        y = M[:, this_segment * tt: (this_segment + 1) * tt]
+        F = G
+
+        F_companion, R_companion, em_state = initialize_em_state(y, F, r, 
+                                                                 evoked, 
+                                                                 forward, 
+                                                                 noise_cov, 
+                                                                 weights, 
+                                                                 config)
+
         d_raw_, bias_r_, bias_f_, model_f, conv_flag_ = \
-            gc_extraction(M[:, this_segment * tt: (this_segment + 1) * tt], G, 
-                          r, ROIs=patch_idx, em_state=em_state, config=config)
+            gc_extraction(y, F_companion, R_companion, ROIs=patch_idx, 
+                          em_state=em_state, config=config)
         
         d_raw[this_segment] = d_raw_
         bias_r[this_segment] = bias_r_

@@ -1,8 +1,53 @@
 from dataclasses import dataclass, field
-from typing import Union
+from typing import Union, TypeAlias
 
 
 _default_lambda_range = (5e-1, 2e-1, 1e-1, 5e-2, 2e-2, 1e-2, 5e-3, 2e-3, 1e-3, 5e-4)
+
+
+@dataclass(frozen=True)
+class ModelSerialConfig:
+    """
+    run models serially on a single CPU thread.
+    """
+    pass
+
+@dataclass(frozen=True)
+class ModelVmapConfig:
+    """
+    vectorize models using jax.vmap on a single device. used for GPU
+    acceleration.
+    """
+    pass
+
+
+@dataclass(frozen=True)
+class ModelShardConfig:
+    """
+    parallelize models across JAX devices using shard_map (or pmap). if
+    utilizing sharding to parallelize across multiple cpus on a machine with
+    performance and efficiency cores (e.g., most modern macs) you MUST specify
+    n_devices to be the exactly the number of performance cores and NOT the
+    total cpu count, else every batched computation will be blocked until the
+    efficiency cores finish, bottlenecking the GC testing.
+    """
+    n_devices: int = 1
+
+
+@dataclass(frozen=True)
+class ModelMultiprocessConfig:
+    """
+    parallelize models using independent Python worker processes.
+    """
+    n_workers: int = 1
+
+ModelParallelConfig: TypeAlias = (
+    ModelSerialConfig
+    | ModelVmapConfig
+    | ModelShardConfig
+    | ModelMultiprocessConfig
+)
+
 
 @dataclass(frozen=True)
 class ModelLatentConfig:
@@ -22,6 +67,7 @@ class ModelSparsityConfig:
                                                      _default_lambda_range)
     lambda1: Union[float, None] = None
     lambda2: Union[float, None] = None
+    negligible_candidate_link_energy_thr: float = 0.99
 
 @dataclass(frozen=True)
 class ModelForwardConfig:
@@ -36,9 +82,8 @@ class ModelOptimizerConfig:
     max_iter: int = field(default=500, metadata={"static": True})  
     n_warmup_iter: int = 25   # denotes how many blas iters before using jax 
     max_cyclic_iter: int = 3  # legacy; deprecated
-    tol: float = 1e-5
+    tol: float = 1e-8
     warm_start: bool = False
-    vmap_gc: bool = True
     
 @dataclass(frozen=True)
 class ModelValidationConfig:
@@ -60,10 +105,31 @@ class ModelConfig:
     optimizer: ModelOptimizerConfig
     validation: ModelValidationConfig
     numerical: ModelNumericalConfig
+    parallel: ModelParallelConfig
 
     @classmethod
     def from_legacy_kwargs(cls, kwargs):
+        parallel_mode = kwargs.pop("parallel_mode", "serial")
+
+        if parallel_mode == "serial":
+            parallel = ModelSerialConfig()
+
+        elif parallel_mode == "vmap":
+            parallel = ModelVmapConfig()
+
+        elif parallel_mode == "shard":
+            parallel = ModelShardConfig(
+                n_devices=kwargs.pop("n_devices")
+            )
+
+        elif parallel_mode == "multiprocess":
+            parallel = ModelMultiprocessConfig(n_workers=kwargs.pop("n_workers"))
+
+        else:
+            raise ValueError(f"Unknown parallel_mode: {parallel_mode}")
+        
         return cls(
+            parallel = parallel,
             latent = ModelLatentConfig(
                 order = kwargs.pop("order"),
                 n_eigenmodes = kwargs.pop("n_eigenmodes", 2),
@@ -78,6 +144,8 @@ class ModelConfig:
                 var_thr = kwargs.pop("var_thr", 1.0),
                 sparsity_factor = kwargs.pop("sparsity_factor", 0.0),
                 lambda_range = kwargs.pop("lambda_range", None),
+                negligible_candidate_link_energy_thr = \
+                    kwargs.pop("negligible_candidate_link_energy_thr", 0.99),
             ),
 
             forward = ModelForwardConfig(
@@ -92,7 +160,7 @@ class ModelConfig:
                 max_iter = kwargs.pop("max_iter", 500),
                 max_cyclic_iter = kwargs.pop("max_cyclic_iter", 3),
                 n_warmup_iter= kwargs.pop("n_warmup_iter", 25),
-                tol = kwargs.pop("tol", 1e-5),
+                tol = kwargs.pop("tol", 1e-8),
                 warm_start = kwargs.pop("warm_start", False),
             ),
             

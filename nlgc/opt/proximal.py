@@ -1,8 +1,9 @@
 from jaxopt import ProximalGradient
 import jax
-import jax.numpy as jnp
-from functools import partial
-import dataclasses
+import jax.numpy as jnp         
+from functools import partial   
+import dataclasses          
+jax.config.update("jax_enable_x64", True)    
 
 solver = None
 solve_for_Q = None
@@ -70,16 +71,6 @@ def proximal_param_update(em_state, smoother_result, lambda_):
         jnp.eye(m)
     )
 
-    # print(m)
-    # print(em_state.Q[:m, :m].shape)
-    # print("cond(Q)", jnp.linalg.cond(jnp.array(em_state.Q[:m,:m])))
-    # print("||Qinv||", jnp.linalg.norm(jnp.array(Qinv)))
-    # print("||s2||", jnp.linalg.norm(jnp.array(s2)))
-    # print("grad norm",
-    #     jnp.linalg.norm(jnp.array(
-    #         2 * Qinv @ (em_state.A[:m] @ s2 - s1)
-    #     )))
-    
     A_shrunk = solver.run(em_state.A[:m], 
                           hyperparams_prox=lambda_, s1=s1, 
                           s2=s2, Qinv=Qinv).params
@@ -122,7 +113,6 @@ def _solve_for_Q(A, s1, s2, s3, alpha, beta, n_orients):
     Q_new = Q_new / (1.0 + alpha)
 
     return Q_new
-
 
 
 def calculate_ss_jax(em_state, smoother_result):

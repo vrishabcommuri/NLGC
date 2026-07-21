@@ -76,17 +76,6 @@ class NeuraLVAR:
 
         p = self.config.latent.order
 
-        # grab upper portions from previous step for forming other matrix 
-        # companions forms 
-        A = em_state.A[:m] 
-        Q = em_state.Q[:m, :m]
-
-        A, F, Q, R = self.companion_form(A, F, Q, R) 
-
-        # overwrite if not already in companion form
-        em_state.A = A 
-        em_state.Q = Q 
-
         zeroed_index = restriction_to_zeroed_index(self.restriction, m, p)
         self._zeroed_index = zeroed_index
 
@@ -113,43 +102,23 @@ class NeuraLVAR:
         B = a.reshape(N, 3, p, N, 3)
         return (np.sqrt(np.sum(B * B, axis=(1, 4), keepdims=True)).sum())
     
-    def compute_bias(self, em_state):
-        m = em_state.N_sources_upper
-        A = em_state.A[:m]
-        Q = em_state.Q[:m, :m]
-        x = em_state.smoothed_state[:, :m]
-        A_mask = em_state.A_mask[:m]
-        bias = sample_path_bias(Q, A, x, A_mask, 
-                                self._n_eigenmodes, self._n_orients)
-        return bias
-
-
-    def compute_bias_idx(self, source, em_state, smoother_result):
-        p = self.config.latent.order
-        m = em_state.N_sources_upper
-        A = em_state.A[:m]
-        Q = em_state.Q[:m, :m]
-        x = em_state.smoothed_state[:, :m]
-        P = em_state.smoothed_cov[:m, :m]
-        B = smoother_result.smoother_gain[:m, :m]
-        A_mask = em_state.A_mask[:m]
-
-        if isinstance(source, int):
-            source = tuple(source)
-            
-        bias = sum([bias_by_idx(i, Q, A, x, P, B, m, p, A_mask) \
-                    for i in source])
-        return bias
-
 
     def fit(self, y, F, R, lambda_, em_state, restriction=None):
         if (restriction is None or re.search('->', restriction)) is False:
             raise ValueError(f"restriction:{restriction} should be None or should have format 'i->j'!")
         self.restriction = restriction
         em_state, smoother_result = self._fit(y, F, R, lambda_, em_state)
-        self._parameters = (em_state.A, F, em_state.Q, 
-                            R, smoother_result.smoothed_state)
+        
+        m = em_state.N_sources_upper
+        self._parameters = (
+            self._unravel_a(em_state.A[:m]), 
+            F[:, :m], 
+            em_state.Q[:em_state.N_sources_upper, :em_state.N_sources_upper], 
+            R, 
+            smoother_result.smoothed_state
+        )
         self.ll = -smoother_result.negative_log_likelihood
+        self.lambda_ = lambda_
 
         return em_state, smoother_result
 
@@ -175,33 +144,7 @@ class NeuraLVAR:
         m, mp = a.shape
         p = mp // m
         return np.swapaxes(np.reshape(a, (m, p, m)), 0, 1)
-
-
-    @staticmethod
-    def companion_form(a, f, q, r):
-        n, m = f.shape
-        assert len(a.shape) == 3 # unraveled a
-        p = len(a)
-
-
-        assert q.shape[0] == m
-        q_upper = q
-        a_companion = np.block([[np.zeros((m, m * p))],
-                            [np.eye(m * (p - 1)), np.zeros((m * (p - 1), m))]])
-        
-        a_upper = NeuraLVAR._ravel_a(a)
-        a_companion[:m] = a_upper
-
-        q_companion = np.zeros((m * p, m * p))
-        non_zero_indices = np.diag_indices_from(q_upper)
-        q_companion[non_zero_indices] = q_upper[non_zero_indices]
-
-        f_companion = np.hstack((f, np.zeros((n, m * (p - 1)))))
-        
-        r_companion = r # pass through
-
-        return a_companion, f_companion, q_companion, r_companion
-
+    
 
 class NeuraLVARCV(NeuraLVAR):
     """Neural Latent Vector Auto-Regressive model (supports cross-validation)
@@ -369,15 +312,18 @@ class NeuraLVARCV(NeuraLVAR):
 
         em_state, smoother_result = self._fit(y, F, R, best_lambda, em_state)
         m = em_state.N_sources_upper
-        A = self._unravel_a(em_state.A[:m])
-        Q = em_state.Q[:m, :m]
-        x = em_state.smoothed_sources
-        self._parameters = (A, F, Q, R, x)
+        self._parameters = (
+            self._unravel_a(em_state.A[:m]), 
+            F[:, :m], 
+            em_state.Q[:em_state.N_sources_upper, :em_state.N_sources_upper], 
+            R, 
+            smoother_result.smoothed_state
+        )
         self.ll = -smoother_result.negative_log_likelihood
         self.lambda_ = best_lambda
 
         _, t = y.shape
-        df = (abs(A) > 1e-15).sum()
+        df = (abs(em_state.A[:m]) > 1e-15).sum()
         self.aic = (2*df - 2*self.ll) / t
         self.bic = (np.log(t)*df - 2*self.ll) / t
 

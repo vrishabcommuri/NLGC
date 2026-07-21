@@ -2,7 +2,17 @@ from mne.minimum_norm import apply_inverse, make_inverse_operator
 from nlgc.utils.transforms import surface_ico4_to_surface_eigs
 import numpy as np
 
+
+def _triage_warm_start(evoked, forward, noise_cov, weights):
+    assert evoked is not None
+    assert forward is not None
+    assert noise_cov is not None
+    assert weights is not None
+
+
 def warm_start_sources(evoked, forward, noise_cov, weights, config):
+    _triage_warm_start(evoked, forward, noise_cov, weights)
+
     inv = make_inverse_operator(evoked.info, forward, noise_cov, 
                                 loose=config.forward.loose, 
                                 depth=config.forward.depth, 
