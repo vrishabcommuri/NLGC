@@ -127,8 +127,6 @@ def test_zeroindex_vector_var3():
         plt.show()
 
 
-
-
 def test_zeroindex_multiple_links():
     n_sources = 4
     n_orients = 3
@@ -335,8 +333,6 @@ def test_batched_matches_sequential():
             rtol=5e-2,
         )
 
-        
-
 
 def test_full_ll_exceeds_reduced():
     n_sources = 5
@@ -366,8 +362,8 @@ def test_full_ll_exceeds_reduced():
     reduced_state, _ = solve_params(ssm.y, ssm.F, ssm.R, full_state, config, 
                                     lambda_, zeroed_index=zeroed_index)
 
-    ll_full = float(full_state.log_likelihood)
-    ll_reduced = float(reduced_state.log_likelihood)
+    ll_full = float(full_state.log_likelihood[-1])
+    ll_reduced = float(reduced_state.log_likelihood[-1])
 
     assert ll_full >= ll_reduced - 1e-4
 
@@ -499,7 +495,6 @@ def test_pmap_benchmark():
     print(f"Speedup        : {t_seq / t_batch:.2f}x")
 
 
-
 def test_pmap_gc_extraction():
     n_sources=50 
     n_sensors=100
@@ -511,12 +506,12 @@ def test_pmap_gc_extraction():
     print(f"jax device count: {jax.device_count()}")
 
     ssm, em_state, config, _ = make_gc_test_setup(n_sources=n_sources,
-                                                        n_sensors=n_sensors,
-                                                        n_orients=n_orients,
-                                                        order=order,
-                                                        T=T,
-                                                        lambda_=lambda_,
-                                                        sparsity=sparsity)
+                                                  n_sensors=n_sensors,
+                                                  n_orients=n_orients,
+                                                  order=order,
+                                                  T=T,
+                                                  lambda_=lambda_,
+                                                  sparsity=sparsity)
     
     plot_transition_blurred(ssm.A, em_state.N_sources_upper, 2)
     plt.show()
@@ -524,7 +519,6 @@ def test_pmap_gc_extraction():
     ROIs = list(range(n_sources))
     dev_raw, bias_r, bias_f, model_f, nonconv_flag = \
         gc_extraction(ssm.y, ssm.F, ssm.R, ROIs, em_state, config)
-    
     
     avg_debiased_dev = debias_deviances(dev_raw, bias_f, bias_r)
 
@@ -544,7 +538,8 @@ def test_pmap_gc_extraction():
         plt.show()
 
         plot_transition_comparison(ssm.A[:m], 
-                                   (np.abs(model_f._ravel_a(model_f._parameters[0])) > 1e-4).astype(int), 
+                                  (np.abs(model_f._ravel_a\
+                                  (model_f._parameters[0])) > 1e-4).astype(int), 
                 titles=("Ground Truth A", 
                         "Nonzero A"), 
                         bind_colorbars=False)
@@ -556,8 +551,6 @@ def test_pmap_gc_extraction():
                         bind_colorbars=False)
         plt.show()
     
-
-
 
 if __name__ == '__main__':
     show_plots = True

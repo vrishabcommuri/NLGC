@@ -80,7 +80,7 @@ def solve_ss_covariance_newton_raphson(A, F, Q, R, P0, N0, maxiter=20, tol=1e-5,
             b,
             x0=N_k.ravel(),      # warm start from previous EM iteration
             tol=1e-8,
-            maxiter=10,
+            maxiter=50,
         )
 
         N_k = x.reshape(N, N)

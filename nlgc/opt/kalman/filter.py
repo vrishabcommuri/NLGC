@@ -319,7 +319,7 @@ def rts_smoother_jax(y, F, R, em_state):
         b,
         x0=P_filt.ravel(),      
         tol=1e-8,
-        maxiter=20,
+        maxiter=50,
     )
 
     P_smoothed = x.reshape(N_sources, N_sources)

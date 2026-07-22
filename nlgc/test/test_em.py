@@ -1,7 +1,7 @@
 from nlgc.opt.em import (EMState, em_blas, em_jax, 
                          _copycast_em_state_jax, solve_params)
 from nlgc.test.ssm_gen import gen_small_ssm, gen_sparse_var_ssm
-from nlgc.test.viz import plot_transition_comparison
+from nlgc.test.viz import plot_transition_comparison, plot_transition_single
 from nlgc.opt.proximal import instantiate_proximal_solvers
 import numpy as np
 from nlgc.config import ModelConfig
@@ -18,7 +18,8 @@ def make_initial_em_state(ssm, order=1, n_orients=1):
         Q = np.eye(ssm.Q.shape[0]) * 0.001, # initial guess
         P0 = np.zeros_like(ssm.Q),
         N0 = np.zeros_like(ssm.Q),
-        N_sources_upper = ssm.Q.shape[0]
+        N_sources_upper = ssm.Q.shape[0],
+        log_likelihood=np.zeros(500 + 1)
     )
     m = ssm.N_sources 
 
@@ -180,7 +181,7 @@ def test_em_likelihood_increases():
                               lambda_=0.0, 
                               N_iter=config.optimizer.n_warmup_iter)
 
-        likelihoods.append(em_state.log_likelihood)
+        likelihoods.append(em_state.log_likelihood[-1])
 
     likelihoods = np.asarray(likelihoods)
     assert np.all(
@@ -385,6 +386,7 @@ def test_em_var_vector(
             "order": order,
             "n_orients": n_orients,
             "verbose": True,
+            "n_warmup_iter":500,
         }
     )
     start = time.perf_counter()
@@ -456,7 +458,7 @@ def test_em_var_vector(
 
         plt.show()
     
-    return em_time
+    return em_time, final_em_state
 
 def test_em_var_vector_medium():
     """
@@ -476,7 +478,7 @@ def test_em_var_vector_large():
     test EM recovery for a sparse VAR(2) model with 3 orientations and large
     state dimension
     """
-    runtime = test_em_var_vector(n_sources=15, 
+    runtime, _ = test_em_var_vector(n_sources=15, 
                        n_sensors=30, 
                        n_orients=3, 
                        order=2, 
@@ -492,7 +494,7 @@ def test_em_var_vector_huge():
     state dimension
     """
     
-    runtime = test_em_var_vector(n_sources=50, 
+    runtime, _ = test_em_var_vector(n_sources=50, 
                        n_sensors=100, 
                        n_orients=3, 
                        order=2, 
@@ -502,55 +504,75 @@ def test_em_var_vector_huge():
                        plot_transition=True)
     
     print(f"runtime: {runtime:.3f}s")
+
+
+def test_em_var_vector_large_ll_trajectory():
+    """
+    test EM recovery for a sparse VAR(2) model with 3 orientations and large
+    state dimension
+    """
+    runtime, em_state = test_em_var_vector(n_sources=15, 
+                       n_sensors=30, 
+                       n_orients=3, 
+                       order=2, 
+                       T=5000,
+                       lambda_=0.05,
+                       sparsity=0.075)
+    print(f"runtime: {runtime:.3f}s")
+
+    plt.plot(em_state.log_likelihood)
+    plt.show()
+
+
     
 
 if __name__ == '__main__':
-    instantiate_proximal_solvers({
-        'n_orients': 1,
-        'order': 1,
-        'alpha': 0.0,
-        'beta': 0.0,
-    }, N_sources=4)
+    # instantiate_proximal_solvers({
+    #     'n_orients': 1,
+    #     'order': 1,
+    #     'alpha': 0.0,
+    #     'beta': 0.0,
+    # }, N_sources=4)
 
-    print("running test EM recovers small ssm A parameter")
-    test_em_recovers_A()
-    print("pass\n\n")
+    # print("running test EM recovers small ssm A parameter")
+    # test_em_recovers_A()
+    # print("pass\n\n")
 
-    print("running test EM recovers small ssm Q parameter")
-    test_em_recovers_Q()
-    print("pass\n\n")
+    # print("running test EM recovers small ssm Q parameter")
+    # test_em_recovers_Q()
+    # print("pass\n\n")
 
-    print("running test jax vs blas EM equality")
-    test_em_jax_matches_blas()
-    print("pass\n\n")
+    # print("running test jax vs blas EM equality")
+    # test_em_jax_matches_blas()
+    # print("pass\n\n")
 
-    print("running test EM likelihood increasing monotonicity")
-    test_em_likelihood_increases()
-    print("pass\n\n")
+    # print("running test EM likelihood increasing monotonicity")
+    # test_em_likelihood_increases()
+    # print("pass\n\n")
 
-    print("running test EM lambda increases sparsity")
-    test_em_lambda_controls_sparsity()
-    print("pass\n\n")
+    # print("running test EM lambda increases sparsity")
+    # test_em_lambda_controls_sparsity()
+    # print("pass\n\n")
 
-    print("running test EM scalar GC mask")
-    test_em_A_mask_enforced()
-    print("pass\n\n")
+    # print("running test EM scalar GC mask")
+    # test_em_A_mask_enforced()
+    # print("pass\n\n")
 
-    print("running test EM stability")
-    test_em_stable()
-    print("pass\n\n")
+    # print("running test EM stability")
+    # test_em_stable()
+    # print("pass\n\n")
 
-    print("running test EM scalar VAR(3)")
-    test_em_var3_scalar()
-    print("pass\n\n")
+    # print("running test EM scalar VAR(3)")
+    # test_em_var3_scalar()
+    # print("pass\n\n")
 
-    print("running test EM vector VAR(3)")
-    test_em_var_vector()
-    print("pass\n\n")
+    # print("running test EM vector VAR(3)")
+    # test_em_var_vector()
+    # print("pass\n\n")
 
-    print("running test EM vector VAR(3) medium") 
-    test_em_var_vector_medium()
-    print("pass\n\n")
+    # print("running test EM vector VAR(3) medium") 
+    # test_em_var_vector_medium()
+    # print("pass\n\n")
 
     print("running test EM vector VAR(2) large") 
     test_em_var_vector_large()
@@ -558,4 +580,8 @@ if __name__ == '__main__':
 
     print("running test EM vector VAR(2) huge") 
     test_em_var_vector_huge()
+    print("pass\n\n")
+
+    print("running test EM vector VAR(2) likelihood trajectory") 
+    test_em_var_vector_large_ll_trajectory()
     print("pass\n\n")

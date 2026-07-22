@@ -185,5 +185,4 @@ def transition_mask_to_parameter_indices(A_mask, target_idx, dxm, dtot):
         # dxm and dtot must be integers for range() to work
         removed.extend(range(int(src), int(dtot), int(dxm)))
 
-    # FIX: Force dtype=int so empty arrays don't default to float64
     return np.asarray(removed, dtype=int)

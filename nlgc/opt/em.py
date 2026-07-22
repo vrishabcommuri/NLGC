@@ -114,11 +114,11 @@ def em_blas(y, F, R, em_state, config, lambda_, N_iter):
     acceleration and jit
     """
 
-    for blas_iter in range(N_iter):
+    for _ in range(N_iter):
         smoother_result = rts_smoother_blas(y, F, R, em_state, 
                                             config.numerical.use_lapack)
-        
-        prev_ll = em_state.log_likelihood[blas_iter]
+        curr_iter = em_state.em_iter
+        prev_ll = em_state.log_likelihood[curr_iter]
 
         em_state = proximal_param_update(em_state, smoother_result, lambda_)
 
@@ -127,14 +127,14 @@ def em_blas(y, F, R, em_state, config, lambda_, N_iter):
         em_state.A = zero_entries(em_state.A, em_state.A_mask)
 
         curr_ll = -smoother_result.negative_log_likelihood
-        em_state.log_likelihood[blas_iter+1] = curr_ll
 
         # em_state.Q = project_psd(em_state.Q)
+        em_state.log_likelihood[curr_iter+1] = curr_ll
 
         if np.abs(prev_ll) > 1e-12:
             rel_change = np.abs(curr_ll - prev_ll) / np.abs(prev_ll)
         else:
-            rel_change = np.inf,
+            rel_change = np.inf
         
         if np.abs(rel_change) > config.optimizer.tol:
             em_state.em_iter += 1
@@ -168,24 +168,30 @@ def em_jax(y, F, R, em_state, config, lambda_, N_iter):
 
             curr_ll = -smoother_result.negative_log_likelihood
 
+            safe_prev_ll = jnp.where(jnp.abs(prev_ll) > 1e-12, prev_ll, 1.0)
+
             rel_change = jnp.where(
                 jnp.abs(prev_ll) > 1e-12,
-                jnp.abs(curr_ll - prev_ll) / jnp.abs(prev_ll),
+                jnp.abs(curr_ll - prev_ll) / jnp.abs(safe_prev_ll),
                 jnp.inf,
             )
 
-            converged_new = rel_change <= config.optimizer.tol
+            converged_new = jnp.logical_or(
+                rel_change <= config.optimizer.tol,
+                jnp.isnan(curr_ll)
+            )
 
             curr_iter = jnp.where(converged_new, prev_iter, prev_iter + 1)
 
-            updated_ll_trajectory = em_state.log_likelihood
-            updated_ll_trajectory[curr_iter] = curr_ll
+            safe_iter = jnp.minimum(curr_iter, len(em_state.log_likelihood) - 1)
+            updated_ll_trajectory = em_state.log_likelihood.at[safe_iter]\
+                                        .set(curr_ll)
 
             em_new = dataclasses.replace(
                 em_new,
-                A = zero_entries(em_new.A, em_new.A_mask),
-                em_iter = curr_iter,
-                log_likelihood = updated_ll_trajectory,
+                A=zero_entries(em_new.A, em_new.A_mask),
+                em_iter=curr_iter,
+                log_likelihood=updated_ll_trajectory,
             )
 
             return converged_new, em_new, smoother_result
