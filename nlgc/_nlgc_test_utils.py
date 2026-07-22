@@ -352,8 +352,21 @@ def lead_field_generation(root, subject_id, src_space, n_eigenmodes, n_orients, 
             use_cps=True
         )
     elif src_space == 'vol' or src_space == 'mixed':
-        src_origin = mne.setup_volume_source_space(subject = subject_id, pos = 15.0, subjects_dir = subjects_dir, surface = bem_folder + 'inner_skull.surf')
-        src_target = mne.setup_volume_source_space(subject = subject_id, pos = 30.0, subjects_dir = subjects_dir, surface = bem_folder + 'inner_skull.surf')
+        # inner_skull.surf is watershed output and is not always present; the BEM
+        # surfaces carry the same boundary, so fall back to those when it is missing.
+        inner_skull_surf = bem_folder + 'inner_skull.surf'
+        if os.path.exists(inner_skull_surf):
+            vol_bounds = dict(surface=inner_skull_surf)
+        else:
+            bem_file = bem_folder + subject_id + "-inner_skull-bem.fif"
+            if not os.path.exists(bem_file):
+                raise FileNotFoundError(
+                    f'Need either {inner_skull_surf} or {bem_file} to bound the '
+                    f'volume source space')
+            print(f'inner_skull.surf not found, bounding volume with {bem_file}')
+            vol_bounds = dict(bem=bem_file)
+        src_origin = mne.setup_volume_source_space(subject = subject_id, pos = 15.0, subjects_dir = subjects_dir, **vol_bounds)
+        src_target = mne.setup_volume_source_space(subject = subject_id, pos = 30.0, subjects_dir = subjects_dir, **vol_bounds)
         if src_space == 'mixed':
             surf_src = mne.setup_source_space(subject = subject_id, spacing = 'ico4', surface = 'white', subjects_dir = subjects_dir, add_dist = 'patch', verbose = None)
             src_origin = surf_src + src_origin
