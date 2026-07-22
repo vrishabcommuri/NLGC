@@ -61,7 +61,11 @@ def slice_batched_output(output, idx):
 
 
 def batched_test_links(links_to_check, y, F, R, lambda_, full_em_state, config):
-    N_devices = config.parallel.n_devices
+    # gc_extraction routes everything except ModelMultiprocessConfig here, but only
+    # ModelShardConfig carries n_devices -- so serial and vmap modes would raise
+    # AttributeError. Default to 1, which makes the batch loop below run one link at
+    # a time, i.e. the serial behaviour those configs ask for.
+    N_devices = getattr(config.parallel, 'n_devices', 1)
     K = len(links_to_check)
     eff_eigenmodes = config.latent.n_eigenmodes * config.latent.n_orients
     m = full_em_state.N_sources_upper

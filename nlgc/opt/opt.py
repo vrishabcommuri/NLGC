@@ -200,7 +200,7 @@ class NeuraLVARCV(NeuraLVAR):
             logger.error(f"Could not link to memory: {exc}")
             raise exc
 
-        lambda_range = config.validation.lambda_range
+        lambda_range = config.sparsity.lambda_range
         train, test = splits[split]
         y_train, y_test = y[:, train], y[:, test]
 
@@ -258,7 +258,7 @@ class NeuraLVARCV(NeuraLVAR):
 
         kf = TimeSeriesSplit(n_splits=self.cv)
         cvsplits = [split for split in kf.split(y.T)]
-        lambda_range = self.config.validation.lambda_range
+        lambda_range = self.config.sparsity.lambda_range
 
         cv_mat = np.zeros((2, len(cvsplits), len(lambda_range)), dtype=y.dtype)
         pred_mat = np.zeros((len(cvsplits), len(lambda_range)) + y.shape, 

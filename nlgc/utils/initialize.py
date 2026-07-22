@@ -7,7 +7,12 @@ import numpy as np
 def initialize_em_state(y, F, r, config, evoked=None, forward=None, noise_cov=None, 
                         weights=None):
     F_companion, R_companion, em_state = companion_init(y, F, r, config)
-    em_state.log_likelihood = np.zeros(config.optimizer.max_iter + 1)
+    # em_iter accumulates across BOTH phases -- solve_params runs em_blas for
+    # n_warmup_iter and then em_jax for max_iter -- so the trajectory needs room for
+    # their sum. Sizing it max_iter+1 overflows em_blas's unguarded
+    # log_likelihood[curr_iter+1] write (em_jax clamps, em_blas does not).
+    em_state.log_likelihood = np.zeros(config.optimizer.n_warmup_iter +
+                                       config.optimizer.max_iter + 1)
 
     if config.optimizer.warm_start:
         em_state.smoothed_state = warm_start_sources(evoked, forward, noise_cov, 
@@ -24,20 +29,20 @@ def initialize_em_state(y, F, r, config, evoked=None, forward=None, noise_cov=No
 
 
 def companion_init(y, F, r, config):
-    total_sensor_dim, total_latent_dim = F.shape[1]
-    zero_companion = np.zeros((total_latent_dim * config.order, 
-                               total_latent_dim * config.order))
-    
+    total_sensor_dim, total_latent_dim = F.shape
+    zero_companion = np.zeros((total_latent_dim * config.latent.order,
+                               total_latent_dim * config.latent.order))
+
     m = total_latent_dim
-    p = config.order
+    p = config.latent.order
 
     A = np.block([[np.zeros_like(zero_companion[:m])],
                   [np.eye(N = m*(p-1), M = m*p)]])
-    
+
     Q = np.zeros_like(zero_companion)
     Q[:m,:m] = data_driven_Q_init(y, F)
 
-    F = np.hstack([F, np.zeros(total_sensor_dim, m*(p-1))])
+    F = np.hstack([F, np.zeros((total_sensor_dim, m*(p-1)))])
     R = r * np.eye(total_sensor_dim)
 
     em_state = EMState(

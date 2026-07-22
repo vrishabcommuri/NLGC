@@ -5,6 +5,21 @@ from typing import Union, TypeAlias
 _default_lambda_range = (5e-1, 2e-1, 1e-1, 5e-2, 2e-2, 1e-2, 5e-3, 2e-3, 1e-3, 5e-4)
 
 
+def _as_lambda_tuple(value):
+    """Normalize a legacy lambda_range to a hashable tuple.
+
+    ModelConfig is passed to jax as a static argument, so every field has to be
+    hashable -- a list (which legacy callers pass) raises at trace time with
+    "Non-hashable static arguments are not supported". None falls through to the
+    module default rather than tripping the explicit raise in gc_extraction.
+    """
+    if value is None:
+        return _default_lambda_range
+    if isinstance(value, (int, float)):
+        return (float(value),)
+    return tuple(value)
+
+
 @dataclass(frozen=True)
 class ModelSerialConfig:
     """
@@ -143,7 +158,8 @@ class ModelConfig:
                 beta = kwargs.pop("beta", 0.0),
                 var_thr = kwargs.pop("var_thr", 1.0),
                 sparsity_factor = kwargs.pop("sparsity_factor", 0.0),
-                lambda_range = kwargs.pop("lambda_range", None),
+                lambda_range = _as_lambda_tuple(
+                                kwargs.pop("lambda_range", None)),
                 negligible_candidate_link_energy_thr = \
                     kwargs.pop("negligible_candidate_link_energy_thr", 0.99),
             ),
