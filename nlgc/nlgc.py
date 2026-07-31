@@ -6,10 +6,11 @@ from nlgc.utils.leadfield import prepare_eigenmodes
 from nlgc.nlgc_utils import gc_extraction, NLGC
 from nlgc.config import ModelConfig
 from nlgc.utils.initialize import initialize_em_state
-
+import time
+from utils.param_vis import generate_report
 
 def nlgc_map(name, evoked, forward, noise_cov, labels, patch_idx, 
-             config=None, **kwargs):
+             config=None, save_dir = None **kwargs):
     """NLGC connectivity map estimation
 
     This function estimates the causal connectivity map across sources given the
@@ -86,6 +87,9 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, patch_idx,
         contains the connectivity map and the some related parameters (see NLGC
         class for more info)
     """
+
+
+    start_time = time.time()
 
     if config is None:
         config = ModelConfig.from_legacy_kwargs(kwargs)
@@ -178,5 +182,22 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, patch_idx,
                     d_raw, bias_f, bias_r, models,
                     conv_flag, label_names, label_vertidx, 
                     forward, whitener, weights)
+    
+    stop_time = time.time()
+
+    total_time = stop_time - start_time
+
+    nlgc_param_dict = {
+        name: name,
+        'n_eigenmodes': config.latent.n_eigenmodes,
+        'n_orients': config.latent.n_orients,
+        'order': config.latent.order,
+        'lambda_range': config.sparsity.lambda_range,
+        'best_lambda': nlgc_obj._model_f[0].lambda_,
+        'use_es': config.validation.use_es,
+        'nlgc_map_time': total_time
+    }
+    if save_dir != None:
+        generate_report(save_dir = save_dir, model = nlgc_obj, param_dict = nlgc_param_dict)
 
     return nlgc_obj
