@@ -9,7 +9,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 import scipy
 from ..nlgc_test_utils import zplane
 
-
+# Generate pole zero plot for model params
 def find_poles_and_zeros(model, order):
     A = model._model_f[0]._parameters[0]
     mask = np.abs(A).mean(axis=0)

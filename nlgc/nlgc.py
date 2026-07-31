@@ -7,10 +7,10 @@ from nlgc.nlgc_utils import gc_extraction, NLGC
 from nlgc.config import ModelConfig
 from nlgc.utils.initialize import initialize_em_state
 import time
-from utils.param_vis import generate_report
+from nlgc.utils.param_vis import generate_report
 
 def nlgc_map(name, evoked, forward, noise_cov, labels, patch_idx, 
-             config=None, save_dir = None **kwargs):
+             config=None, save_dir = None, **kwargs):
     """NLGC connectivity map estimation
 
     This function estimates the causal connectivity map across sources given the
