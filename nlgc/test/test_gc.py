@@ -13,8 +13,7 @@ os.environ["OMP_NUM_THREADS"] = "1"
 import numpy as np
 import jax
 import time
-from nlgc.opt.em import (solve_params, em_jax, _copycast_em_state_numpy,
-                         final_log_likelihood)
+from nlgc.opt.em import (solve_params, em_jax, _copycast_em_state_numpy)
 from nlgc.opt.proximal import instantiate_proximal_solvers
 from nlgc.parallel_gc import (link_tuples_to_zero_indices, 
                               batch_em_state, slice_batched_output)
@@ -78,7 +77,7 @@ def make_gc_test_setup(
             "verbose": True,
             "n_devices": jax.device_count(),
             "n_workers": jax.device_count(),
-            "negligible_candidate_link_energy_thr":0.99,
+            "negligible_candidate_link_energy_thr":0.2,
             "tol":1e-5,
             "A_tol":5e3,
         }
@@ -351,7 +350,7 @@ def test_batched_matches_sequential():
         # optimum after a different number of iterations, which is exactly what
         # the A/Q assertions above already establish.
         ll_batched = float(batched_out.log_likelihood[k][batched_out.em_iter[k]])
-        ll_sequential = float(final_log_likelihood(sequential[k]))
+        ll_sequential = float(sequential[k].log_likelihood[sequential[k].em_iter])
 
         assert np.allclose(ll_batched, ll_sequential, atol=5e-2, rtol=5e-2), \
             f"link {links_to_check[k]}: batched converged to {ll_batched}, " \

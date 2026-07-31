@@ -53,32 +53,29 @@ def restriction_to_zeroed_index(restriction, m, p):
 # EM-related operations (zeroed index -> A masks)
 # jax accelerated and python versions
 #-------------------------------------------------------------------------------
-
-def link_tuples_to_zero_indices(links_to_check, em_state, config):
-    """Expand (target, source) ROI pairs into A-matrix zeroed indices.
+    
+def link_tuples_to_zero_indices(links_to_check, m, p, n_eigenmodes, n_orients):
+    """
+    Expand (target, source) ROI pairs into A-matrix zeroed indices.
 
     Tuple order is (target, source) throughout: roi_to_link_restriction emits
     pairs that way after testing sparsity[target, source], and batched_test_links
     stores results as dev_raw[target, source]. Each entry zeroes the block
     A[target_rows, source_cols] across all lags, i.e. removes source -> target.
     """
-    m = em_state.N_sources_upper
-    p = config.latent.order
-    n_eigenmodes = config.latent.n_eigenmodes
-    n_orients = config.latent.n_orients
     eff_eigenmodes = n_eigenmodes * n_orients
-
+    
     zeroed_indices = []
 
     for targ, src in links_to_check:
         target = _expand_roi_indices_as_tup(targ, eff_eigenmodes)
         source = _expand_roi_indices_as_tup(src, eff_eigenmodes)
+
         link = '->'.join(map(lambda x: ','.join(map(str, x)), (source, target)))
 
         zeroed_indices.append(restriction_to_zeroed_index(link, m, p))
 
     return zeroed_indices
-
 
 def _expand_roi_indices_as_tup(reg_idx, emod, n_orients = 1):
     eff_emod = emod* n_orients
