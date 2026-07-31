@@ -91,6 +91,8 @@ class NeuraLVAR:
             zeroed_index = [zeroed_index]
 
         self._zeroed_index = zeroed_index
+        if zeroed_index is not None:
+            zeroed_index = [zeroed_index]
 
         em_state, smoother_result = solve_params(
                 y, F, R,
@@ -117,7 +119,9 @@ class NeuraLVAR:
     
 
     def fit(self, y, F, R, lambda_, em_state, restriction=None):
-        if (restriction is None or re.search('->', restriction)) is False:
+        # precedence: `(x or Match) is False` is always False, so the original
+        # form could never fire and malformed restrictions passed straight through
+        if restriction is not None and re.search('->', restriction) is None:
             raise ValueError(f"restriction:{restriction} should be None or should have format 'i->j'!")
         self.restriction = restriction
         em_state, smoother_result = self._fit(y, F, R, lambda_, em_state)
@@ -174,9 +178,10 @@ class NeuraLVARCV(NeuraLVAR):
                  config=None):
         self.cv = cv
         self.n_jobs = n_jobs
-        self.config = config
-        NeuraLVAR.__init__(self, order, self_history, n_eigenmodes, n_orients, 
-                           copy, standardize, normalize, use_lapack)
+        # config must be forwarded: NeuraLVAR.__init__ ends with
+        # `self.config = config`, so omitting it here wipes the assignment
+        NeuraLVAR.__init__(self, order, self_history, n_eigenmodes, n_orients,
+                           copy, standardize, normalize, use_lapack, config)
 
 
     @classmethod
@@ -213,7 +218,7 @@ class NeuraLVARCV(NeuraLVAR):
             logger.error(f"Could not link to memory: {exc}")
             raise exc
 
-        lambda_range = config.validation.lambda_range
+        lambda_range = config.sparsity.lambda_range
         train, test = splits[split]
         y_train, y_test = y[:, train], y[:, test]
 
@@ -226,19 +231,22 @@ class NeuraLVARCV(NeuraLVAR):
             if config.numerical.verbose:
                 logger.info(f"{current_process().name} {split=} {curr_lambda=}")
 
-            em_state, _ = self._fit(y_train, F, R, em_state)
-            A_cv = em_state.A
+            # deepcopy: each lambda must start from the same initial state,
+            # otherwise it warm-starts from the previous (larger) lambda's fit
+            fit_state, _ = self._fit(y_train, F, R, curr_lambda,
+                                     copy.deepcopy(em_state))
+            A_cv = fit_state.A
 
             # test set prediction
-            filter_result_test = forward_filter_blas(y_test, F, R, 
-                                                     em_state=em_state, 
+            filter_result_test = forward_filter_blas(y_test, F, R,
+                                                     em_state=fit_state,
                                                      use_lapack=True)
-            
+
             # full-data prediction
-            filter_result_full = forward_filter_blas(y, F, R, 
-                                                     em_state=em_state, 
+            filter_result_full = forward_filter_blas(y, F, R,
+                                                     em_state=fit_state,
                                                      use_lapack=True)
-            
+
 
             # TODO this should probably use the disturbance smoother to evaluate
             # model fit
@@ -247,7 +255,7 @@ class NeuraLVARCV(NeuraLVAR):
             cv[1, split, idx] = curr_lambda * self.compute_norm_one(A_cv)
             pred[split, idx][:] = filter_result_full.filtered_state 
 
-        for shm in (shm_y, shm_f, shm_r, shm_c):
+        for shm in (shm_y, shm_f, shm_r, shm_c, shm_pred):
             shm.close()
         return None
     
@@ -265,13 +273,13 @@ class NeuraLVARCV(NeuraLVAR):
             i and j should be integers.
         """
 
-        if (restriction is None or re.search('->', restriction)) is False:
+        if restriction is not None and re.search('->', restriction) is None:
             raise ValueError(f"restriction:{restriction} should be None or should have format 'i->j'!")
         self.restriction = restriction
 
         kf = TimeSeriesSplit(n_splits=self.cv)
         cvsplits = [split for split in kf.split(y.T)]
-        lambda_range = self.config.validation.lambda_range
+        lambda_range = self.config.sparsity.lambda_range
 
         cv_mat = np.zeros((2, len(cvsplits), len(lambda_range)), dtype=y.dtype)
         pred_mat = np.zeros((len(cvsplits), len(lambda_range)) + y.shape, 

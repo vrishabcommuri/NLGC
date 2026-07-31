@@ -1,8 +1,39 @@
 from dataclasses import dataclass, field
+from multiprocessing import cpu_count
 from typing import Union, TypeAlias
+import subprocess
 
 
 _default_lambda_range = (5e-1, 2e-1, 1e-1, 5e-2, 2e-2, 1e-2, 5e-3, 2e-3, 1e-3, 5e-4)
+
+
+def _default_n_workers():
+    """P-core count on Apple silicon, else total cpu count.
+
+    Each worker carries its own JAX runtime, so the E-cores cost more in memory
+    and scheduler pressure than they return. Anywhere the sysctl key is missing
+    (Linux, Intel macs) int() raises and we fall back.
+    """
+    try:
+        return int(subprocess.run(['sysctl', '-n', 'hw.perflevel0.logicalcpu'],
+                                  capture_output=True, text=True).stdout)
+    except (OSError, ValueError):
+        return cpu_count()
+
+
+def _as_lambda_tuple(value):
+    """Normalize a legacy lambda_range to a hashable tuple.
+
+    ModelConfig is passed to jax as a static argument, so every field has to be
+    hashable -- a list (which legacy callers pass) raises at trace time with
+    "Non-hashable static arguments are not supported". None falls through to the
+    module default rather than tripping the explicit raise in gc_extraction.
+    """
+    if value is None:
+        return _default_lambda_range
+    if isinstance(value, (int, float)):
+        return (float(value),)
+    return tuple(value)
 
 
 @dataclass(frozen=True)
@@ -36,6 +67,15 @@ class ModelShardConfig:
 class ModelMultiprocessConfig:
     """
     parallelize models using independent Python worker processes.
+
+    unlike the shard/vmap paths this runs the full two-phase EM (em_blas warmup
+    then em_jax) on each reduced model, at the cost of one JAX runtime and one
+    em_jax compilation per worker.
+
+    n_workers should be the number of PERFORMANCE cores, not the total cpu
+    count: each worker carries its own JAX runtime, and on machines with
+    efficiency cores (most modern macs) the extra workers cost more in memory
+    and scheduler pressure than they return.
     """
     n_workers: int = 1
 
@@ -119,13 +159,14 @@ class ModelConfig:
 
         elif parallel_mode == "shard":
             parallel = ModelShardConfig(
-                n_devices=kwargs.pop("n_devices")
+                n_devices=kwargs.pop("n_devices", 1)
             )
 
         elif parallel_mode == "multiprocess":
-            parallel = ModelMultiprocessConfig(
-                n_workers=kwargs.pop("n_workers")
-            )
+            n_workers = kwargs.pop("n_workers", None)
+            if n_workers is None or n_workers <= 0:
+                n_workers = _default_n_workers()
+            parallel = ModelMultiprocessConfig(n_workers=n_workers)
 
         else:
             raise ValueError(f"Unknown parallel_mode: {parallel_mode}")
@@ -145,7 +186,8 @@ class ModelConfig:
                 beta = kwargs.pop("beta", 0.0),
                 var_thr = kwargs.pop("var_thr", 1.0),
                 sparsity_factor = kwargs.pop("sparsity_factor", 0.0),
-                lambda_range = kwargs.pop("lambda_range", None),
+                lambda_range = _as_lambda_tuple(
+                                kwargs.pop("lambda_range", None)),
                 negligible_candidate_link_energy_thr = \
                     kwargs.pop("negligible_candidate_link_energy_thr", 1.0),
             ),

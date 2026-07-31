@@ -400,53 +400,31 @@ def _extract_label_eigenmodes(fwd, labels, data=None, mode='mean',
         return label_eigenmodes.T, label_vertidx, src_flip
 
 
-def _truncatedsvd_vol(a, n_components=2, n_orients = 3, 
+def _truncatedsvd_vol(a, n_components=2, n_orients = 3,
                       return_pecentage_exaplained=False):
-    if n_components > min(*a.shape):
-        raise ValueError('n_components={:d} should be smaller than '
-                         'min({:d}, {:d})'.format(n_components, *a.shape))
-
     n_total, n_sensors = a.shape
-    u, s, vh = linalg.svd(a, full_matrices=True, compute_uv=True,
-                          overwrite_a=True, check_finite=True,
-                          lapack_driver='gesdd')    
-    
-    sensor_modes = vh[:n_components] * s[:n_components][:, None]
-    
-    u4 = u[:, :n_components]
+    n_voxels = n_total // n_orients
 
-    ras_modes = np.empty(
-        (n_components * n_orients, n_sensors),
-        dtype=u4.dtype
-    )
+    # The spatial weighting comes from an SVD over voxels, so at most n_voxels
+    # components exist -- not min(*a.shape), which the old bound assumed.
+    if n_components > n_voxels:
+        raise ValueError('n_components={:d} should not exceed the number of voxels '
+                         'in the patch ({:d})'.format(n_components, n_voxels))
 
-    G = a.T
+    # (n_voxels, n_orients, n_sensors): each row is one voxel's full response
+    a3 = a.reshape(n_voxels, n_orients, n_sensors)
+    u, s, _ = linalg.svd(a3.reshape(n_voxels, n_orients * n_sensors),
+                         full_matrices=False, compute_uv=True,
+                         check_finite=True, lapack_driver='gesdd')
 
+    modes = np.empty((n_components * n_orients, n_sensors), dtype=a.dtype)
     for m in range(n_components):
         for r in range(n_orients):
-            cols = np.arange(r, n_total, n_orients)
-            # contribution from R/A/S slice
-            mode_r = G[:, cols] @ u4[cols, m]
-            ras_modes[m * 3 + r] = mode_r
+            modes[m * n_orients + r] = u[:, m] @ a3[:, r, :]
 
-    print(f'G shape {G.shape}')
-    print(f'u4 shape {u4.shape}')
-
-    # ras_modes = np.einsum("vrm,vrs->mrs", u4, G)
-
-    # recon_check = ras_modes.sum(axis=1)
-    # if not np.allclose(recon_check, sensor_modes, atol=1e-8, rtol=1e-6):
-    #     print("Warning: RAS-summed modes do not exactly match sensor_modes.")
-    print(f'RAS modes shape {ras_modes.shape}')
-    print(f'U shape {u.shape}')
-    print(f's shape {s.shape}')
-    print(f'vh shape {vh.shape}')
-    print(f'sensor_modes shape {sensor_modes.shape}')
-    # ras_modes = ras_modes.reshape(n_components*3, ras_modes.shape[-1])
-    print(f'ras_modes shape {ras_modes}')
     if return_pecentage_exaplained:
-        return u, ras_modes, s[:n_components].sum() / s.sum()
-    return u, ras_modes
+        return u, modes, s[:n_components].sum() / s.sum()
+    return u, modes
 
 def _truncatedsvd(a, n_components=2, return_pecentage_exaplained=False):
     if n_components > min(*a.shape):

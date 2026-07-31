@@ -13,7 +13,8 @@ os.environ["OMP_NUM_THREADS"] = "1"
 import numpy as np
 import jax
 import time
-from nlgc.opt.em import solve_params, em_jax, _copycast_em_state_numpy
+from nlgc.opt.em import (solve_params, em_jax, _copycast_em_state_numpy,
+                         final_log_likelihood)
 from nlgc.opt.proximal import instantiate_proximal_solvers
 from nlgc.parallel_gc import (link_tuples_to_zero_indices, 
                               batch_em_state, slice_batched_output)
@@ -27,6 +28,8 @@ from nlgc.bias_utils import debias_deviances
 from nlgc.stat import fdr_control
 import matplotlib.pyplot as plt
 jax.config.update("jax_enable_x64", True)
+
+show_plots = False
 
 
 def make_gc_test_setup(
@@ -116,7 +119,8 @@ def test_zeroindex_vector_var3():
                                                 n_orients=n_orients,
                                                 order=order)
 
-    links = [(0, 1)]
+    # (target, source) -- zeroes A[ROI 1 rows, ROI 0 cols], i.e. link 0 -> 1
+    links = [(1, 0)]
 
     zeroed_indices = link_tuples_to_zero_indices(links, em_state, config)
 
@@ -147,7 +151,8 @@ def test_zeroindex_multiple_links():
                                                   n_orients=n_orients,
                                                   order=order)
 
-    links = [(0, 1), (2, 0)]
+    # (target, source): links 0 -> 1 and 2 -> 0
+    links = [(1, 0), (0, 2)]
 
     zeroed = link_tuples_to_zero_indices(links, em_state, config)
 
@@ -236,11 +241,12 @@ def test_reduced_model_enforces_zero_block():
                                                         lambda_=lambda_,
                                                         sparsity=sparsity)
 
-    links = [(0, 4)]
+    # (target, source): link 0 -> 4, so A[ROI 4 rows, ROI 0 cols] must be zero
+    links = [(4, 0)]
 
     zeroed_indices = link_tuples_to_zero_indices(links, em_state, config)
 
-    reduced_state, _ = solve_params(ssm.y, ssm.F, ssm.R, em_state, config, 
+    reduced_state, _ = solve_params(ssm.y, ssm.F, ssm.R, em_state, config,
                                     lambda_, zeroed_index=zeroed_indices)
 
     reduced_A = np.array(reduced_state.A)
@@ -337,12 +343,19 @@ def test_batched_matches_sequential():
             rtol=5e-2,
         )
 
-        assert np.allclose(
-            np.array(batched_out.log_likelihood[k]),
-            np.array(sequential[k].log_likelihood),
-            atol=5e-2,
-            rtol=5e-2,
-        )
+        # Compare the CONVERGED log-likelihood, not the trajectory. The two arms
+        # cannot share a trajectory by construction: `sequential` starts cold
+        # from the initial em_state and runs em_blas warmup + em_jax, while
+        # `batched` starts from the fitted full model and runs em_jax only. They
+        # begin at different likelihoods (~ -9e3 vs ~ +4.6e4) and reach the same
+        # optimum after a different number of iterations, which is exactly what
+        # the A/Q assertions above already establish.
+        ll_batched = float(batched_out.log_likelihood[k][batched_out.em_iter[k]])
+        ll_sequential = float(final_log_likelihood(sequential[k]))
+
+        assert np.allclose(ll_batched, ll_sequential, atol=5e-2, rtol=5e-2), \
+            f"link {links_to_check[k]}: batched converged to {ll_batched}, " \
+            f"sequential to {ll_sequential}"
 
 
 def test_full_ll_exceeds_reduced():

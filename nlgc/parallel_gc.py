@@ -1,9 +1,10 @@
-# from multiprocessing import cpu_count
-# import os
-# os.environ["XLA_FLAGS"] = (
-#     f"--xla_force_host_platform_device_count={cpu_count()}"
-# )
-import numpy as np                                               
+# NOTE: to run GC link testing across multiple host devices, set
+#     XLA_FLAGS=--xla_force_host_platform_device_count=<N>
+# in the environment *before* the first jax import (i.e. at the top of your
+# driver script, before `import nlgc`). Setting it here is too late -- jax is
+# already imported via the nlgc/__init__.py -> nlgc.opt chain.
+import numpy as np
+
 from nlgc.utils.restriction import (jax_expand_zeroindex_masks,  
                                     link_tuples_to_zero_indices)
 from nlgc.opt.em import em_jax, _copycast_em_state_numpy
@@ -14,7 +15,7 @@ import jax.numpy as jnp
 from nlgc.opt import NeuraLVAR, create_shared_mem, link_share_memory
 from nlgc.opt.proximal import instantiate_proximal_solvers
 from joblib import Parallel, delayed
-from multiprocessing import cpu_count, current_process
+from multiprocessing import current_process
 from mne.utils import logger
 from threadpoolctl import threadpool_limits
 jax.config.update("jax_enable_x64", True)
@@ -66,7 +67,11 @@ def slice_batched_output(output, idx):
 
 
 def batched_test_links(links_to_check, y, F, R, lambda_, full_em_state, config):
-    N_devices = config.parallel.n_devices
+    # gc_extraction routes everything except ModelMultiprocessConfig here, but only
+    # ModelShardConfig carries n_devices -- so serial and vmap modes would raise
+    # AttributeError. Default to 1, which makes the batch loop below run one link at
+    # a time, i.e. the serial behaviour those configs ask for.
+    N_devices = getattr(config.parallel, 'n_devices', 1)
     K = len(links_to_check)
     n_eigenmodes = config.latent.n_eigenmodes
     n_orients = config.latent.n_orients

@@ -7,9 +7,14 @@ jax.config.update("jax_enable_x64", True)
 
 solver = None
 solve_for_Q = None
+# what the current `solver`/`solve_for_Q` were built for, so repeated calls with
+# identical settings (e.g. every task in a reused multiprocessing worker) can
+# no-op instead of rebuilding the jitted closures and busting their cache
+_solver_signature = None
 
-def instantiate_proximal_solvers(config, N_sources):
-    global solver, solve_for_Q
+
+def instantiate_proximal_solvers(config, N_sources, force=False):
+    global solver, solve_for_Q, _solver_signature
     if hasattr(config, 'latent'):
         p = config.latent.order
         m = N_sources
@@ -24,7 +29,11 @@ def instantiate_proximal_solvers(config, N_sources):
         n_orients = config['n_orients']
         alpha = config['alpha']
         beta = config['beta']
-    
+
+    signature = (p, m, n_orients, alpha, beta)
+    if not force and solver is not None and _solver_signature == signature:
+        return solver
+
     prox = partial(proxg_vec, p = p, m = m, n_orients = n_orients)
 
     solve_for_Q = jax.jit(
@@ -36,6 +45,7 @@ def instantiate_proximal_solvers(config, N_sources):
     )
 
     solver = ProximalGradient(fun = f, prox = prox, tol=1e-7)
+    _solver_signature = signature
     return solver
 
 

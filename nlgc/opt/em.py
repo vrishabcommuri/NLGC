@@ -29,7 +29,6 @@ class EMState:
     # so jax can use it at compile time
     N_sources_upper: Union[int, None] = field(default=None,
                                               metadata={"static": True})  
-    
 
 def _triage_em_state(em_state):
     assert em_state.A is not None and len(em_state.A.shape) == 2
@@ -68,15 +67,38 @@ def _copycast_em_state_jax(em_state):
 def solve_params(y, F, R, em_state, config, lambda_, zeroed_index=None):
     """
     top-level function to set up filters and optimizers
+
+    One call == one fit: `em_iter` and `log_likelihood` are per-fit quantities and
+    are reset here. `em_blas` indexes log_likelihood[em_iter+1] directly and
+    callers compare `em_iter == max_iter` to detect non-convergence -- both assume
+    a fresh count, so carrying one fit's counter into the next silently breaks
+    them (and overruns the trajectory).
     """
     if zeroed_index is not None:
         assert isinstance(zeroed_index, list)
         assert len(zeroed_index) >= 1
-        assert [isinstance(zeroed_index[i], tuple) 
+        assert [isinstance(zeroed_index[i], tuple)
                 for i in range(len(zeroed_index))]
         A_mask = zeroed_index_to_mask(zeroed_index, em_state)
     else:
         A_mask = np.ones_like(em_state.A)
+
+    # dataclasses.replace, NOT in-place assignment: callers re-fit a state they
+    # still hold a reference to (see test_gc.test_full_ll_exceeds_reduced, which
+    # reads full_state.log_likelihood after re-fitting full_state). Rebinding
+    # log_likelihood on the caller's object would zero the array out from under
+    # them.
+    #
+    # With em_iter guaranteed to start at 0, this allocation cannot overflow:
+    # em_blas adds at most n_warmup_iter and writes at curr_iter+1, then em_jax
+    # adds at most max_iter.
+    em_state = dataclasses.replace(
+        em_state,
+        A_mask=A_mask,
+        em_iter=0,
+        log_likelihood=np.zeros(config.optimizer.n_warmup_iter +
+                                config.optimizer.max_iter + 1),
+    )
     
     em_state.A_mask = A_mask
     em_state.A = zero_entries(em_state.A, em_state.A_mask)
@@ -131,6 +153,8 @@ def em_blas(y, F, R, em_state, config, lambda_, N_iter):
 
         curr_ll = -smoother_result.negative_log_likelihood
 
+        # solve_params sizes the trajectory n_warmup_iter + max_iter + 1 and
+        # resets em_iter to 0, so curr_iter+1 <= n_warmup_iter is always in range
         # em_state.Q = project_psd(em_state.Q)
         em_state.log_likelihood[curr_iter+1] = curr_ll
 
