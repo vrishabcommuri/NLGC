@@ -1,42 +1,8 @@
 from nlgc.test.test_gc import make_gc_test_setup
 from nlgc.opt.em import solve_params, _copycast_em_state_numpy
 from nlgc.opt.kalman.filter import _copycast_rtssmoother_result_numpy
-from nlgc.bias_utils import compute_bias, compute_bias_idx, sample_path_bias
+from nlgc.bias_utils import compute_bias, bias_by_idx, sample_path_bias
 import numpy as np
-
-
-def test_sample_path_bias_equal_to_bias_by_idx():
-    ssm, em_state, config, lambda_ = make_gc_test_setup(
-        n_sources=4,
-        n_sensors=10,
-        n_orients=3,
-        order=2,
-        T=4000,
-        lambda_=0.1,
-        sparsity=0.05,
-    )
-
-    em_state, smoother_result = solve_params(ssm.y, ssm.F, ssm.R, em_state, 
-                                             config, lambda_)
-    
-    # bias_idx doesn't support block structure and treats each source as
-    # independent. we'll just cheat and set Q diagonal
-    em_state.Q = np.diag(np.diag(em_state.Q))
-
-    full_bias = compute_bias(em_state, smoother_result, config)
-
-    summed_bias = 0.0
-
-    for src in range(em_state.N_sources_upper // config.latent.n_orients):
-        summed_bias += compute_bias_idx(src, em_state, smoother_result, config)
-
-    np.testing.assert_allclose(
-        full_bias,
-        summed_bias,
-        rtol=1e-8,
-        atol=1e-8,
-    )
-    print(f"{summed_bias=:.5f} vs {full_bias=:.5f}")
 
 
 def test_sample_path_bias_total_sparsity():
@@ -479,12 +445,213 @@ def test_sample_path_bias_additivity():
     )
 
 
+def test_bias_by_idx_finite():
+    n_sources = 4
+    n_orients = 3
+    order = 2
+    n_sensors = 10
+    T = 1000
+    lambda_ = 0.1
+    sparsity = 0.1
+
+    ssm, em_state, config, lambda_ = make_gc_test_setup(
+        n_sources=n_sources,
+        n_sensors=n_sensors,
+        n_orients=n_orients,
+        order=order,
+        T=T,
+        lambda_=lambda_,
+        sparsity=sparsity,
+    )
+
+    em_state, smoother_result = solve_params(ssm.y, ssm.F, ssm.R, em_state, 
+                                             config, lambda_)
+    
+    em_state = _copycast_em_state_numpy(em_state)
+    smoother_result = _copycast_rtssmoother_result_numpy(smoother_result)
+
+    m = em_state.N_sources_upper
+    p = config.latent.order
+
+    Q = em_state.Q[:m, :m]
+    A = em_state.A[:m]
+    A_mask = em_state.A_mask[:m]
+
+    x = smoother_result.smoothed_state
+    P = smoother_result.smoothed_cov
+    B = smoother_result.smoother_gain
+
+    n_voxels = m // config.latent.n_orients
+
+    for targ in range(n_voxels):
+        for src in range(n_voxels):
+            bias_edge = bias_by_idx(
+                src,
+                targ,
+                Q,
+                A,
+                x,
+                P,
+                B,
+                A_mask,
+                config.latent.n_eigenmodes,
+                config.latent.n_orients,
+                m,
+                p,
+            )
+
+            assert np.isfinite(bias_edge), f"bias for {src}->{targ} is not finite"
+            assert bias_edge >= 0.0, f"bias for {src}->{targ} is negative: {bias_edge}"
+
+            print(f"bias for {src}->{targ} = {bias_edge}")
+
+
+def test_bias_by_idx_masked_edge_is_zero():
+    n_sources = 4
+    n_orients = 3
+    order = 2
+    n_sensors = 10
+    T = 1000
+    lambda_ = 0.1
+    sparsity = 0.1
+
+    ssm, em_state, config, lambda_ = make_gc_test_setup(
+        n_sources=n_sources,
+        n_sensors=n_sensors,
+        n_orients=n_orients,
+        order=order,
+        T=T,
+        lambda_=lambda_,
+        sparsity=sparsity,
+    )
+
+    em_state, smoother_result = solve_params(ssm.y, ssm.F, ssm.R, em_state, 
+                                             config, lambda_)
+    
+    em_state = _copycast_em_state_numpy(em_state)
+    smoother_result = _copycast_rtssmoother_result_numpy(smoother_result)
+
+    m = em_state.N_sources_upper
+    p = config.latent.order
+    n_orients = config.latent.n_orients
+
+    Q = em_state.Q[:m, :m]
+    A = em_state.A[:m]
+    A_mask = em_state.A_mask[:m].copy()
+
+    x = smoother_result.smoothed_state
+    P = smoother_result.smoothed_cov
+    B = smoother_result.smoother_gain
+
+    # Select an arbitrary edge to completely mask out
+    test_src = 1
+    test_targ = 2
+    
+    targ_start = test_targ * n_orients
+    targ_end = (test_targ + 1) * n_orients
+
+    # Zero out all lags for this specific source in the target rows
+    for lag in range(p):
+        src_start = test_src * n_orients + lag * m
+        src_end = (test_src + 1) * n_orients + lag * m
+        A_mask[targ_start:targ_end, src_start:src_end] = 0
+
+    bias_edge = bias_by_idx(
+        test_src,
+        test_targ,
+        Q,
+        A,
+        x,
+        P,
+        B,
+        A_mask,
+        config.latent.n_eigenmodes,
+        config.latent.n_orients,
+        m,
+        p,
+    )
+
+    assert bias_edge == 0.0, f"Masked edge bias should be exactly 0.0, got {bias_edge}"
+
+
+def test_bias_by_idx_single_source_equivalence():
+    n_sources = 1
+    n_orients = 3
+    order = 2
+    n_sensors = 5 # Reduced sensors for 1 source
+    T = 1000
+    lambda_ = 0.1
+    sparsity = 0.1
+
+    ssm, em_state, config, lambda_ = make_gc_test_setup(
+        n_sources=n_sources,
+        n_sensors=n_sensors,
+        n_orients=n_orients,
+        order=order,
+        T=T,
+        lambda_=lambda_,
+        sparsity=sparsity,
+    )
+
+    em_state, smoother_result = solve_params(ssm.y, ssm.F, ssm.R, em_state, 
+                                             config, lambda_)
+    
+    em_state = _copycast_em_state_numpy(em_state)
+    smoother_result = _copycast_rtssmoother_result_numpy(smoother_result)
+
+    m = em_state.N_sources_upper
+    p = config.latent.order
+
+    Q = em_state.Q[:m, :m]
+    A = em_state.A[:m]
+    A_mask = em_state.A_mask[:m]
+
+    x = smoother_result.smoothed_state
+    P = smoother_result.smoothed_cov
+    B = smoother_result.smoother_gain
+
+    # Compute joint full bias
+    bias_total = sample_path_bias(
+        Q,
+        A,
+        x,
+        P,
+        B,
+        A_mask,
+        config.latent.n_eigenmodes,
+        config.latent.n_orients,
+        m,
+        p,
+    )
+
+    # Compute marginal bias of the ONLY edge (0 -> 0)
+    bias_edge = bias_by_idx(
+        0, 
+        0, 
+        Q, 
+        A, 
+        x, 
+        P, 
+        B, 
+        A_mask, 
+        config.latent.n_eigenmodes, 
+        config.latent.n_orients, 
+        m, 
+        p
+    )
+
+    assert np.allclose(
+        bias_total,
+        bias_edge,
+        rtol=1e-6,
+        atol=1e-8,
+    ), (
+        f"For n_sources=1, marginal bias must equal joint bias: "
+        f"total={bias_total}, edge={bias_edge}"
+    )
+
 
 if __name__ == '__main__':
-    print("running test sample path bias vs bias_by_idx equality")
-    test_sample_path_bias_equal_to_bias_by_idx()
-    print("pass\n\n")
-
     print("running test sample path bias total sparsity")
     test_sample_path_bias_total_sparsity()
     print("pass\n\n")
@@ -511,4 +678,16 @@ if __name__ == '__main__':
 
     print("running test sample path bias additivity")
     test_sample_path_bias_additivity()
+    print("pass\n\n")
+
+    print("running test bias by idx finite")
+    test_bias_by_idx_finite()
+    print("pass\n\n")
+
+    print("running test bias by idx masking")
+    test_bias_by_idx_masked_edge_is_zero()
+    print("pass\n\n")
+    
+    print("running test bias by idx vs sample path bias equivalence")
+    test_bias_by_idx_single_source_equivalence()
     print("pass\n\n")

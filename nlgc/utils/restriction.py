@@ -51,20 +51,14 @@ def restriction_to_zeroed_index(restriction, m, p):
 # jax accelerated and python versions
 #-------------------------------------------------------------------------------
 
-def link_tuples_to_zero_indices(links_to_check, em_state, config):
-    m = em_state.N_sources_upper
-    p = config.latent.order
-
+def link_tuples_to_zero_indices(links_to_check, m, p, n_eigenmodes, n_orients):
     zeroed_indices = []
 
-    for i, j in links_to_check:
-        n_eigenmodes = config.latent.n_eigenmodes
-        n_orients = config.latent.n_orients
+    for targ, src in links_to_check:
         eff_eigenmodes = n_eigenmodes * n_orients
         
-
-        target = _expand_roi_indices_as_tup(j, eff_eigenmodes)
-        source = _expand_roi_indices_as_tup(i, eff_eigenmodes)
+        target = _expand_roi_indices_as_tup(targ, eff_eigenmodes)
+        source = _expand_roi_indices_as_tup(src, eff_eigenmodes)
         link = '->'.join(map(lambda x: ','.join(map(str, x)), (source, target)))
 
         zeroed_indices.append(restriction_to_zeroed_index(link, m, p))

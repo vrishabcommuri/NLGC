@@ -1,7 +1,14 @@
 import os
 os.environ["XLA_FLAGS"] = (
+    "--xla_cpu_multi_thread_eigen=false "
+    "intra_op_parallelism_threads=1"
+)
+os.environ["XLA_FLAGS"] = (
 f"--xla_force_host_platform_device_count={4}" # conservative guess
 )
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
 # from multiprocessing import cpu_count
 import numpy as np
 import jax
@@ -29,6 +36,7 @@ def make_gc_test_setup(
     order=3,
     T=2000,
     lambda_=1,
+    parallel_mode='shard',
     **ssm_kwargs,
 ):
     ssm, _, _ = gen_sparse_var_ssm(
@@ -62,11 +70,14 @@ def make_gc_test_setup(
             "order": order,
             "n_orients": n_orients,
             "n_eigenmodes": 1,
-            "parallel_mode": "shard",
+            "parallel_mode": parallel_mode,
             "lambda_range": (lambda_,),
             "verbose": True,
             "n_devices": jax.device_count(),
-            "negligible_candidate_link_energy_thr":0.9999
+            "n_workers": jax.device_count(),
+            "negligible_candidate_link_energy_thr":0.99,
+            "tol":1e-5,
+            "A_tol":5e3,
         }
     )
 
@@ -495,13 +506,13 @@ def test_pmap_benchmark():
     print(f"Speedup        : {t_seq / t_batch:.2f}x")
 
 
-def test_pmap_gc_extraction():
+def test_gc_extraction(parallel_mode="shard"):
     n_sources=50 
     n_sensors=100
     n_orients=3
     order=2
     T=5000
-    lambda_=0.5
+    lambda_=0.2
     sparsity=0.01
     print(f"jax device count: {jax.device_count()}")
 
@@ -511,7 +522,8 @@ def test_pmap_gc_extraction():
                                                   order=order,
                                                   T=T,
                                                   lambda_=lambda_,
-                                                  sparsity=sparsity)
+                                                  sparsity=sparsity,
+                                                  parallel_mode=parallel_mode)
     
     plot_transition_blurred(ssm.A, em_state.N_sources_upper, 2)
     plt.show()
@@ -526,7 +538,7 @@ def test_pmap_gc_extraction():
     eff_eigenmodes = n_orients * n_eigenmodes
     alpha = 0.1
 
-    J =  fdr_control(avg_debiased_dev, order * (eff_eigenmodes**2), alpha)
+    J = fdr_control(avg_debiased_dev, order * (eff_eigenmodes**2), alpha)
 
     if show_plots:
         m = em_state.N_sources_upper
@@ -550,7 +562,6 @@ def test_pmap_gc_extraction():
                         "J"), 
                         bind_colorbars=False)
         plt.show()
-    
 
 if __name__ == '__main__':
     show_plots = True
@@ -593,5 +604,9 @@ if __name__ == '__main__':
     # print("done\n\n")
 
     print("running test pmapped gc_extraction") 
-    test_pmap_gc_extraction()
+    test_gc_extraction()
     print("done\n\n")
+
+    # print("running test multiprocess gc_extraction") 
+    # test_gc_extraction(parallel_mode="multiprocess")
+    # print("done\n\n")

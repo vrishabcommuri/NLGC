@@ -9,9 +9,8 @@ from multiprocessing import cpu_count
 import mne
 from mne.utils import logger
 from nlgc.opt.em import solve_params
-from nlgc.bias_utils import sample_path_bias, bias_by_idx
 from nlgc.opt.kalman.filter import forward_filter_blas
-from nlgc.utils.restriction import restriction_to_zeroed_index
+from nlgc.utils.restriction import link_tuples_to_zero_indices
 import copy
 
 
@@ -70,13 +69,27 @@ class NeuraLVAR:
 
     def _fit(self, y, F, R, lambda_, em_state):
         warnings.filterwarnings('always')
-        m = F.shape[1]
-        if em_state.N_sources_upper is None:
-            em_state.N_sources_upper = m
-
+        
+        m = em_state.N_sources_upper 
         p = self.config.latent.order
+        n_eigenmodes = self.config.latent.n_eigenmodes
+        n_orients = self.config.latent.n_orients
 
-        zeroed_index = restriction_to_zeroed_index(self.restriction, m, p)
+        zeroed_index = None
+        # TODO: rework restriction formatting to take tuple and deprecate using
+        # this string parsing approach
+        if self.restriction is not None:
+            src, targ = re.split(r'->', self.restriction)
+            src = int(src)
+            targ = int(targ)
+
+            zeroed_index = link_tuples_to_zero_indices([(src, targ)], m, p, 
+                                                        n_eigenmodes, n_orients)
+            
+        # convert zi = (i,j) to zi = [(i,j)]
+        if zeroed_index is not None and isinstance(zeroed_index, tuple):
+            zeroed_index = [zeroed_index]
+
         self._zeroed_index = zeroed_index
 
         em_state, smoother_result = solve_params(

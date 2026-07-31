@@ -35,7 +35,7 @@ def instantiate_proximal_solvers(config, N_sources):
         )
     )
 
-    solver = ProximalGradient(fun = f, prox = prox)
+    solver = ProximalGradient(fun = f, prox = prox, tol=1e-7)
     return solver
 
 
@@ -50,7 +50,7 @@ def proxg_vec(x, lam, t, p, m, n_orients = 3):
 
     B = x.reshape(N, n_orients, p, N, n_orients)
 
-    norms = jnp.sqrt(jnp.sum(B * B, axis=(1, 4), keepdims=True))
+    norms = jnp.sqrt(jnp.sum(B * B, axis=(1, 2, 4), keepdims=True))
 
     scale = 1.0 - thresh / jnp.maximum(norms, 1e-12)
     scale = jnp.maximum(scale, 0.0)
@@ -71,7 +71,9 @@ def proximal_param_update(em_state, smoother_result, lambda_):
         jnp.eye(m)
     )
 
-    A_shrunk = solver.run(em_state.A[:m], 
+    A_prev = em_state.A[:m]
+
+    A_shrunk = solver.run(A_prev, 
                           hyperparams_prox=lambda_, s1=s1, 
                           s2=s2, Qinv=Qinv).params
 
@@ -81,9 +83,11 @@ def proximal_param_update(em_state, smoother_result, lambda_):
 
     em_state = dataclasses.replace(em_state,
                                    Q = em_state.Q.at[:m, :m].set(Q_new))
+    
+    rel_A_change = relative_A_change_jax(A_shrunk, A_prev)
 
 
-    return em_state
+    return em_state, rel_A_change
 
 
 def _solve_for_Q(A, s1, s2, s3, alpha, beta, n_orients):
@@ -171,18 +175,21 @@ def calculate_ss(x_bar, s_bar, b, m, p):
     x_ = x_bar[:, :m]
     n = (x_bar.shape[0] - p)
 
-    # compute the following quantities carefully
-    # s1 = x[2:].T.dot(x_bar[:-1]) / (x_bar.shape[0] - p + 1)
     s1 = x_[p:].T.dot(x_bar[p - 1:-1]) / n + s_cross.T
 
-    # s2 = x_bar[:-1].T.dot(x_bar[:-1]) / (x_bar.shape[0] - p + 1)
     s2 = x_bar[p - 1:-1].T.dot(x_bar[p - 1:-1]) / n + s_bar
     if (jnp.diag(s2) <= 0).any():
         raise ValueError('diag(s2) values are not non-negative!')
-    # s3 = x[2:].T.dot(x[2:]) / (x_bar.shape[0] - p + 1)
-    s3 = x_[p:].T.dot(x_[p:]) / n + s_bar[(p - 1) * m:, (p - 1) * m:]
-    # s3 = x_[p:].T.dot(x_[p:]) / n + s_bar[:m, :m]
+
+    s3 = x_[p:].T.dot(x_[p:]) / n + s_bar[:m, :m]
 
     return s1, s2, s3, n
 
 
+def relative_A_change_jax(curr_A, prev_A, eps=1e-12):
+    delta = curr_A - prev_A
+
+    return (
+        jnp.linalg.norm(delta)
+        / jnp.maximum(jnp.linalg.norm(prev_A), eps)
+    )

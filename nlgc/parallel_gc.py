@@ -6,14 +6,19 @@
 import numpy as np                                               
 from nlgc.utils.restriction import (jax_expand_zeroindex_masks,  
                                     link_tuples_to_zero_indices)
-from nlgc.opt.em import em_jax                                   
-from nlgc.bias_utils import compute_bias                         
-import dataclasses                                               
+from nlgc.opt.em import em_jax, _copycast_em_state_numpy
+from nlgc.bias_utils import compute_bias
+import dataclasses
 import jax
-import jax.numpy as jnp 
+import jax.numpy as jnp
+from nlgc.opt import NeuraLVAR, create_shared_mem, link_share_memory
+from nlgc.opt.proximal import instantiate_proximal_solvers
+from joblib import Parallel, delayed
+from multiprocessing import cpu_count, current_process
+from mne.utils import logger
+from threadpoolctl import threadpool_limits
 jax.config.update("jax_enable_x64", True)
                                          
-
 
 def batch_em_state(em_state, zeroed_indices):
     K = len(zeroed_indices)
@@ -63,13 +68,16 @@ def slice_batched_output(output, idx):
 def batched_test_links(links_to_check, y, F, R, lambda_, full_em_state, config):
     N_devices = config.parallel.n_devices
     K = len(links_to_check)
-    eff_eigenmodes = config.latent.n_eigenmodes * config.latent.n_orients
+    n_eigenmodes = config.latent.n_eigenmodes
+    n_orients = config.latent.n_orients
+    eff_eigenmodes = n_eigenmodes * n_orients
     m = full_em_state.N_sources_upper
     nx = m // (eff_eigenmodes)
     fullmodel_log_likelihood = full_em_state.log_likelihood
+    p = config.latent.order
 
-    zeroed_indices = link_tuples_to_zero_indices(links_to_check, full_em_state, 
-                                                 config)
+    zeroed_indices = link_tuples_to_zero_indices(links_to_check, m, p, 
+                                                 n_eigenmodes, n_orients)
 
     batched_em = jax.pmap(
         em_jax, 
@@ -127,15 +135,114 @@ def batched_test_links(links_to_check, y, F, R, lambda_, full_em_state, config):
                                 config)
             
             bias_r[targ, src] = bias
-            dev_raw[targ, src] = 2 * fullmodel_log_likelihood
-            dev_raw[targ, src] -= 2 * reduced_em_state.log_likelihood 
+            dev_raw[targ, src] = 2 * \
+                fullmodel_log_likelihood[full_em_state.em_iter]
+            dev_raw[targ, src] -= 2 * \
+                reduced_em_state.log_likelihood[reduced_em_state.em_iter]
             nonconv_flag[targ, src] = reduced_em_state.em_iter == \
                                     config.optimizer.max_iter
         
     return dev_raw, bias_r, nonconv_flag
 
 
+def multiprocess_test_links(links_to_check, y, F, R, lambda_, em_state, config):
+    em_state = _copycast_em_state_numpy(em_state)
+    eff_eigenmodes = config.latent.n_eigenmodes * config.latent.n_orients
+    m = em_state.N_sources_upper
+    nx = m // (eff_eigenmodes)
+    fullmodel_log_likelihood = em_state.log_likelihood
+
+    dev_raw = np.zeros((nx, nx))
+    bias_r = np.zeros((nx, nx))
+    nonconv_flag = np.zeros((nx, nx), dtype=np.bool_)
+
+    if len(links_to_check) == 0:
+        return dev_raw, bias_r, nonconv_flag
+
+    # Memory management for Parallel implementation
+    _, info_y, shm_y = create_shared_mem(y)
+    _, info_f, shm_f = create_shared_mem(F)
+    shared_bias_r, info_bias_r, shm_bias_r = create_shared_mem(bias_r)
+    shared_ll_r, info_ll_r, shm_ll_r = create_shared_mem(dev_raw)
+    shared_nonconv_flag, info_nonconv_flag, shm_nonconv_flag = \
+        create_shared_mem(dev_raw)
     
+    shared_args = (info_y, info_f, info_bias_r, info_ll_r, info_nonconv_flag) 
+    args = (R, lambda_, em_state, config)  
+
+   
+    n_jobs = min(config.parallel.n_workers, len(links_to_check))
+    print(f"{n_jobs=}")
+    Parallel(n_jobs=n_jobs, verbose=10)(
+        delayed(_learn_reduced_model_parallel)(
+            link, *(shared_args + args)
+        ) for link in links_to_check
+    )
+
+    ll_r = np.reshape(shared_ll_r, dev_raw.shape).copy()
+    bias_r = np.reshape(shared_bias_r, dev_raw.shape).copy()
+    nonconv_flag = np.reshape(shared_nonconv_flag, dev_raw.shape).copy()
+
+    for shm in (shm_nonconv_flag, shm_bias_r, shm_f, shm_ll_r, shm_y):
+        shm.close()
+        try:
+            shm.unlink()
+        except Exception as exc:
+            print(f"\nUnlink shared-memory issue: {exc}")
+
+    indices = tuple(z for z in zip(*links_to_check))
+    dev_raw[indices] = 2 * fullmodel_log_likelihood[em_state.em_iter]
+    dev_raw[indices] -= 2 * ll_r[indices]
+
+    return dev_raw, bias_r, nonconv_flag
+
+
+def _learn_reduced_model(targ, src, y, F, R, lambda_f, em_state, config):    
+    print(f"reduced model {current_process().name} processing {src}->{targ}")
+    restriction = f"{src}->{targ}"
+    
+    model_r = NeuraLVAR.from_config(config)
+    em_state, smoother_result = model_r.fit(y, F, R, lambda_f, em_state, 
+                                            restriction=restriction)
+
+    if config.numerical.verbose:
+        print(f"\t reduced model {current_process().name} iters: "
+                f"{em_state.em_iter}")
+    
+    bias = compute_bias(em_state, smoother_result, config)
+    ll = em_state.log_likelihood[em_state.em_iter]
+    nonconv_flag = em_state.em_iter == config.optimizer.max_iter
+    return ll, bias, nonconv_flag
+
+
+def _learn_reduced_model_parallel(link_index, info_y, info_f, info_bias_r, 
+                                  info_ll_r, info_nonconv_flag, R, lambda_f, 
+                                  em_state, config):
+    
+    # prevent oversubscription
+    with threadpool_limits(limits=1, user_api='blas'):
+
+        # each process needs its own solver instance
+        instantiate_proximal_solvers(config, em_state.N_sources_upper)
+
+        try:
+            y, shm_y = link_share_memory(info_y)
+            F, shm_f = link_share_memory(info_f)
+            bias_r, shm_bias_r = link_share_memory(info_bias_r)
+            ll_r, shm_ll_r = link_share_memory(info_ll_r)
+            nonconv_flag, shm_nonconv_flag = link_share_memory(info_nonconv_flag)
+        except BaseException as e:
+            logger.error("Could not link to memory")
+            raise e
+
+        targ, src = link_index
+        ll, bias, flag = _learn_reduced_model(targ, src, y, F, R, lambda_f, 
+                                              em_state, config)
+        ll_r[targ, src] = ll
+        bias_r[targ, src] = bias
+        nonconv_flag[targ, src] = flag
+        for shm in (shm_y, shm_f, shm_bias_r, shm_ll_r, shm_nonconv_flag):
+            shm.close()    
     
 
 

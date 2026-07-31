@@ -11,6 +11,7 @@ from nlgc.utils.restriction import expand_zeroindex_masks
 from functools import partial  
 jax.config.update("jax_enable_x64", True)
 
+
 Array: TypeAlias = NDArray[np.float64] | jnp.ndarray
 
 @jax.tree_util.register_dataclass
@@ -78,6 +79,7 @@ def solve_params(y, F, R, em_state, config, lambda_, zeroed_index=None):
         A_mask = np.ones_like(em_state.A)
     
     em_state.A_mask = A_mask
+    em_state.A = zero_entries(em_state.A, em_state.A_mask)
 
     _triage_em_state(em_state)
 
@@ -120,7 +122,8 @@ def em_blas(y, F, R, em_state, config, lambda_, N_iter):
         curr_iter = em_state.em_iter
         prev_ll = em_state.log_likelihood[curr_iter]
 
-        em_state = proximal_param_update(em_state, smoother_result, lambda_)
+        em_state, rel_A_change = proximal_param_update(em_state, 
+                                                       smoother_result, lambda_)
 
         em_state = _copycast_em_state_numpy(em_state)
 
@@ -135,8 +138,11 @@ def em_blas(y, F, R, em_state, config, lambda_, N_iter):
             rel_change = np.abs(curr_ll - prev_ll) / np.abs(prev_ll)
         else:
             rel_change = np.inf
+
+        # print(curr_ll, np.abs(rel_change), rel_A_change)
         
-        if np.abs(rel_change) > config.optimizer.tol:
+        if np.abs(rel_change) > config.optimizer.tol or \
+            rel_A_change > config.optimizer.A_tol:
             em_state.em_iter += 1
         else:
             # converged
@@ -164,7 +170,9 @@ def em_jax(y, F, R, em_state, config, lambda_, N_iter):
 
             smoother_result = rts_smoother_jax(y, F, R, em_state)
 
-            em_new = proximal_param_update(em_state, smoother_result, lambda_)
+            em_new, rel_A_change = proximal_param_update(em_state, 
+                                                         smoother_result, 
+                                                         lambda_)
 
             curr_ll = -smoother_result.negative_log_likelihood
 
@@ -177,7 +185,8 @@ def em_jax(y, F, R, em_state, config, lambda_, N_iter):
             )
 
             converged_new = jnp.logical_or(
-                rel_change <= config.optimizer.tol,
+                (rel_change <= config.optimizer.tol) & \
+                    (rel_A_change <= config.optimizer.A_tol),
                 jnp.isnan(curr_ll)
             )
 
@@ -186,6 +195,22 @@ def em_jax(y, F, R, em_state, config, lambda_, N_iter):
             safe_iter = jnp.minimum(curr_iter, len(em_state.log_likelihood) - 1)
             updated_ll_trajectory = em_state.log_likelihood.at[safe_iter]\
                                         .set(curr_ll)
+            
+            # def print_progress():
+            #     jax.debug.print(
+            #         "curr_iter={i}: curr_ll={ll}, rel_change={rc}, rel_A_change={rac}",
+            #         i=prev_iter,
+            #         ll=curr_ll,
+            #         rc=rel_change,
+            #         rac=rel_A_change
+            #     )
+
+            # # Only run the print callback every 50 iterations
+            # jax.lax.cond(
+            #     (prev_iter % 1) == 0,
+            #     print_progress,
+            #     lambda: None
+            # )
 
             em_new = dataclasses.replace(
                 em_new,

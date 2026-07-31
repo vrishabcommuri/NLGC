@@ -20,7 +20,6 @@ class ModelVmapConfig:
     """
     pass
 
-
 @dataclass(frozen=True)
 class ModelShardConfig:
     """
@@ -33,13 +32,13 @@ class ModelShardConfig:
     """
     n_devices: int = 1
 
-
 @dataclass(frozen=True)
 class ModelMultiprocessConfig:
     """
     parallelize models using independent Python worker processes.
     """
     n_workers: int = 1
+
 
 ModelParallelConfig: TypeAlias = (
     ModelSerialConfig
@@ -67,7 +66,7 @@ class ModelSparsityConfig:
                                                      _default_lambda_range)
     lambda1: Union[float, None] = None
     lambda2: Union[float, None] = None
-    negligible_candidate_link_energy_thr: float = 0.99
+    negligible_candidate_link_energy_thr: float = 1.0
 
 @dataclass(frozen=True)
 class ModelForwardConfig:
@@ -82,7 +81,8 @@ class ModelOptimizerConfig:
     max_iter: int = field(default=500, metadata={"static": True})  
     n_warmup_iter: int = 25   # denotes how many blas iters before using jax 
     max_cyclic_iter: int = 3  # legacy; deprecated
-    tol: float = 1e-8
+    tol: float = 1e-5
+    A_tol: float = 5e-3
     warm_start: bool = False
     
 @dataclass(frozen=True)
@@ -123,7 +123,9 @@ class ModelConfig:
             )
 
         elif parallel_mode == "multiprocess":
-            parallel = ModelMultiprocessConfig(n_workers=kwargs.pop("n_workers"))
+            parallel = ModelMultiprocessConfig(
+                n_workers=kwargs.pop("n_workers")
+            )
 
         else:
             raise ValueError(f"Unknown parallel_mode: {parallel_mode}")
@@ -145,7 +147,7 @@ class ModelConfig:
                 sparsity_factor = kwargs.pop("sparsity_factor", 0.0),
                 lambda_range = kwargs.pop("lambda_range", None),
                 negligible_candidate_link_energy_thr = \
-                    kwargs.pop("negligible_candidate_link_energy_thr", 0.99),
+                    kwargs.pop("negligible_candidate_link_energy_thr", 1.0),
             ),
 
             forward = ModelForwardConfig(
@@ -160,7 +162,8 @@ class ModelConfig:
                 max_iter = kwargs.pop("max_iter", 500),
                 max_cyclic_iter = kwargs.pop("max_cyclic_iter", 3),
                 n_warmup_iter= kwargs.pop("n_warmup_iter", 25),
-                tol = kwargs.pop("tol", 1e-8),
+                tol = kwargs.pop("tol", 1e-5),
+                A_tol = kwargs.pop("A_tol", 5e-3),
                 warm_start = kwargs.pop("warm_start", False),
             ),
             

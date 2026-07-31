@@ -1,7 +1,8 @@
 from nlgc.opt.em import (EMState, em_blas, em_jax, 
                          _copycast_em_state_jax, solve_params)
 from nlgc.test.ssm_gen import gen_small_ssm, gen_sparse_var_ssm
-from nlgc.test.viz import plot_transition_comparison, plot_transition_single
+from nlgc.test.viz import (plot_transition_comparison, plot_transition_single, 
+                           plot_transition_blurred)
 from nlgc.opt.proximal import instantiate_proximal_solvers
 import numpy as np
 from nlgc.config import ModelConfig
@@ -10,6 +11,7 @@ import dataclasses
 import matplotlib.pyplot as plt
 import time
 import jax
+import copy
 
 def make_initial_em_state(ssm, order=1, n_orients=1):
     em_state = EMState(
@@ -366,16 +368,6 @@ def test_em_var_vector(
         **ssm_kwargs
     )
 
-    instantiate_proximal_solvers(
-        {
-            "n_orients": n_orients,
-            "order": order,
-            "alpha": 0.0,
-            "beta": 0.0,
-        },
-        N_sources=n_sources * n_orients,
-    )
-
     m = n_sources * n_orients
 
     em_state = make_initial_em_state(ssm, order=order, n_orients=n_orients)
@@ -386,9 +378,13 @@ def test_em_var_vector(
             "order": order,
             "n_orients": n_orients,
             "verbose": True,
-            "n_warmup_iter":500,
+            "tol": 1e-5,
+            "A_tol": 5e-3,
         }
     )
+
+    instantiate_proximal_solvers(config, N_sources=n_sources * n_orients)
+
     start = time.perf_counter()
 
     final_em_state, _ = solve_params(ssm.y, ssm.F, ssm.R, em_state, config, 
@@ -457,7 +453,17 @@ def test_em_var_vector(
         )
 
         plt.show()
-    
+
+        plot_transition_comparison(
+            (A_true > 0).astype(float),
+            (A_est > 0).astype(float),
+            titles=(
+                f"True VAR({order})",
+                f"Recovered VAR({order})",
+            ),
+        )
+        plt.show()
+
     return em_time, final_em_state
 
 def test_em_var_vector_medium():
@@ -524,6 +530,220 @@ def test_em_var_vector_large_ll_trajectory():
     plt.show()
 
 
+def test_em_var_vector_huge_ll_trajectory():
+    """
+    test EM recovery for a sparse VAR(2) model with 3 orientations and large
+    state dimension
+    """
+    runtime, em_state = test_em_var_vector(n_sources=50, 
+                       n_sensors=100, 
+                       n_orients=3, 
+                       order=2, 
+                       T=5000,
+                       lambda_=0.2,
+                       sparsity=0.01,
+                       plot_transition=True)
+    print(f"runtime: {runtime:.3f}s")
+
+    plt.plot(em_state.log_likelihood)
+    plt.show()
+
+    plot_transition_blurred(em_state.A, em_state.N_sources_upper, 2)
+    plt.show()
+
+    import pickle
+    with open('em_state.pickle', 'wb') as handle:
+        pickle.dump(em_state, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def test_profile_em_blas_vs_jax(
+        n_sources=50,
+        n_sensors=100,
+        n_orients=3,
+        order=2,
+        T=5000,
+        lambda_=0.2,
+        sparsity=0.01,
+):
+    ssm, _, _ = gen_sparse_var_ssm(
+        T=T,
+        n_sources=n_sources,
+        n_sensors=n_sensors,
+        n_orients=n_orients,
+        order=order,
+        sparsity=sparsity,
+        seed=0,
+    )
+
+    m = n_sources * n_orients
+
+    em_state = make_initial_em_state(
+        ssm,
+        order=order,
+        n_orients=n_orients,
+    )
+    em_state.N_sources_upper = m
+
+    config = ModelConfig.from_legacy_kwargs(
+        {
+            "order": order,
+            "n_orients": n_orients,
+            "verbose": False,
+            "tol": 1e-5,
+            "A_tol": 5e-3,
+        }
+    )
+
+    instantiate_proximal_solvers(config, N_sources=m)
+
+    em_state.A_mask = np.ones_like(em_state.A)
+
+    ####################################################################
+    # BLAS warmup
+    ####################################################################
+
+    em_blas_state = copy.deepcopy(em_state)
+
+    t0 = time.perf_counter()
+
+    em_blas_state, _ = em_blas(
+        ssm.y,
+        ssm.F,
+        ssm.R,
+        em_blas_state,
+        config,
+        lambda_,
+        config.optimizer.n_warmup_iter,
+    )
+
+    blas_time = time.perf_counter() - t0
+
+    print(f"\nBLAS warmup")
+    print(f"  time      : {blas_time:.3f} s")
+    print(f"  iterations: {em_blas_state.em_iter}")
+
+    ####################################################################
+    # BLAS full
+    ####################################################################
+
+    em_blas_state = copy.deepcopy(em_state)
+
+    t0 = time.perf_counter()
+
+    em_blas_state, _ = em_blas(
+        ssm.y,
+        ssm.F,
+        ssm.R,
+        em_blas_state,
+        config,
+        lambda_,
+        config.optimizer.max_iter,
+    )
+
+    blas_time_full = time.perf_counter() - t0
+
+    print(f"\nBLAS full")
+    print(f"  time      : {blas_time_full:.3f} s")
+    print(f"  iterations: {em_blas_state.em_iter}")
+
+    ####################################################################
+    # prepare JAX inputs
+    ####################################################################
+
+    em_jax_state = _copycast_em_state_jax(copy.deepcopy(em_blas_state))
+
+    y = jnp.asarray(ssm.y)
+    F = jnp.asarray(ssm.F)
+    R = jnp.asarray(ssm.R)
+
+    ####################################################################
+    # JAX dummy warmup
+    ####################################################################
+
+    t0 = time.perf_counter()
+
+    state1, _ = em_jax(
+        y,
+        F,
+        R,
+        em_jax_state,
+        config,
+        lambda_,
+        config.optimizer.max_iter,
+    )
+
+    jax.block_until_ready(state1.A)
+
+    compile_time = time.perf_counter() - t0
+
+    print("\nJAX first call")
+    print(f"  compile+run : {compile_time:.3f} s")
+    print(f"  iterations  : {state1.em_iter}")
+
+    ####################################################################
+    # compiled JAX profiling
+    ####################################################################
+
+    em_jax_state = _copycast_em_state_jax(copy.deepcopy(em_blas_state))
+
+    t0 = time.perf_counter()
+
+    state2, _ = em_jax(
+        y,
+        F,
+        R,
+        em_jax_state,
+        config,
+        lambda_,
+        config.optimizer.max_iter,
+    )
+
+    jax.block_until_ready(state2.A)
+
+    run_time = time.perf_counter() - t0
+
+    print("\nJAX compiled")
+    print(f"  runtime    : {run_time:.3f} s")
+    print(f"  iterations : {state2.em_iter}")
+
+    ####################################################################
+    # Complete pipeline
+    ####################################################################
+
+    em_full = copy.deepcopy(em_state)
+
+    t0 = time.perf_counter()
+
+    final_state, _ = solve_params(
+        ssm.y,
+        ssm.F,
+        ssm.R,
+        em_full,
+        config,
+        lambda_,
+    )
+
+    jax.block_until_ready(final_state.A)
+
+    full_time = time.perf_counter() - t0
+
+    print("\nComplete pipeline")
+    print(f"  runtime    : {full_time:.3f} s")
+    print(f"  iterations : {final_state.em_iter}")
+
+    ####################################################################
+    # Summary
+    ####################################################################
+
+    print("\n==============================")
+    print(f"BLAS warmup        : {blas_time:8.3f} s")
+    print(f"BLAS full          : {blas_time_full:8.3f} s")
+    print(f"JAX compile+run    : {compile_time:8.3f} s")
+    print(f"JAX compiled run   : {run_time:8.3f} s")
+    print(f"Complete pipeline  : {full_time:8.3f} s")
+    print("==============================")
+
+
     
 
 if __name__ == '__main__':
@@ -574,14 +794,22 @@ if __name__ == '__main__':
     # test_em_var_vector_medium()
     # print("pass\n\n")
 
-    print("running test EM vector VAR(2) large") 
-    test_em_var_vector_large()
-    print("pass\n\n")
+    # print("running test EM vector VAR(2) large") 
+    # test_em_var_vector_large()
+    # print("pass\n\n")
 
-    print("running test EM vector VAR(2) huge") 
-    test_em_var_vector_huge()
-    print("pass\n\n")
+    # print("running test EM vector VAR(2) huge") 
+    # test_em_var_vector_huge()
+    # print("pass\n\n")
 
-    print("running test EM vector VAR(2) likelihood trajectory") 
-    test_em_var_vector_large_ll_trajectory()
-    print("pass\n\n")
+    # print("running test EM vector VAR(2) likelihood trajectory") 
+    # test_em_var_vector_large_ll_trajectory()
+    # print("pass\n\n")
+
+    # print("running test EM vector VAR(2) likelihood trajectory") 
+    # test_em_var_vector_huge_ll_trajectory()
+    # print("pass\n\n")
+
+    print("running test profile huge em jax vs blas") 
+    test_profile_em_blas_vs_jax()
+    print("done\n\n")

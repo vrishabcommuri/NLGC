@@ -13,15 +13,18 @@ def compute_bias(em_state, smoother_result, config):
     x = smoother_result.smoothed_state
     P = smoother_result.smoothed_cov
     B = smoother_result.smoother_gain
+
+    n_eigenmodes = config.latent.n_eigenmodes
+    n_orients = config.latent.n_orients
+    p = config.latent.order
     
     bias = sample_path_bias(Q, A, x, P, B, A_mask, 
-                            config.latent.n_eigenmodes, 
-                            config.latent.n_orients, 
-                            m, config.latent.order)
+                            n_eigenmodes, n_orients, 
+                            m, p)
     return bias
 
 
-def compute_bias_idx(source, em_state, smoother_result, config):
+def compute_bias_idx(source, target, em_state, smoother_result, config):
     p = config.latent.order
     m = em_state.N_sources_upper
     A = em_state.A[:m]
@@ -30,15 +33,13 @@ def compute_bias_idx(source, em_state, smoother_result, config):
     x = smoother_result.smoothed_state
     P = smoother_result.smoothed_cov
     B = smoother_result.smoother_gain
+    
+    n_orients = config.latent.n_orients
+    n_eigenmodes = config.latent.n_eigenmodes
 
-    if isinstance(source, int):
-        # Map region index to the actual row indices in the A matrix
-        # e.g., Region 0 -> Rows [0, 1, 2]
-        source = [source * config.latent.n_orients + i 
-                  for i in range(config.latent.n_orients)]
-        
-    bias = sum([bias_by_idx(i, Q, A, x, P, B, m, p, A_mask) 
-                for i in source])
+    bias = bias_by_idx(source, target, Q, A, x, P, B, A_mask, 
+                       n_eigenmodes, n_orients, m, p)
+
     return bias
 
 
@@ -103,64 +104,133 @@ def sample_path_bias(q, a, x_bar, s_bar, b, A_mask, n_eigenmodes, n_orients,
     return bias
 
 
-def bias_by_idx(idx_src, q, a, x_bar, s_bar, b, m, p, A_mask=None):
-    """Computes the bias in the deviance (proloy@umd.edu)
-
-    Parameters
-    ----------
-    q:  ndarray of shape (n_sources*mo, n_sources*mo)
-    a:  ndarray of shape (n_sources*mo, n_sources*order*mo)
-    x_bar:  ndarray of shape (t, n_sources*mo)
-    idx_src: source index
-
-    Returns
-    -------
-    bias
-
-    """
-    warnings.filterwarnings('always')
+def bias_by_idx(src, targ, q, a, x_bar, s_bar, b, A_mask, n_eigenmodes, 
+                n_orients, m, p):
+    """Computes the expected bias for a specific source -> target connection."""
+    
     _, dtot = a.shape
 
-    ### These uses the whole distribution.
     s1, s2, s3, n = calculate_ss(x_bar, s_bar, b, m, p)
 
-    ai = a[idx_src]  # in python slicing returns 1d array, so transpose is meaningless.
-    qi = q[idx_src, idx_src]
+    eff_eigenmodes = n_eigenmodes * n_orients
+    
+    # identify target block (rows in A)
+    targ_block = _voxel_block(targ, n_orients)
 
-    ldot = np.empty((dtot))
-    ldotdot = np.empty((dtot, dtot))
-
-    temp1 = s2 @ ai
-    temp1 -= s1[idx_src]
-
-    ldot[:] = - temp1
-    ldot[:] /= qi
-
-    ldotdot[:, :] = - s2 / qi
-
+    # identify source columns in A (across all lags)
+    src_start = src * n_orients
+    src_end = (src + 1) * n_orients
+    src_cols = []
+    for lag in range(p):
+        src_cols.extend(range(src_start + lag * m, src_end + lag * m))
+        
+    # determine which of these columns are explicitly masked out by A_mask
+    delete_cols = set()
     if A_mask is not None:
-        removed_idx = transition_mask_to_parameter_indices(A_mask, idx_src, 
-                                                           m, dtot)
+        idx_large_voxel = targ // n_eigenmodes
+        voxel_start = idx_large_voxel * eff_eigenmodes
+        for idx in range(voxel_start, voxel_start + eff_eigenmodes):
+            removed_idx = transition_mask_to_parameter_indices(A_mask, idx, m, dtot)
+            delete_cols.update(removed_idx)
 
-        ldot = np.delete(ldot, removed_idx)
-        ldotdot = np.delete(ldotdot, removed_idx, axis=0)
-        ldotdot = np.delete(ldotdot, removed_idx, axis=1)
+    # keep only the valid (unmasked) source columns
+    valid_src_cols = [c for c in src_cols if c not in delete_cols]
+    
+    # if the entire connection is masked, there are no parameters to perturb,
+    # bias is 0
+    if len(valid_src_cols) == 0:
+        return 0.0
+
+    # extract blocks for computation
+    ai = a[targ_block, :]
+    Q_block = q[targ_block, targ_block]
+    Q_inv_block = np.linalg.inv(Q_block)
+
+    #  residual 
+    diff = s1[targ_block, :] - ai @ s2
+    
+    # restrict residual and s2 to just the valid source columns
+    diff_src = diff[:, valid_src_cols]
+    s2_src = s2[np.ix_(valid_src_cols, valid_src_cols)]
+    
+    # gradient
+    ldot_matrix = Q_inv_block @ diff_src
+    ldot = ldot_matrix.reshape(-1)
+
+    # Hessian
+    ldotdot = -np.kron(Q_inv_block, s2_src)
 
     try:
         c, low = linalg.cho_factor(-ldotdot)
         temp = linalg.cho_solve((c, low), ldot)
-        bias = n * ldot @ temp
+        bias = n * (ldot @ temp)
     except linalg.LinAlgError:
-        warnings.warn('source-index {:d} ldotdot is not negative definite: '
+        warnings.warn('Connection src={:d} -> targ={:d} ldotdot is not negative definite: '
                       'setting positive eigenvalues equal to zero, '
-                      'result may not be accurate.'.format(idx_src), RuntimeWarning, stacklevel=2)
+                      'result may not be accurate.'.format(src, targ), 
+                      RuntimeWarning, stacklevel=2)
         e, v = linalg.eigh(-ldotdot)
-        temp = v @ ldot
+        temp = v.T @ ldot 
         idx = e > 0
         bias = np.sum(temp[idx] ** 2 / e[idx])
         bias *= n
 
     return bias
+
+
+def wald_by_idx(src, targ, q, a, x_bar, s_bar, b, A_mask, n_eigenmodes, 
+                n_orients, m, p):
+    """
+    similar to bias_by_idx, computes the Wald statistic for pruning a
+    source->target connection.
+
+    Wald score \theta^T H(\theta) \theta measures perturbation for a given link
+    using the smoother statistics; i.e., how much does the likelihood change
+    when we zero out this link? 
+    """
+    
+    _, dtot = a.shape
+    s1, s2, s3, n = calculate_ss(x_bar, s_bar, b, m, p)
+    eff_eigenmodes = n_eigenmodes * n_orients
+    
+    targ_block = slice(targ * n_orients, (targ + 1) * n_orients)
+
+    src_cols = []
+    for lag in range(p):
+        src_cols.extend(range(src * n_orients + lag * m, (src + 1) * n_orients + lag * m))
+        
+    delete_cols = set()
+    if A_mask is not None:
+        idx_large_voxel = targ // n_eigenmodes
+        voxel_start = idx_large_voxel * eff_eigenmodes
+        for idx in range(voxel_start, voxel_start + eff_eigenmodes):
+            removed_idx = transition_mask_to_parameter_indices(A_mask, idx, m, dtot)
+            delete_cols.update(removed_idx)
+
+    valid_src_cols = [c for c in src_cols if c not in delete_cols]
+    
+    if len(valid_src_cols) == 0:
+        return 0.0
+
+    # extract parameter values for this specific link
+    ai_edge = a[targ_block, :][:, valid_src_cols]
+    
+    # extract the Hessian components
+    Q_block = q[targ_block, targ_block]
+    Q_inv_block = np.linalg.inv(Q_block)
+    s2_src = s2[np.ix_(valid_src_cols, valid_src_cols)]
+    
+    # compute the Hessian strictly for this connection
+    ldotdot = -np.kron(Q_inv_block, s2_src)
+
+    # compute the Wald Statistic: n * (theta^T * H * theta)
+    theta = ai_edge.reshape(-1) 
+    wald_score = n * (theta.T @ (-ldotdot) @ theta)
+
+    # degrees of freedom used for pre-screening using central chi2 dist
+    k_dof = len(theta)
+
+    return wald_score, k_dof
 
 
 def debias_deviances(dev_raw, bias_f, bias_r):
@@ -182,7 +252,8 @@ def transition_mask_to_parameter_indices(A_mask, target_idx, dxm, dtot):
     sources = np.where(A_mask[target_idx] == 0)[0]
 
     for src in sources:
-        # dxm and dtot must be integers for range() to work
         removed.extend(range(int(src), int(dtot), int(dxm)))
 
     return np.asarray(removed, dtype=int)
+
+
