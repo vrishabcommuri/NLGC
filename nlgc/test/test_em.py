@@ -11,7 +11,13 @@ import matplotlib.pyplot as plt
 import time
 import jax
 
-def make_initial_em_state(ssm, order=1, n_orients=1):
+def make_initial_em_state(ssm, order=1, n_orients=1, max_iter=500,
+                          n_warmup_iter=25):
+    # em_iter accumulates across BOTH phases of solve_params (em_blas for
+    # n_warmup_iter, then em_jax for max_iter), and a state can be re-fit, so the
+    # trajectory needs room for their sum -- em_blas indexes it unguarded.
+    # See nlgc/utils/initialize.py, which sizes it the same way.
+    n_ll = n_warmup_iter + max_iter + 1
     em_state = EMState(
         A = np.zeros_like(ssm.A),
         A_mask = np.ones_like(ssm.A),
@@ -19,7 +25,7 @@ def make_initial_em_state(ssm, order=1, n_orients=1):
         P0 = np.zeros_like(ssm.Q),
         N0 = np.zeros_like(ssm.Q),
         N_sources_upper = ssm.Q.shape[0],
-        log_likelihood=np.zeros(500 + 1)
+        log_likelihood=np.zeros(n_ll)
     )
     m = ssm.N_sources 
 

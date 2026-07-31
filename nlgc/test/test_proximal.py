@@ -12,6 +12,18 @@ def setup_proximal_test():
     """
     shared setup for proximal-gradient tests.
     """
+    # proximal_param_update reads the module-level `solver`/`solve_for_Q`
+    # globals, so they have to exist before any test touches it. This used to
+    # live only in the __main__ block below, which meant the file passed when run
+    # as a script and every test errored with "'NoneType' has no attribute 'run'"
+    # under pytest -- unless another test module happened to instantiate first.
+    instantiate_proximal_solvers({
+        'n_orients': 1,
+        'order': 1,
+        'alpha': 0.0,
+        'beta': 0.0,
+    }, N_sources=4)
+
     ssm = gen_small_ssm(T=1000)
 
     em_state = EMState(

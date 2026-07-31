@@ -1,12 +1,13 @@
-# from multiprocessing import cpu_count
-# import os
-# os.environ["XLA_FLAGS"] = (
-#     f"--xla_force_host_platform_device_count={cpu_count()}"
-# )
-import numpy as np                                               
+# NOTE: to run GC link testing across multiple host devices, set
+#     XLA_FLAGS=--xla_force_host_platform_device_count=<N>
+# in the environment *before* the first jax import (i.e. at the top of your
+# driver script, before `import nlgc`). Setting it here is too late -- jax is
+# already imported via the nlgc/__init__.py -> nlgc.opt chain.
+import numpy as np
+
 from nlgc.utils.restriction import (jax_expand_zeroindex_masks,  
                                     link_tuples_to_zero_indices)
-from nlgc.opt.em import em_jax                                   
+from nlgc.opt.em import em_jax
 from nlgc.bias_utils import compute_bias                         
 import dataclasses                                               
 import jax
@@ -70,9 +71,9 @@ def batched_test_links(links_to_check, y, F, R, lambda_, full_em_state, config):
     eff_eigenmodes = config.latent.n_eigenmodes * config.latent.n_orients
     m = full_em_state.N_sources_upper
     nx = m // (eff_eigenmodes)
-    fullmodel_log_likelihood = full_em_state.log_likelihood
+    fullmodel_log_likelihood = full_em_state.log_likelihood[full_em_state.em_iter]
 
-    zeroed_indices = link_tuples_to_zero_indices(links_to_check, full_em_state, 
+    zeroed_indices = link_tuples_to_zero_indices(links_to_check, full_em_state,
                                                  config)
 
     batched_em = jax.pmap(
@@ -132,7 +133,7 @@ def batched_test_links(links_to_check, y, F, R, lambda_, full_em_state, config):
             
             bias_r[targ, src] = bias
             dev_raw[targ, src] = 2 * fullmodel_log_likelihood
-            dev_raw[targ, src] -= 2 * reduced_em_state.log_likelihood 
+            dev_raw[targ, src] -= 2 * reduced_em_state.log_likelihood[reduced_em_state.em_iter]
             nonconv_flag[targ, src] = reduced_em_state.em_iter == \
                                     config.optimizer.max_iter
         

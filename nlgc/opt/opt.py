@@ -70,14 +70,22 @@ class NeuraLVAR:
 
     def _fit(self, y, F, R, lambda_, em_state):
         warnings.filterwarnings('always')
-        m = F.shape[1]
-        if em_state.N_sources_upper is None:
-            em_state.N_sources_upper = m
-
         p = self.config.latent.order
 
+        # F here is the COMPANION gain, (n_sensors, m*p) -- F.shape[1] is the
+        # companion width, NOT the source count. restriction_to_zeroed_index
+        # strides columns by m (range(i, m*p, m)), so feeding it the companion
+        # width puts every lag>0 column exactly one width past the end of A.
+        if em_state.N_sources_upper is None:
+            em_state.N_sources_upper = F.shape[1] // p
+        m = em_state.N_sources_upper
+
+        # restriction_to_zeroed_index returns a bare (rows, cols) tuple, but
+        # solve_params expects a list of such tuples (one per restricted link)
         zeroed_index = restriction_to_zeroed_index(self.restriction, m, p)
         self._zeroed_index = zeroed_index
+        if zeroed_index is not None:
+            zeroed_index = [zeroed_index]
 
         em_state, smoother_result = solve_params(
                 y, F, R,
@@ -104,7 +112,9 @@ class NeuraLVAR:
     
 
     def fit(self, y, F, R, lambda_, em_state, restriction=None):
-        if (restriction is None or re.search('->', restriction)) is False:
+        # precedence: `(x or Match) is False` is always False, so the original
+        # form could never fire and malformed restrictions passed straight through
+        if restriction is not None and re.search('->', restriction) is None:
             raise ValueError(f"restriction:{restriction} should be None or should have format 'i->j'!")
         self.restriction = restriction
         em_state, smoother_result = self._fit(y, F, R, lambda_, em_state)
@@ -161,9 +171,10 @@ class NeuraLVARCV(NeuraLVAR):
                  config=None):
         self.cv = cv
         self.n_jobs = n_jobs
-        self.config = config
-        NeuraLVAR.__init__(self, order, self_history, n_eigenmodes, n_orients, 
-                           copy, standardize, normalize, use_lapack)
+        # config must be forwarded: NeuraLVAR.__init__ ends with
+        # `self.config = config`, so omitting it here wipes the assignment
+        NeuraLVAR.__init__(self, order, self_history, n_eigenmodes, n_orients,
+                           copy, standardize, normalize, use_lapack, config)
 
 
     @classmethod
@@ -213,19 +224,22 @@ class NeuraLVARCV(NeuraLVAR):
             if config.numerical.verbose:
                 logger.info(f"{current_process().name} {split=} {curr_lambda=}")
 
-            em_state, _ = self._fit(y_train, F, R, em_state)
-            A_cv = em_state.A
+            # deepcopy: each lambda must start from the same initial state,
+            # otherwise it warm-starts from the previous (larger) lambda's fit
+            fit_state, _ = self._fit(y_train, F, R, curr_lambda,
+                                     copy.deepcopy(em_state))
+            A_cv = fit_state.A
 
             # test set prediction
-            filter_result_test = forward_filter_blas(y_test, F, R, 
-                                                     em_state=em_state, 
+            filter_result_test = forward_filter_blas(y_test, F, R,
+                                                     em_state=fit_state,
                                                      use_lapack=True)
-            
+
             # full-data prediction
-            filter_result_full = forward_filter_blas(y, F, R, 
-                                                     em_state=em_state, 
+            filter_result_full = forward_filter_blas(y, F, R,
+                                                     em_state=fit_state,
                                                      use_lapack=True)
-            
+
 
             # TODO this should probably use the disturbance smoother to evaluate
             # model fit
@@ -234,7 +248,7 @@ class NeuraLVARCV(NeuraLVAR):
             cv[1, split, idx] = curr_lambda * self.compute_norm_one(A_cv)
             pred[split, idx][:] = filter_result_full.filtered_state 
 
-        for shm in (shm_y, shm_f, shm_r, shm_c):
+        for shm in (shm_y, shm_f, shm_r, shm_c, shm_pred):
             shm.close()
         return None
     
@@ -252,7 +266,7 @@ class NeuraLVARCV(NeuraLVAR):
             i and j should be integers.
         """
 
-        if (restriction is None or re.search('->', restriction)) is False:
+        if restriction is not None and re.search('->', restriction) is None:
             raise ValueError(f"restriction:{restriction} should be None or should have format 'i->j'!")
         self.restriction = restriction
 

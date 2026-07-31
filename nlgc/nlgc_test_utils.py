@@ -4,6 +4,7 @@ from scipy import linalg
 import os
 import time
 from .nlgc_utils import gc_extraction, NLGC
+from .opt import NeuraLVAR
 from .utils.leadfield import prepare_eigenmodes
 from .utils.transforms import surface_ico4_to_surface_eigs
 from .config import ModelConfig
@@ -464,7 +465,7 @@ def _voxel_mode_block(v, n_eigenmodes, n_orients=3):
 
 
 def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes = 2, G=None, p=2, t=500, n_active_voxels=10, n_links=10, target_spec_rad=0.9, coupling_mode="mixed",
-    process_noise_active=0.1, process_noise_inactive=0.001, measurement_noise_scale=1e2, plot_psd=False, n_orients=3,):
+    process_noise_active=0.1, process_noise_inactive=0.001, measurement_noise_scale=1e2, plot_psd=False, n_orients=3, verbose=False):
 
     if p < 1:
         raise ValueError("p should be at least 1")
@@ -499,26 +500,27 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
 
         n_voxels = m // (n_eigenmodes * n_orients)
 
-    
-    print(f'n_sensors {n_sensors}')
-    print(f'n_voxels: {n_voxels}')
-    print(f'm: {m}')
-    
+    # active units are (voxel, eigenmode) pairs -- see the rng.choice below,
+    # which draws from n_voxels * n_eigenmodes
+    n_active_units = n_voxels * n_eigenmodes
+    if n_active_voxels > n_active_units:
+        raise ValueError(
+            f"n_active_voxels ({n_active_voxels}) cannot exceed "
+            f"n_voxels * n_eigenmodes ({n_active_units})")
 
-    if n_active_voxels > n_voxels:
-        raise ValueError("n_active_voxels cannot exceed n_voxels")
-
-    print(f"G shape is {f.shape}")
-    print(f"n_voxels is {n_voxels}")
-    print(f"state dimension m = {m}")
+    if verbose:
+        print(f"G shape is {f.shape}")
+        print(f"n_sensors {n_sensors}, n_voxels {n_voxels}, "
+              f"state dimension m = {m}")
 
     burnin = max(200, 10 * fs, 10 * p * m)
 
     q = process_noise_inactive * np.eye(m)
     a = np.zeros((p, m, m), dtype=np.float64)
 
-    active_voxels = rng.choice(n_voxels*n_eigenmodes, size=n_active_voxels, replace=False)
-    print(f"Active voxels: {active_voxels}")
+    active_voxels = rng.choice(n_active_units, size=n_active_voxels, replace=False)
+    if verbose:
+        print(f"Active (voxel, eigenmode) units: {active_voxels}")
 
     if band == "wide":
         for v in active_voxels:
@@ -555,7 +557,8 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
             a[1, block, block] = -(target_spec_rad ** 2) * np.eye(n_orients)
 
     link_power = target_spec_rad / 2
-    print(f"Link Power {link_power}")
+    if verbose:
+        print(f"Link Power {link_power}")
 
     links = []
 
@@ -568,7 +571,6 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
         links.append((target_v, source_v))
 
         for lag in range(p):
-            print(f'lag: {lag}')
             strength = rng.uniform(0.05, link_power)
 
             B = _make_3d_coupling(
@@ -605,7 +607,8 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
 
     # Stabilize full VAR after adding off-diagonal 3D couplings
     a, rho = _stabilize_var(a, target_spec_rad=target_spec_rad)
-    print(f"Final companion spectral radius: {rho:.4f}")
+    if verbose:
+        print(f"Final companion spectral radius: {rho:.4f}")
 
     # Ground-truth voxel-level GC matrix
     temp_JG = np.sum(np.abs(a), axis=0)
@@ -638,7 +641,8 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
 
     x = x[burnin:]
 
-    print("band", band, x.shape)
+    if verbose:
+        print("band", band, x.shape)
 
     if plot_psd:
         for comp in range(x.shape[1]):
@@ -648,13 +652,10 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
 
     pow_actives = [np.mean(x[:, i] ** 2) for i in range(m)]
 
-    print(f"Max of f {np.max(f)}")
-    print(f"Mean of f {np.mean(f)}")
-    print(f"Median of f {np.median(f)}")
-    print(f"Min of f {np.min(f)}")
-
-    print(f"Max of x {np.max(x)}")
-    print(f"Median of x {np.median(x)}")
+    if verbose:
+        print(f"f: max {np.max(f):.4g} mean {np.mean(f):.4g} "
+              f"median {np.median(f):.4g} min {np.min(f):.4g}")
+        print(f"x: max {np.max(x):.4g} median {np.median(x):.4g}")
 
     y = x @ f.T
 
@@ -665,10 +666,9 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
 
     multiplier = measurement_noise_scale * pn / (px + 1e-12)
 
-    print(f"pn {pn}")
-    print(f"px {px}")
-    print(f"Multiplier {multiplier}")
-    print(f"Max noise/sqrt measurement noise {np.max(noise / np.sqrt(multiplier))}")
+    if verbose:
+        print(f"pn {pn:.4g}, px {px:.4g}, multiplier {multiplier:.4g}, "
+              f"r_cov {1/multiplier:.4g}")
 
     y += noise / np.sqrt(multiplier)
     r_cov = 1 / multiplier
@@ -865,7 +865,7 @@ verbose: bool
 '''
 def nlgc_map_opt(M, G, r, order, self_history=None, var_thr=1.0, n_segments=1, lambda_range=None, max_iter=500,
                  max_cyclic_iter=3, tol=1e-5, sparsity_factor=0.0, cv=5, n_eigenmodes = 2, n_orients = 1, xs_init = None, a_init = None, use_es = False, patch_idx = None, verbose = False,
-                 parallel_mode = 'serial'):
+                 parallel_mode = 'serial', n_devices = 1, n_workers = 1, n_warmup_iter = 25):
     n_sensors, nnx = G.shape
     len_patch_idx = nnx // (n_eigenmodes * n_orients)
     _, t = M.shape
@@ -879,6 +879,8 @@ def nlgc_map_opt(M, G, r, order, self_history=None, var_thr=1.0, n_segments=1, l
         sparsity_factor=sparsity_factor, lambda_range=lambda_range,
         max_iter=max_iter, max_cyclic_iter=max_cyclic_iter, tol=tol,
         cv=cv, use_es=use_es, parallel_mode=parallel_mode,
+        n_devices=n_devices, n_workers=n_workers,
+        n_warmup_iter=n_warmup_iter,
         patch_idx=tuple(patch_idx) if patch_idx is not None else (),
         verbose=verbose))
 
@@ -905,9 +907,22 @@ def nlgc_map_opt(M, G, r, order, self_history=None, var_thr=1.0, n_segments=1, l
             y=y_seg, F=G, r=r, config=config)
 
         if xs_init is not None:
-            em_state.smoothed_state = xs_init
+            # EMState has no `smoothed_state` field (nlgc/opt/em.py) -- assigning
+            # one just sets an instance attribute that jax's tree flattening never
+            # reads, so this used to be a silent no-op.
+            raise NotImplementedError(
+                'xs_init is not supported; warm starting goes through '
+                'config.optimizer.warm_start and '
+                'nlgc.utils.warm_start.warm_start_sources')
         if a_init is not None:
-            em_state.A = a_init
+            # a_init is (order, m, m); em_state.A is the (m*p, m*p) companion,
+            # whose top block row holds [A_1 ... A_p] raveled along the columns.
+            a_ravelled = NeuraLVAR._ravel_a(np.asarray(a_init))
+            if a_ravelled.shape != em_state.A[:nnx].shape:
+                raise ValueError(
+                    f'a_init ravels to {a_ravelled.shape}, expected '
+                    f'{em_state.A[:nnx].shape} for order={order}, m={nnx}')
+            em_state.A[:nnx] = a_ravelled
 
         # gc_extraction wants TIME-major y: it feeds the kalman layer, which
         # asserts y.shape[1] == F.shape[0] (see nlgc/test/test_gc.py, which
@@ -997,7 +1012,7 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
         max_iter = 500, max_cyclic_iter = 3, tol = 1e-5, sparsity_factor = 0.0, cv = 5 ,var_thr = 1.0, alpha = .1, 
         m_active = 10, n_links = 10, warm_start = False, self_history = None, passed_evoked = None, use_es = False, 
         verbose = False, diff_lf = False, patch_idx = None, a_init = None, save_dir = None, run_ggc = False, ggc_kwargs = None,
-        parallel_mode = 'serial'):
+        parallel_mode = 'serial', n_devices = 1, n_workers = 1, n_warmup_iter = 25):
     
     if src_space not in ['surf', 'vol', 'mixed']:
         raise Exception(f'src_space {src_space} not implemented')
@@ -1027,15 +1042,16 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
         f, y, x, r_cov, p, JG, pow_actives, a = data_generation(seed, band, fs, natures, n_eigenmodes, G, order, t, m_active, n_links, target_spec_rad)
     else:
         f, y, x, r_cov, p, JG, pow_actives, a = vol_data_generation(seed = seed, band = band, fs = fs, natures = natures, n_eigenmodes = n_eigenmodes, G = G, p = order, t = t
-                                                                    ,n_active_voxels = m_active, n_links = n_links, target_spec_rad = target_spec_rad, n_orients = n_orients)
-    print(np.max(a))
-    print(np.min(a))
-    print(np.median(a))
-    
-    print("Completed data gen")
-    plt.imshow(JG)
-    plt.show()
-    print('Start nglc_map_opt')
+                                                                    ,n_active_voxels = m_active, n_links = n_links, target_spec_rad = target_spec_rad, n_orients = n_orients,
+                                                                    verbose = verbose)
+    if verbose:
+        print(f"ground truth a: max {np.max(a):.4g} min {np.min(a):.4g} "
+              f"median {np.median(a):.4g}")
+        print(f"Completed data gen; {int(JG.sum())} ground truth links "
+              f"across {JG.shape[0]} ROIs")
+        plt.imshow(JG)
+        plt.show()
+        print('Start nlgc_map_opt')
 
     stc_init = None
     if lead_field_gen and warm_start:
@@ -1069,22 +1085,19 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
         # noise = np.random.normal(mean, std_dev, x.shape)
         # stc_init = x + noise
         # print(stc_init)
-    print(stc_init == None)
-
     if diff_lf:
         f, info, noise_cov, fwd, weights = lead_field_generation(
             root=root, subject_id=subject_id, src_space=src_space,
             n_eigenmodes=n_eigenmodes, n_orients=n_orients, loose=loose,
             depth=depth, pca=pca, rank=rank, trans=trans)
-        print('Creating diff lf')
-        print(f'Shape of second lead field: {f.shape}')
-    print(patch_idx)
+        print(f'Creating diff lf; shape of second lead field: {f.shape}')
     start_time = time.time()
     if run_ggc == False or (run_ggc and ggc_kwargs != None and ggc_kwargs['model_params'] == None):
         temp_obj = nlgc_map_opt(y.T, f, r=r_cov, order=p, self_history=p, lambda_range=lambda_range, n_segments=n_segments,
                                     var_thr=var_thr, max_iter=max_iter, max_cyclic_iter=max_cyclic_iter, tol=tol,
                                     sparsity_factor=sparsity_factor, n_eigenmodes = n_eigenmodes, n_orients = n_orients, xs_init = stc_init, a_init = a_init, use_es = use_es, patch_idx = patch_idx, verbose = verbose,
-                                    parallel_mode = parallel_mode)
+                                    parallel_mode = parallel_mode, n_devices = n_devices, n_workers = n_workers,
+                                    n_warmup_iter = n_warmup_iter)
     else:
         temp_obj = ggc_kwargs['model']
     end_time = time.time()

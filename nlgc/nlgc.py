@@ -92,11 +92,27 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, patch_idx,
         
     _check_reference(evoked)
 
-    if not is_fixed_orient(forward):
-        raise ValueError(f"Can't work with free orientation forward: {forward}")
-        
+    n_eigenmodes = config.latent.n_eigenmodes
+    n_orients = config.latent.n_orients
+    n_segments = config.latent.n_segments
+
+    # free-orientation forwards are the volume/mixed source space case, which
+    # prepare_eigenmodes supports via _reduce_lead_field_vol -- but only when the
+    # config actually asks for multiple orientations
+    if not is_fixed_orient(forward) and n_orients <= 1:
+        raise ValueError(f"Can't work with free orientation forward: {forward} "
+                         f"unless config.latent.n_orients > 1")
+
+    # keyword args: the positional form put the whole ModelConfig into
+    # prepare_eigenmodes' `n_eigenmodes: int` slot
     weights, G, label_vertidx, label_names, gain_info, whitener = \
-            prepare_eigenmodes(evoked.info, forward, noise_cov, labels, config)
+            prepare_eigenmodes(evoked.info, forward, noise_cov, labels,
+                               n_eigenmodes=n_eigenmodes,
+                               n_orients=n_orients,
+                               loose=config.forward.loose,
+                               depth=config.forward.depth,
+                               pca=config.forward.pca,
+                               rank=config.forward.rank)
 
     # get the data
     sel = [evoked.ch_names.index(name) for name in gain_info['ch_names']]
@@ -115,12 +131,9 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, patch_idx,
     if len(patch_idx) == 0:
         raise ValueError("Length of patch_idx should not be zero")
 
-    n_eigenmodes = config.latent.n_eigenmodes
-    n_segments = config.latent.n_segments
-    
-    n, _ = G.shape
     n, nnx = G.shape
-    nx = nnx // n_eigenmodes
+    # each ROI contributes n_eigenmodes * n_orients columns
+    nx = nnx // (n_eigenmodes * n_orients)
     _, t = M.shape
     tt = t // n_segments
 
@@ -138,15 +151,17 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, patch_idx,
         y = M[:, this_segment * tt: (this_segment + 1) * tt]
         F = G
 
-        F_companion, R_companion, em_state = initialize_em_state(y, F, r, 
-                                                                 evoked, 
-                                                                 forward, 
-                                                                 noise_cov, 
-                                                                 weights, 
-                                                                 config)
+        # keyword args: the positional form landed `evoked` in the `config` slot.
+        # initialize_em_state expects sensor-major y (data_driven_Q_init does
+        # U.T @ y with U shaped (n_sensors, n_sensors)).
+        F_companion, R_companion, em_state = initialize_em_state(
+            y=y, F=F, r=r, config=config, evoked=evoked, forward=forward,
+            noise_cov=noise_cov, weights=weights)
 
+        # gc_extraction wants TIME-major y: it feeds the kalman layer, which
+        # asserts y.shape[1] == F.shape[0]. Opposite of initialize_em_state above.
         d_raw_, bias_r_, bias_f_, model_f, conv_flag_ = \
-            gc_extraction(y, F_companion, R_companion, ROIs=patch_idx, 
+            gc_extraction(y.T, F_companion, R_companion, ROIs=patch_idx,
                           em_state=em_state, config=config)
         
         d_raw[this_segment] = d_raw_

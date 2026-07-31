@@ -5,7 +5,7 @@ import numpy as np
 import pickle
 import warnings
 from functools import reduce
-from joblib import Parallel, delayed
+from joblib import Parallel, delayed, parallel_backend
 from mne.utils import logger
 from nlgc.opt import (NeuraLVAR, NeuraLVARCV, create_shared_mem, 
                       link_share_memory)
@@ -13,6 +13,8 @@ from nlgc.stat import fdr_control
 from nlgc.bias_utils import debias_deviances
 from nlgc.parallel_gc import batched_test_links
 from nlgc.opt.proximal import instantiate_proximal_solvers
+from nlgc.opt.em import final_log_likelihood, _copycast_em_state_numpy
+import dataclasses
 from nlgc.utils.restriction import (roi_to_link_restriction, 
                                     _expand_roi_indices_as_tup)
 from nlgc.bias_utils import compute_bias
@@ -246,9 +248,12 @@ def sparsity_mask(em_state, smoother_result, ROIs, config):
 
 def multiprocess_test_links(links_to_check, y, F, R, lambda_, em_state, config):
     eff_eigenmodes = config.latent.n_eigenmodes * config.latent.n_orients
-    n, m = F.shape
-    nx = m // (eff_eigenmodes)
-    fullmodel_log_likelihood = em_state.log_likelihood
+    # F is the companion gain, (n_sensors, m*p) -- deriving nx from F.shape[1]
+    # gave an ROI count p times too large. batched_test_links uses
+    # N_sources_upper for exactly this reason.
+    m = em_state.N_sources_upper
+    nx = m // eff_eigenmodes
+    fullmodel_log_likelihood = final_log_likelihood(em_state)
 
     dev_raw = np.zeros((nx, nx))
     bias_r = np.zeros((nx, nx))
@@ -257,28 +262,43 @@ def multiprocess_test_links(links_to_check, y, F, R, lambda_, em_state, config):
     if len(links_to_check) == 0:
         return dev_raw, bias_r, nonconv_flag
 
+    # em_state arrives JAX-backed (model_f.fit ends in em_jax), and jax.Array has
+    # no `.flags` -- align_cast inside forward_filter_blas would raise on the
+    # first em_blas iteration. em_blas does call _copycast_em_state_numpy, but
+    # only AFTER proximal_param_update, which is too late. Casting here also
+    # means each task pickles plain numpy instead of ArrayImpl.
+    em_state = _copycast_em_state_numpy(em_state)
+
     # Memory management for Parallel implementation
     _, info_y, shm_y = create_shared_mem(y)
     _, info_f, shm_f = create_shared_mem(F)
     shared_bias_r, info_bias_r, shm_bias_r = create_shared_mem(bias_r)
     shared_ll_r, info_ll_r, shm_ll_r = create_shared_mem(dev_raw)
+    # allocate from nonconv_flag, not dev_raw -- otherwise the flags come back
+    # as float64
     shared_nonconv_flag, info_nonconv_flag, shm_nonconv_flag = \
-        create_shared_mem(dev_raw)
-    
-    shared_args = (info_y, info_f, info_bias_r, info_ll_r, info_nonconv_flag) 
-    args = (R, lambda_, em_state, config)  
+        create_shared_mem(nonconv_flag)
 
-   
-    n_jobs = min(cpu_count(), len(links_to_check))
-    Parallel(n_jobs=n_jobs, verbose=10)(
-        delayed(_learn_reduced_model_parallel)(
-            link, *(shared_args + args)
-        ) for link in links_to_check
-    )
+    shared_args = (info_y, info_f, info_bias_r, info_ll_r, info_nonconv_flag)
+    args = (R, lambda_, em_state, config)
+
+    # config.parallel.n_workers used to be ignored entirely (n_jobs was always
+    # min(cpu_count(), n_links)). Each worker holds its own JAX runtime and
+    # recompiles em_jax, so oversubscribing is expensive; inner_max_num_threads=1
+    # stops every worker from also spinning up its own BLAS pool.
+    n_jobs = min(config.parallel.n_workers, len(links_to_check))
+    with parallel_backend('loky', inner_max_num_threads=1):
+        Parallel(n_jobs=n_jobs,
+                 verbose=10 if config.numerical.verbose else 0)(
+            delayed(_learn_reduced_model_parallel)(
+                link, *(shared_args + args)
+            ) for link in links_to_check
+        )
 
     ll_r = np.reshape(shared_ll_r, dev_raw.shape).copy()
     bias_r = np.reshape(shared_bias_r, dev_raw.shape).copy()
-    nonconv_flag = np.reshape(shared_nonconv_flag, dev_raw.shape).copy()
+    nonconv_flag = np.reshape(shared_nonconv_flag,
+                              dev_raw.shape).astype(np.bool_)
 
     for shm in (shm_nonconv_flag, shm_bias_r, shm_f, shm_ll_r, shm_y):
         shm.close()
@@ -301,25 +321,51 @@ def _learn_reduced_model(i, j, y, F, R, lambda_f, em_state, config):
     
     target = _expand_roi_indices_as_tup(j, eff_eigenmodes)
     source = _expand_roi_indices_as_tup(i, eff_eigenmodes)
-    print(f'target: {target}')
-    print(f'source {source}')
+    if config.numerical.verbose:
+        print(f'target: {target}')
+        print(f'source: {source}')
     link = '->'.join(map(lambda x: ','.join(map(str, x)), (source, target)))
     
     model_r = NeuraLVAR.from_config(config)
     em_state, smoother_result = model_r.fit(y, F, R, lambda_f, em_state, 
                                             restriction=link)
     bias = compute_bias(em_state, smoother_result, config)
-    ll = em_state.log_likelihood
+    ll = final_log_likelihood(em_state)
     nonconv_flag = em_state.em_iter == config.optimizer.max_iter
     return ll, bias, nonconv_flag
 
 
-def _learn_reduced_model_parallel(link_index, info_y, info_f, info_bias_r, 
-                                  info_ll_r, info_nonconv_flag, R, lambda_f, 
+def _reset_reduced_model_state(em_state):
+    """Clear the covariance seeds a reduced-model fit must not inherit.
+
+    P0/N0 warm-start the steady-state DARE solve and were computed against the
+    FULL model's A, so they are stale once a link is masked out.
+    parallel_gc.batch_em_state zeroes them for the same reason.
+
+    em_iter and log_likelihood are per-fit and are reset by solve_params, which
+    this path reaches via NeuraLVAR.fit -- so they are deliberately not touched
+    here. The parameter warm start (A, Q from the full model) is intentional.
+    """
+    return dataclasses.replace(
+        em_state,
+        P0=np.zeros_like(np.asarray(em_state.P0)),
+        N0=np.zeros_like(np.asarray(em_state.N0)),
+    )
+
+
+def _learn_reduced_model_parallel(link_index, info_y, info_f, info_bias_r,
+                                  info_ll_r, info_nonconv_flag, R, lambda_f,
                                   em_state, config):
-    
+
+    # loky spawns workers, so nlgc.opt.proximal is re-imported fresh here and its
+    # module-level `solver`/`solve_for_Q` are None -- gc_extraction only ever
+    # instantiated them in the parent. proximal_param_update reads those globals,
+    # so without this every worker dies with 'NoneType' has no attribute 'run'.
+    # Idempotent: a reused worker rebuilds nothing on its second task.
+    instantiate_proximal_solvers(config, em_state.N_sources_upper)
+
     # each process will mutate this after this point
-    em_state = copy.deepcopy(em_state)
+    em_state = _reset_reduced_model_state(copy.deepcopy(em_state))
 
     try:
         y, shm_y = link_share_memory(info_y)
