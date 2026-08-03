@@ -111,6 +111,14 @@ def batched_test_links(links_to_check, y, F, R, lambda_, full_em_state, config):
 
         curr_state = batch_em_state(full_em_state, curr_zeroed)
 
+        from jax.tree_util import tree_leaves
+
+        for f in dataclasses.fields(curr_state):
+            value = getattr(curr_state, f.name)
+            print(f"\n{f.name}:")
+            for leaf in tree_leaves(value):
+                print("   ", getattr(leaf, "shape", None), type(leaf))
+
         batched_states, batched_smoother_results = \
             batched_em(y, F, R, curr_state, config, lambda_, 
                        config.optimizer.max_iter)

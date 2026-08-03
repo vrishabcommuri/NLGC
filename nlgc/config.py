@@ -18,7 +18,12 @@ def _default_n_workers():
         return int(subprocess.run(['sysctl', '-n', 'hw.perflevel0.logicalcpu'],
                                   capture_output=True, text=True).stdout)
     except (OSError, ValueError):
-        return cpu_count()
+        num_cores = cpu_count()
+        print("could not identify P-core count, possibly because you are",
+              "running on a linux machine or on an older mac that doesn't", 
+              "expose the number of Performance cores. ",
+              f"defaulting to {num_cores}")
+        return num_cores
 
 
 def _as_lambda_tuple(value):

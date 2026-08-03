@@ -91,8 +91,6 @@ class NeuraLVAR:
             zeroed_index = [zeroed_index]
 
         self._zeroed_index = zeroed_index
-        if zeroed_index is not None:
-            zeroed_index = [zeroed_index]
 
         em_state, smoother_result = solve_params(
                 y, F, R,

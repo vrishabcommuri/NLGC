@@ -340,7 +340,7 @@ def rts_smoother_jax(y, F, R, em_state):
 
     smoother_gain, P_smoothed = jax.pure_callback(
         rts_smoother_preamble,
-        out_types, A, P_pred, P_filt, vmap_method='sequential'
+        out_types, A, P_pred, P_filt, vmap_method='broadcast_all'
     )
 
     #---------------------------------------------------------------------------

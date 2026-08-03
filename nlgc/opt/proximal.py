@@ -13,14 +13,15 @@ def proximal_param_update(em_state, smoother_result, config, lambda_):
     n_orients = config.latent.n_orients
     m = em_state.N_sources_upper
     max_fasta_iter = config.optimizer.max_fasta_iter
+    p = config.latent.order
 
     A_prev = em_state.A[:m]
     Q_upper = em_state.Q[:m, :m]
     A_mask = em_state.A_mask[:m]
 
-    out_shape = A_prev.shape
+    
     dtype = jnp.result_type(A_prev)
-    out_type = jax.ShapeDtypeStruct(out_shape, dtype),
+    out_type = jax.ShapeDtypeStruct((m, m*p), dtype)
 
     A_shrunk = jax.pure_callback(solve_for_a, 
                     out_type,
@@ -34,7 +35,7 @@ def proximal_param_update(em_state, smoother_result, config, lambda_):
                     max_iter=max_fasta_iter,
                     tol=1e-4,
                     verbose=config.numerical.verbose,
-                    vmap_method='sequential')[0]
+                    vmap_method='sequential')
 
     em_state = dataclasses.replace(em_state,
                                    A = em_state.A.at[:m].set(A_shrunk))

@@ -176,7 +176,7 @@ def em_jax(y, F, R, em_state, config, lambda_, N_iter):
 
             # only run the print callback every 25 iterations
             jax.lax.cond(
-                (prev_iter % 25) == 0 & config.numerical.verbose,
+                ((prev_iter % 25) == 0) & config.numerical.verbose,
                 print_progress,
                 lambda: None
             )
@@ -207,8 +207,8 @@ def em_jax(y, F, R, em_state, config, lambda_, N_iter):
 
 
 def zero_entries(A, A_mask):
-    A *= A_mask
-    return A 
+    A_masked = A * A_mask
+    return A_masked 
 
 
 def zeroed_index_to_mask(zeroed_index, em_state):
