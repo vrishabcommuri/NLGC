@@ -82,7 +82,7 @@ def wald_screen(links_to_check, em_state, smoother_result, config):
 
     # set family-wise error rate with multiple comparison correction
     # Bonferroni correction: alpha = 0.05 / number_of_tests
-    target_alpha = 0.001 / len(links_to_check)
+    target_alpha = 0.05 / len(links_to_check)
     
     surviving_links = []
     screened_links_to_check = []
@@ -109,7 +109,7 @@ def wald_screen(links_to_check, em_state, smoother_result, config):
 
         if config.numerical.verbose:
             print(f"({idx}/{len(links_to_check)}) "
-                  f"screening {src}->{targ}: Score={curr_wald:.2f}")
+                  f"screening {src}->{targ}: Score={curr_wald:}")
         
         if p_val < target_alpha:
             surviving_links.append((curr_wald, targ, src))

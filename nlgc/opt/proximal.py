@@ -1,106 +1,160 @@
-from jaxopt import ProximalGradient
 import jax
-import jax.numpy as jnp         
-from functools import partial   
-import dataclasses          
+import jax.numpy as jnp
+import dataclasses
+from nlgc.opt.fastac import Fasta
+from functools import partial
 jax.config.update("jax_enable_x64", True)    
 
-solver = None
-solve_for_Q = None
-# what the current `solver`/`solve_for_Q` were built for, so repeated calls with
-# identical settings (e.g. every task in a reused multiprocessing worker) can
-# no-op instead of rebuilding the jitted closures and busting their cache
-_solver_signature = None
 
-
-def instantiate_proximal_solvers(config, N_sources, force=False):
-    global solver, solve_for_Q, _solver_signature
-    if hasattr(config, 'latent'):
-        p = config.latent.order
-        m = N_sources
-        n_orients = config.latent.n_orients
-        alpha = config.sparsity.alpha
-        beta = config.sparsity.beta
-    else:
-        # testing config; don't need to instantiate entire config class 
-        assert isinstance(config, dict) 
-        p = config['order']
-        m = N_sources
-        n_orients = config['n_orients']
-        alpha = config['alpha']
-        beta = config['beta']
-
-    signature = (p, m, n_orients, alpha, beta)
-    if not force and solver is not None and _solver_signature == signature:
-        return solver
-
-    prox = partial(proxg_vec, p = p, m = m, n_orients = n_orients)
-
-    solve_for_Q = jax.jit(
-        partial(_solve_for_Q,
-            alpha=alpha,
-            beta=beta,
-            n_orients=n_orients,
-        )
-    )
-
-    solver = ProximalGradient(fun = f, prox = prox, tol=1e-7)
-    _solver_signature = signature
-    return solver
-
-
-def f(x, s1, s2, Qinv):
-    U = Qinv @ x
-    return (-2 * jnp.sum(U * s1) + jnp.sum(U * (x @ s2)))
-
-
-def proxg_vec(x, lam, t, p, m, n_orients = 3):
-    N = m // n_orients
-    thresh = t * lam
-
-    B = x.reshape(N, n_orients, p, N, n_orients)
-
-    norms = jnp.sqrt(jnp.sum(B * B, axis=(1, 2, 4), keepdims=True))
-
-    scale = 1.0 - thresh / jnp.maximum(norms, 1e-12)
-    scale = jnp.maximum(scale, 0.0)
-
-    B_out = B * scale
-
-    return B_out.reshape(x.shape)
-    
-
-@jax.jit
-def proximal_param_update(em_state, smoother_result, lambda_):
+@partial(jax.jit, static_argnames=("config",))
+def proximal_param_update(em_state, smoother_result, config, lambda_):
     s1, s2, s3, n = calculate_ss_jax(em_state, smoother_result)
     
+    n_orients = config.latent.n_orients
     m = em_state.N_sources_upper
-
-    Qinv = jax.scipy.linalg.solve(
-        em_state.Q[:m, :m],
-        jnp.eye(m)
-    )
+    max_fasta_iter = config.optimizer.max_fasta_iter
 
     A_prev = em_state.A[:m]
+    Q_upper = em_state.Q[:m, :m]
+    A_mask = em_state.A_mask[:m]
 
-    A_shrunk = solver.run(A_prev, 
-                          hyperparams_prox=lambda_, s1=s1, 
-                          s2=s2, Qinv=Qinv).params
+    out_shape = A_prev.shape
+    dtype = jnp.result_type(A_prev)
+    out_type = jax.ShapeDtypeStruct(out_shape, dtype),
+
+    A_shrunk = jax.pure_callback(solve_for_a, 
+                    out_type,
+                    Q_upper,
+                    s1,
+                    s2,
+                    A_prev,
+                    A_mask,
+                    lambda_,
+                    n_orients=n_orients,
+                    max_iter=max_fasta_iter,
+                    tol=1e-4,
+                    verbose=config.numerical.verbose,
+                    vmap_method='sequential')[0]
 
     em_state = dataclasses.replace(em_state,
                                    A = em_state.A.at[:m].set(A_shrunk))
-    Q_new = solve_for_Q(em_state.A[:m], s1, s2, s3)
+    
+    Q_new = solve_for_Q(em_state.A[:m], s1, s2, s3,
+                        config.sparsity.alpha,
+                        config.sparsity.beta,
+                        n_orients)
 
     em_state = dataclasses.replace(em_state,
                                    Q = em_state.Q.at[:m, :m].set(Q_new))
     
     rel_A_change = relative_A_change_jax(A_shrunk, A_prev)
 
-
     return em_state, rel_A_change
 
 
-def _solve_for_Q(A, s1, s2, s3, alpha, beta, n_orients):
+def solve_for_a(Q, s1, s2, A, A_mask, lambda2, n_orients=3, max_iter=5000, 
+                tol=1e-5, verbose=0):
+    """
+    solve for A using group sparse proximal gradient.
+    """
+    if lambda2 == 0:
+        return jnp.linalg.solve(s2, s1.T).T
+
+    m = A.shape[0]
+    p = A.shape[1] // m
+
+    # ------------------------------------------------------------
+    # feature standardization and target whitening
+    # ------------------------------------------------------------
+
+    # precondition the problem to transform it into a standard least-squares
+    # space. this speeds up convergence and ensures the group lasso penalty
+    # treats all variances equally.
+
+    # standardize s2 by its diagonal
+    d = jnp.sqrt(jnp.diag(s2))
+    d_safe = jnp.maximum(d, 1e-12)
+    s2_tilde = s2 / jnp.outer(d_safe, d_safe)
+    s1_tilde = s1 / d_safe[None, :]
+
+    # whiten targets by Q^{-1/2} 
+    # (using eigh since Q is symmetric positive definite)
+    evals, evecs = jnp.linalg.eigh(Q)
+    evals_safe = jnp.maximum(evals, 1e-12)
+    
+    q_inv_sqrt = evecs @ jnp.diag(1.0 / jnp.sqrt(evals_safe)) @ evecs.T
+    q_sqrt = evecs @ jnp.diag(jnp.sqrt(evals_safe)) @ evecs.T
+
+    # apply to s1 and initial A
+    s1_tilde = q_inv_sqrt @ s1_tilde
+    A_tilde = (q_inv_sqrt @ A) * d_safe[None, :]
+
+    # ------------------------------------------------------------
+    # objective and related funcs
+    # ------------------------------------------------------------
+
+    def f_fun(x):
+        xs2 = x @ s2_tilde
+        return (jnp.trace(xs2 @ x.T) - 2.0 * jnp.trace(s1_tilde @ x.T))
+
+    def grad_fun(x):
+        return 2.0 * (x @ s2_tilde - s1_tilde)
+
+    def g_fun(x):
+        n_sources = m // n_orients
+
+        B = x.reshape(n_sources, n_orients, p, n_sources, n_orients)
+
+        norms = jnp.sqrt(jnp.sum(B * B, axis=(1, 4), keepdims=True))
+
+        return lambda2 * jnp.sum(norms)
+
+    def prox_fun(x, t):
+        n_sources = m // n_orients
+
+        B = x.reshape(n_sources, n_orients, p, n_sources, n_orients)
+
+        norms = jnp.sqrt(jnp.sum(B * B, axis=(1, 4), keepdims=True))
+
+        scale = jnp.maximum(1.0 - lambda2 * t / jnp.maximum(norms, 1e-12), 0.0)
+
+        B = B * scale
+        x_new = B.reshape(x.shape)
+
+        # enforce link testing constraints
+        x_new = x_new * A_mask
+
+        return x_new
+
+    # ------------------------------------------------------------
+    # FASTA
+    # ------------------------------------------------------------
+
+    fasta = Fasta(
+        f_fun,
+        g_fun,
+        grad_fun,
+        prox_fun,
+        beta=0.5,
+        n_iter=max_iter,
+        verbose=verbose,
+    )
+    
+    # we train on the preconditioned matrix
+    fasta.learn(A_tilde, tol)
+
+    A_tilde_new = fasta.coefs_
+
+    # ------------------------------------------------------------
+    # reverse preconditioning
+    # ------------------------------------------------------------
+    
+    A_new = (q_sqrt @ A_tilde_new) / d_safe[None, :]
+
+    return A_new
+
+
+def solve_for_Q(A, s1, s2, s3, alpha, beta, n_orients):
     sigma = s3 - A @ s1.T - s1 @ A.T + A @ s2 @ A.T
     sigma = 0.5 * (sigma + sigma.T)
 

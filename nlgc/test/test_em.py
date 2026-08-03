@@ -1,9 +1,8 @@
 from nlgc.opt.em import (EMState, em_blas, em_jax, 
                          _copycast_em_state_jax, solve_params)
 from nlgc.test.ssm_gen import gen_small_ssm, gen_sparse_var_ssm
-from nlgc.test.viz import (plot_transition_comparison, plot_transition_single, 
+from nlgc.test.viz import (plot_transition_comparison,  
                            plot_transition_blurred)
-from nlgc.opt.proximal import instantiate_proximal_solvers
 import numpy as np
 from nlgc.config import ModelConfig
 import jax.numpy as jnp
@@ -12,6 +11,7 @@ import matplotlib.pyplot as plt
 import time
 import jax
 import copy
+jax.config.update("jax_enable_x64", True)
 
 def make_initial_em_state(ssm, order=1, n_orients=1, max_iter=500,
                           n_warmup_iter=25):
@@ -283,16 +283,6 @@ def test_em_var3_scalar():
         seed=0,
     )
 
-    instantiate_proximal_solvers(
-        {
-            "n_orients": n_orients,
-            "order": order,
-            "alpha": 0.0,
-            "beta": 0.0,
-        },
-        N_sources=n_sources,
-    )
-
     em_state = make_initial_em_state(ssm, order=order, n_orients=n_orients)
 
     config = ModelConfig.from_legacy_kwargs(
@@ -389,8 +379,6 @@ def test_em_var_vector(
         }
     )
 
-    instantiate_proximal_solvers(config, N_sources=n_sources * n_orients)
-
     start = time.perf_counter()
 
     final_em_state, _ = solve_params(ssm.y, ssm.F, ssm.R, em_state, config, 
@@ -482,7 +470,7 @@ def test_em_var_vector_medium():
                        n_orients=3, 
                        order=3, 
                        T=4000,
-                       lambda_=0.2)
+                       lambda_=0.1)
 
 
 def test_em_var_vector_large():
@@ -495,8 +483,8 @@ def test_em_var_vector_large():
                        n_orients=3, 
                        order=2, 
                        T=5000,
-                       lambda_=0.05,
-                       sparsity=0.075)
+                       lambda_=0.1,
+                       sparsity=0.01)
     print(f"runtime: {runtime:.3f}s")
     
 
@@ -511,8 +499,8 @@ def test_em_var_vector_huge():
                        n_orients=3, 
                        order=2, 
                        T=5000,
-                       lambda_=0.05,
-                       sparsity=0.075,
+                       lambda_=0.1,
+                       sparsity=0.01,
                        plot_transition=True)
     
     print(f"runtime: {runtime:.3f}s")
@@ -600,8 +588,6 @@ def test_profile_em_blas_vs_jax(
         }
     )
 
-    instantiate_proximal_solvers(config, N_sources=m)
-
     em_state.A_mask = np.ones_like(em_state.A)
 
     ####################################################################
@@ -624,7 +610,7 @@ def test_profile_em_blas_vs_jax(
 
     blas_time = time.perf_counter() - t0
 
-    print(f"\nBLAS warmup")
+    print("\nBLAS warmup")
     print(f"  time      : {blas_time:.3f} s")
     print(f"  iterations: {em_blas_state.em_iter}")
 
@@ -648,7 +634,7 @@ def test_profile_em_blas_vs_jax(
 
     blas_time_full = time.perf_counter() - t0
 
-    print(f"\nBLAS full")
+    print("\nBLAS full")
     print(f"  time      : {blas_time_full:.3f} s")
     print(f"  iterations: {em_blas_state.em_iter}")
 
@@ -753,13 +739,6 @@ def test_profile_em_blas_vs_jax(
     
 
 if __name__ == '__main__':
-    # instantiate_proximal_solvers({
-    #     'n_orients': 1,
-    #     'order': 1,
-    #     'alpha': 0.0,
-    #     'beta': 0.0,
-    # }, N_sources=4)
-
     # print("running test EM recovers small ssm A parameter")
     # test_em_recovers_A()
     # print("pass\n\n")
@@ -804,9 +783,9 @@ if __name__ == '__main__':
     # test_em_var_vector_large()
     # print("pass\n\n")
 
-    # print("running test EM vector VAR(2) huge") 
-    # test_em_var_vector_huge()
-    # print("pass\n\n")
+    print("running test EM vector VAR(2) huge") 
+    test_em_var_vector_huge()
+    print("pass\n\n")
 
     # print("running test EM vector VAR(2) likelihood trajectory") 
     # test_em_var_vector_large_ll_trajectory()
@@ -816,6 +795,6 @@ if __name__ == '__main__':
     # test_em_var_vector_huge_ll_trajectory()
     # print("pass\n\n")
 
-    print("running test profile huge em jax vs blas") 
-    test_profile_em_blas_vs_jax()
-    print("done\n\n")
+    # print("running test profile huge em jax vs blas") 
+    # test_profile_em_blas_vs_jax()
+    # print("done\n\n")

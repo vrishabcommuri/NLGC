@@ -13,7 +13,6 @@ import dataclasses
 import jax
 import jax.numpy as jnp
 from nlgc.opt import NeuraLVAR, create_shared_mem, link_share_memory
-from nlgc.opt.proximal import instantiate_proximal_solvers
 from joblib import Parallel, delayed
 from multiprocessing import current_process
 from mne.utils import logger
@@ -226,10 +225,6 @@ def _learn_reduced_model_parallel(link_index, info_y, info_f, info_bias_r,
     
     # prevent oversubscription
     with threadpool_limits(limits=1, user_api='blas'):
-
-        # each process needs its own solver instance
-        instantiate_proximal_solvers(config, em_state.N_sources_upper)
-
         try:
             y, shm_y = link_share_memory(info_y)
             F, shm_f = link_share_memory(info_f)

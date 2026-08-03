@@ -7,13 +7,8 @@ import numpy as np
 def initialize_em_state(y, F, r, config, evoked=None, forward=None, noise_cov=None, 
                         weights=None):
     F_companion, R_companion, em_state = companion_init(y, F, r, config)
-    # em_iter spans BOTH phases -- solve_params runs em_blas for n_warmup_iter
-    # then em_jax for max_iter -- so the trajectory needs room for their sum.
-    # solve_params re-allocates this to the same size on every fit; keeping it
-    # here means the state is valid (_triage_em_state asserts non-None) for
-    # callers that use it before fitting.
-    em_state.log_likelihood = np.zeros(config.optimizer.n_warmup_iter +
-                                       config.optimizer.max_iter + 1)
+
+    em_state.log_likelihood = np.zeros(config.optimizer.max_iter + 1)
 
     if config.optimizer.warm_start:
         em_state.smoothed_state = warm_start_sources(evoked, forward, noise_cov, 

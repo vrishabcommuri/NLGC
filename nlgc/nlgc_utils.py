@@ -6,7 +6,6 @@ from nlgc.opt import NeuraLVAR, NeuraLVARCV
 from nlgc.stat import fdr_control
 from nlgc.bias_utils import debias_deviances
 from nlgc.parallel_gc import batched_test_links, multiprocess_test_links
-from nlgc.opt.proximal import instantiate_proximal_solvers
 from nlgc.utils.restriction import roi_to_link_restriction
 from nlgc.bias_utils import compute_bias
 from nlgc.utils.screen import sparsity_screen, wald_screen
@@ -115,8 +114,6 @@ class NLGC:
 def gc_extraction(y, F, R, ROIs, em_state, config):
     eff_eigenmodes = config.latent.n_eigenmodes * config.latent.n_orients
     
-    instantiate_proximal_solvers(config, em_state.N_sources_upper)
-
     lambda_range = config.sparsity.lambda_range
 
     if lambda_range is None:
@@ -138,28 +135,33 @@ def gc_extraction(y, F, R, ROIs, em_state, config):
         
     lambda_ = model_f.lambda_
 
-    from nlgc.test.viz import plot_transition_blurred
-    import matplotlib.pyplot as plt
+    if config.numerical.verbose > 2:
+        print("plotting transition matrices")
+        from nlgc.test.viz import plot_transition_blurred
+        import matplotlib.pyplot as plt
+        plot_transition_blurred(model_f._ravel_a(model_f._parameters[0]), em_state.N_sources_upper, 2)
+        plt.show()
 
-    plot_transition_blurred(model_f._ravel_a(model_f._parameters[0]), em_state.N_sources_upper, 2)
-    plt.show()
-
-    plot_transition_blurred(model_f._ravel_a(model_f._parameters[0]) > 0.0001, em_state.N_sources_upper, 2)
-    plt.show()
+        plot_transition_blurred(model_f._ravel_a(model_f._parameters[0]) > 0.0001, em_state.N_sources_upper, 2)
+        plt.show()
         
     if config.numerical.verbose:
         print(f"finished full model fit in {em_state.em_iter} EM iterations")
     
+    if config.numerical.verbose:
+        print("computing bias")
+
     bias_f = compute_bias(em_state, smoother_result, config)
+
+    if config.numerical.verbose:
+        print("link screening")
 
     sparsity, ROIs = sparsity_screen(em_state, smoother_result, ROIs, config)
     links_to_check = roi_to_link_restriction(ROIs, sparsity, 
-                                             eff_eigenmodes, config)
-    
+                                             eff_eigenmodes, config)    
     links_to_check = wald_screen(links_to_check, em_state, smoother_result, 
                                  config)
-
-
+    
     if config.numerical.verbose:
         print(f"Checking {len(links_to_check)} links...")
     

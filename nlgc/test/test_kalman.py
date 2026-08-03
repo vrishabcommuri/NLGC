@@ -1,15 +1,12 @@
 from nlgc.opt.kalman.filter import (forward_filter_jax, forward_filter_blas,
                                 rts_smoother_jax, rts_smoother_blas)
 from nlgc.opt.em import EMState
-from nlgc.test.test_em import make_initial_em_state
-from nlgc.test.ssm_gen import gen_small_ssm, gen_large_ssm, gen_sparse_var_ssm
+from nlgc.test.ssm_gen import gen_small_ssm, gen_large_ssm
 import numpy as np
 import dataclasses
 import jax
 import jax.numpy as jnp
 import time 
-
-
 
 
 def test_forward_filter_smoke():
@@ -25,7 +22,7 @@ def test_forward_filter_smoke():
         Q = ssm.Q,
     )
 
-    result = forward_filter_blas(ssm.y, ssm.F, ssm.R, em_state)
+    _, result = forward_filter_blas(ssm.y, ssm.F, ssm.R, em_state)
 
     assert result.filtered_state.shape == (ssm.N_times, ssm.N_sources)
     assert result.predicted_state.shape == (ssm.N_times, ssm.N_sources)
@@ -50,7 +47,7 @@ def test_forward_filter_estimation_improvement():
         Q = ssm.Q,
     )
 
-    result = forward_filter_blas(ssm.y, ssm.F, ssm.R, em_state)
+    _, result = forward_filter_blas(ssm.y, ssm.F, ssm.R, em_state)
     pred_rmse = np.sqrt(np.mean((result.predicted_state - ssm.x) ** 2))
     filt_rmse = np.sqrt(np.mean((result.filtered_state - ssm.x) ** 2))
     print(f"{pred_rmse=:.3f} vs {filt_rmse=:.3f}")
@@ -71,7 +68,7 @@ def test_forward_filter_kalman_gain():
         Q = ssm.Q,
     )
 
-    result = forward_filter_blas(ssm.y, ssm.F, ssm.R, em_state)
+    _, result = forward_filter_blas(ssm.y, ssm.F, ssm.R, em_state)
     innovation = ssm.y - result.predicted_state @ ssm.F.T
     S_empirical = np.cov(innovation.T)
     S_theory = ssm.F @ result.predicted_cov @ ssm.F.T + ssm.R
@@ -90,7 +87,7 @@ def test_model_mismatch_likelihood():
         Q = ssm.Q,
     )
 
-    true_ll = -forward_filter_blas(ssm.y, ssm.F, ssm.R, em_state)\
+    true_ll = -forward_filter_blas(ssm.y, ssm.F, ssm.R, em_state)[1]\
                 .negative_log_likelihood
 
     wrongA = 0.2 * np.eye(ssm.N_sources)
@@ -99,7 +96,7 @@ def test_model_mismatch_likelihood():
         A = wrongA,
     )
 
-    wrong_ll = -forward_filter_blas(ssm.y, ssm.F, ssm.R, wrong_em_state)\
+    wrong_ll = -forward_filter_blas(ssm.y, ssm.F, ssm.R, wrong_em_state)[1]\
                 .negative_log_likelihood
     
     assert true_ll > wrong_ll
@@ -119,7 +116,7 @@ def test_jax_filter_equivalence():
         Q = ssm.Q,
     )
 
-    blas_result = forward_filter_blas(ssm.y, ssm.F, ssm.R, em_state)
+    _, blas_result = forward_filter_blas(ssm.y, ssm.F, ssm.R, em_state)
     
     em_state = EMState(
         A = jnp.array(ssm.A),
@@ -128,7 +125,7 @@ def test_jax_filter_equivalence():
         N0 = jnp.zeros_like(blas_result.filtered_cov),
     )
 
-    jax_result = forward_filter_jax(
+    _, jax_result = forward_filter_jax(
         jnp.array(ssm.y), 
         jnp.array(ssm.F), 
         jnp.array(ssm.R),
@@ -172,9 +169,9 @@ def test_smoother_improves_state_estimate():
         Q = ssm.Q,
     )
 
-    filter_result = forward_filter_blas(ssm.y, ssm.F, ssm.R, em_state)
+    _, filter_result = forward_filter_blas(ssm.y, ssm.F, ssm.R, em_state)
 
-    smoother_result = rts_smoother_blas(ssm.y, ssm.F, ssm.R, em_state)
+    _, smoother_result = rts_smoother_blas(ssm.y, ssm.F, ssm.R, em_state)
 
     filter_rmse = np.sqrt(
         np.mean((filter_result.filtered_state - ssm.x) ** 2)
@@ -201,9 +198,9 @@ def test_smoother_preserves_final_state():
         Q = ssm.Q,
     )
 
-    filter_result = forward_filter_blas(ssm.y, ssm.F, ssm.R, em_state)
+    _, filter_result = forward_filter_blas(ssm.y, ssm.F, ssm.R, em_state)
 
-    smoother_result = rts_smoother_blas(ssm.y, ssm.F, ssm.R, em_state)
+    _, smoother_result = rts_smoother_blas(ssm.y, ssm.F, ssm.R, em_state)
 
     np.testing.assert_allclose(
         smoother_result.smoothed_state[-1],
@@ -224,7 +221,7 @@ def test_jax_smoother_equivalence():
         Q = ssm.Q,
     )
 
-    blas_result = rts_smoother_blas(ssm.y, ssm.F, ssm.R, em_state)
+    _, blas_result = rts_smoother_blas(ssm.y, ssm.F, ssm.R, em_state)
 
     em_state = EMState(
         A = jnp.array(ssm.A),
@@ -233,7 +230,7 @@ def test_jax_smoother_equivalence():
         N0 = jnp.zeros_like(blas_result.smoothed_cov),
     )
 
-    jax_result = rts_smoother_jax(
+    _, jax_result = rts_smoother_jax(
         jnp.array(ssm.y), 
         jnp.array(ssm.F), 
         jnp.array(ssm.R),
@@ -269,7 +266,7 @@ def benchmark_filter_speed(ssm, n_repeats=100):
     start = time.perf_counter()
 
     for _ in range(n_repeats):
-        blas_result = forward_filter_blas(ssm.y, ssm.F, ssm.R, em_state)
+        _, blas_result = forward_filter_blas(ssm.y, ssm.F, ssm.R, em_state)
 
     blas_time = time.perf_counter() - start
 
@@ -293,7 +290,7 @@ def benchmark_filter_speed(ssm, n_repeats=100):
     )
 
     # need to do one run first otherwise we'll be profiling compile time
-    jax_result = forward_filter_jax(*args)
+    _, jax_result = forward_filter_jax(*args)
 
     # block until finished
     jax.block_until_ready(jax_result.filtered_state)
@@ -304,7 +301,7 @@ def benchmark_filter_speed(ssm, n_repeats=100):
     start = time.perf_counter()
 
     for _ in range(n_repeats):
-        jax_result = forward_filter_jax(*args)
+        _, jax_result = forward_filter_jax(*args)
 
         # JAX async execution: force completion
         jax.block_until_ready(jax_result.filtered_state)

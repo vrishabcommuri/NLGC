@@ -2,7 +2,7 @@ import numpy as np
 import warnings
 from scipy import linalg
 
-from .opt.proximal import calculate_ss
+from nlgc.opt.proximal import calculate_ss
 
 
 def compute_bias(em_state, smoother_result, config):
@@ -192,12 +192,12 @@ def wald_by_idx(src, targ, q, a, x_bar, s_bar, b, A_mask, n_eigenmodes,
     _, dtot = a.shape
     s1, s2, s3, n = calculate_ss(x_bar, s_bar, b, m, p)
     eff_eigenmodes = n_eigenmodes * n_orients
-    
-    targ_block = slice(targ * n_orients, (targ + 1) * n_orients)
+
+    targ_block = slice(targ * eff_eigenmodes, (targ + 1) * eff_eigenmodes)
 
     src_cols = []
     for lag in range(p):
-        src_cols.extend(range(src * n_orients + lag * m, (src + 1) * n_orients + lag * m))
+        src_cols.extend(range(src * eff_eigenmodes + lag * m, (src + 1) * eff_eigenmodes + lag * m))
         
     delete_cols = set()
     if A_mask is not None:
@@ -208,7 +208,7 @@ def wald_by_idx(src, targ, q, a, x_bar, s_bar, b, A_mask, n_eigenmodes,
             delete_cols.update(removed_idx)
 
     valid_src_cols = [c for c in src_cols if c not in delete_cols]
-    
+
     if len(valid_src_cols) == 0:
         return 0.0
 

@@ -1,7 +1,6 @@
 import numpy as np
 from scipy import linalg
-from .steady_state import (solve_ss_covariance_qz, 
-                           solve_ss_covariance_newton_raphson)
+from .steady_state import solve_ss_covariance
 from numpy.typing import NDArray
 import dataclasses
 from dataclasses import dataclass
@@ -52,6 +51,31 @@ def _copycast_rtssmoother_result_numpy(smoother_result):
     )
 
 
+def forward_filter_preamble(A, F, Q, R, P0):
+    N_sensors, _ = F.shape
+    (P_pred, N_pred) = solve_ss_covariance(A, F, Q, R, P0)
+
+    FP_pred = F @ P_pred 
+    innovation_cov = FP_pred @ F.T + R
+    (chol, lflag) = linalg.cho_factor(innovation_cov)
+
+    # S := F P F^T + R
+    # solve S kalman_gain = F P
+    # -> kalman_gain^T =  P F^T S^{-1}
+    kalman_gain = linalg.cho_solve((chol, lflag), FP_pred).T
+
+    innovation_precision = linalg.cho_solve((chol, lflag), np.eye(N_sensors))
+
+    # already multiplied by 1/2
+    logdet_innovation_cov = np.log(np.diag(chol)).sum() 
+    
+    # smoother filtering from prediction P_filt = (1 - K F) P_pred
+    P_filt = P_pred - kalman_gain @ FP_pred
+    
+    return P_pred, N_pred, kalman_gain, innovation_precision, \
+           logdet_innovation_cov, P_filt
+
+
 @jax.jit
 def forward_filter_jax(y, F, R, em_state):
     """
@@ -71,36 +95,32 @@ def forward_filter_jax(y, F, R, em_state):
     A = em_state.A
     Q = em_state.Q
     P0 = em_state.P0
-    N0 = em_state.N0
+
+    # companion jitter for inversion stability
+    jitter = 1e-8
+    Q += jnp.eye(Q.shape[0]) * jitter
+    Q = 0.5 * (Q + Q.T)
 
     #---------------------------------------------------------------------------
     # steady-state kalman filter
     #---------------------------------------------------------------------------
 
-    # companion jitter for inversion stability
-    jitter = 1e-8
-    Q += jnp.eye(Q.shape[0]) * jitter
+    # compute these quantities outside of the jax filter for numerical stability
+    dtype = A.dtype
+    out_types = (
+        jax.ShapeDtypeStruct((N_sources, N_sources), dtype), # P_pred
+        jax.ShapeDtypeStruct((N_sources, N_sources), dtype), # N_pred
+        jax.ShapeDtypeStruct((N_sources, N_sensors), dtype), # kalman_gain
+        jax.ShapeDtypeStruct((N_sensors, N_sensors), dtype), # innov_precision
+        jax.ShapeDtypeStruct((), dtype),                     # logdet_innov_cov
+        jax.ShapeDtypeStruct((N_sources, N_sources), dtype), # P_filt
+    )
 
-    (P_pred, N_pred) = solve_ss_covariance_newton_raphson(A.T, F.T, Q, R, 
-                                                          P0, N0)
-
-    FP_pred = F @ P_pred 
-    innovation_cov = FP_pred @ F.T + R
-    (chol, lflag) = jax.scipy.linalg.cho_factor(innovation_cov)
-
-    # S := F P F^T + R
-    # solve S kalman_gain = F P
-    # -> kalman_gain^T =  P F^T S^{-1}
-    kalman_gain = jax.scipy.linalg.cho_solve((chol, lflag), FP_pred).T
-
-    innovation_precision = jax.scipy.linalg.cho_solve((chol, lflag), 
-                                                      jnp.eye(N_sensors))
-
-    # already multiplied by 1/2
-    logdet_innovation_cov = jnp.log(jnp.diag(chol)).sum() 
-    
-    # smoother filtering from prediction P_filt = (1 - K F) P_pred
-    P_filt = P_pred - kalman_gain @ FP_pred
+    (P_pred, N_pred, kalman_gain, innovation_precision, 
+     logdet_innovation_cov, P_filt) = jax.pure_callback(
+        forward_filter_preamble, 
+        out_types, A, F, Q, R, P0, vmap_method='sequential'
+    )
 
     #---------------------------------------------------------------------------
     # filtering setup
@@ -151,8 +171,10 @@ def forward_filter_jax(y, F, R, em_state):
         kalman_gain = kalman_gain,
         negative_log_likelihood = negative_log_likelihood
     )
+
+    em_state = dataclasses.replace(em_state, P0=P_pred, N0=N_pred)
         
-    return filter_result
+    return em_state, filter_result
     
 
 def forward_filter_blas(y, F, R, em_state, use_lapack=True):
@@ -165,6 +187,7 @@ def forward_filter_blas(y, F, R, em_state, use_lapack=True):
 
     A = em_state.A
     Q = em_state.Q
+    P0 = em_state.P0
     predicted_state = np.empty((N_times, N_sources), dtype=np.float64)
     filtered_state = np.empty_like(predicted_state)
 
@@ -182,7 +205,7 @@ def forward_filter_blas(y, F, R, em_state, use_lapack=True):
     jitter = 1e-8
     Q += np.eye(Q.shape[0]) * jitter
 
-    P_pred = solve_ss_covariance_qz(A, F, Q, R)
+    P_pred, _ = solve_ss_covariance(A, F, Q, R, P0)
     
     FP_pred = F @ P_pred 
     innovation_cov = FP_pred @ F.T + R
@@ -260,9 +283,33 @@ def forward_filter_blas(y, F, R, em_state, use_lapack=True):
         kalman_gain = kalman_gain,
         negative_log_likelihood = negative_log_likelihood
     )
+
+    em_state = dataclasses.replace(em_state, P0=P_pred)
         
-    return filter_result
-        
+    return em_state, filter_result
+
+
+def rts_smoother_preamble(A, P_pred, P_filt):
+    # solve P_pred smoother_gain = A P_filt
+    # -> smoother_gain^T = P_filt A^T P_pred^{-1}  
+    try:
+        cho_factor = linalg.cho_factor(P_pred, lower=True, check_finite=False)
+        smoother_gain = linalg.cho_solve(cho_factor, A @ P_filt, check_finite=False).T
+    except np.linalg.LinAlgError:
+        smoother_gain, *_ = linalg.lstsq(P_pred, A @ P_filt, check_finite=False)
+        smoother_gain = smoother_gain.T
+
+    # J := smoother_gain
+    # P_smoothed = P_filt + J (P_smoothed − P_pred) J^T.
+    # P_smoothed = P_filt + J P_smoothed J^T - J P_pred J^T
+    # P_hat := P_filt - J P_pred J^T
+    # substitute for lyapunov form J P_smoothed J^T - P_smoothed + P_hat = 0
+    P_hat = P_filt - smoother_gain @ P_pred @ smoother_gain.T
+    P_smoothed = linalg.solve_discrete_lyapunov(smoother_gain, P_hat)
+    P_smoothed = 0.5 * (P_smoothed + P_smoothed.T)
+
+    return smoother_gain, P_smoothed       
+
 
 def rts_smoother_jax(y, F, R, em_state):
     #---------------------------------------------------------------------------
@@ -270,12 +317,11 @@ def rts_smoother_jax(y, F, R, em_state):
     #---------------------------------------------------------------------------
    
     assert y.shape[1] == F.shape[0]
-    N_times = y.shape[0]
-    N_sensors, N_sources = F.shape
+    N_sources = F.shape[1]
     A = em_state.A
 
     # smoother operates on filtered states
-    filter_result = forward_filter_jax(y, F, R, em_state)
+    em_state, filter_result = forward_filter_jax(y, F, R, em_state)
 
     filtered_state = filter_result.filtered_state
     predicted_state = filter_result.predicted_state
@@ -286,65 +332,41 @@ def rts_smoother_jax(y, F, R, em_state):
     # RTS smoother
     # --------------------------------------------------------------------------
 
-    # solve P_pred smoother_gain = A P_filt
-    # -> smoother_gain^T = P_filt A^T P_pred^{-1}    
-    cho_factor = jax.scipy.linalg.cho_factor(P_pred, lower=True, 
-                                             check_finite=False)
-    smoother_gain = jax.scipy.linalg.cho_solve(cho_factor, A @ P_filt, 
-                                               check_finite=False).T
-
-    
-    # J := smoother_gain
-    # P_smoothed = P_filt + J (P_smoothed − P_pred) J^T.
-    # P_smoothed = P_filt + J P_smoothed J^T - J P_pred J^T
-    # P_hat := P_filt - J P_pred J^T
-    # substitute for lyapunov form J P_smoothed J^T - P_smoothed + P_hat = 0
-    P_hat = P_filt - smoother_gain @ P_pred @ smoother_gain.T
-
-    # solve_discrete lyapunov doesn't exist in jax ecosystem, so we use
-    # conjugate gradients:
-    # J := smoother_gain
-    # J P_smoothed J^T - P_smoothed + P_hat = 0
-    # L(P_smoothed) = P_smoothed - J P_smoothed J^T
-    # then L(P_smoothed) = P_hat can be solved by CG
-    def lyap_operator(x):
-        X = x.reshape(N_sources, N_sources) # CG takes vector input
-        Y = X - smoother_gain @ X @ smoother_gain.T
-        return Y.ravel()
-
-    b = P_hat.ravel() # GC rhs must be vector
-
-    x, info = jax.scipy.sparse.linalg.bicgstab(
-        lyap_operator,
-        b,
-        x0=P_filt.ravel(),      
-        tol=1e-8,
-        maxiter=10,
+    dtype = A.dtype
+    out_types = (
+        jax.ShapeDtypeStruct((N_sources, N_sources), dtype), # smoother_gain
+        jax.ShapeDtypeStruct((N_sources, N_sources), dtype), # P_smoothed
     )
 
-    P_smoothed = x.reshape(N_sources, N_sources)
+    smoother_gain, P_smoothed = jax.pure_callback(
+        rts_smoother_preamble,
+        out_types, A, P_pred, P_filt, vmap_method='sequential'
+    )
 
     #---------------------------------------------------------------------------
     # backward smoothing
     #--------------------------------------------------------------------------
 
-    indices = jnp.arange(N_times - 1)
+    def smoother_step(smoothed_t_plus_1, inputs):
+        filtered_t, predicted_t_plus_1 = inputs
+        
+        update_residual = smoothed_t_plus_1 - predicted_t_plus_1
 
-    def smoother_step(smoothed_state, t):
-        update_residual = smoothed_state[t + 1] - predicted_state[t + 1]
+        smoothed_t = filtered_t + smoother_gain @ update_residual
+    
+        return smoothed_t, smoothed_t
 
-        smoothed_state = smoothed_state.at[t].add(
-            smoother_gain @ update_residual
-        )
+    smoothed_last = filtered_state[-1]
 
-        return smoothed_state, None
-
-    smoothed_state, _ = jax.lax.scan(
+    _, smoothed_seq = jax.lax.scan(
         smoother_step,
-        filtered_state,
-        indices,
+        init=smoothed_last,
+        xs=(filtered_state[:-1], predicted_state[1:]),
         reverse=True,
     )
+    
+    # scan outputs are [t=0, t=1, ..., t=N-2]. Append the last state t=N-1
+    smoothed_state = jnp.vstack([smoothed_seq, smoothed_last[None, :]])
     
     smoother_result = RTSSmootherResult(
         smoothed_state = smoothed_state,   
@@ -353,7 +375,7 @@ def rts_smoother_jax(y, F, R, em_state):
         negative_log_likelihood = filter_result.negative_log_likelihood,
     )
 
-    return smoother_result
+    return em_state, smoother_result
 
 
 def rts_smoother_blas(y, F, R, em_state, use_lapack=True):
@@ -367,7 +389,7 @@ def rts_smoother_blas(y, F, R, em_state, use_lapack=True):
     A = em_state.A
     
     # smoother operates on filtered states
-    filter_result = forward_filter_blas(y, F, R, em_state, use_lapack)
+    em_state, filter_result = forward_filter_blas(y, F, R, em_state, use_lapack)
 
     filtered_state = filter_result.filtered_state.copy()
     predicted_state = filter_result.predicted_state
@@ -434,7 +456,7 @@ def rts_smoother_blas(y, F, R, em_state, use_lapack=True):
         negative_log_likelihood = filter_result.negative_log_likelihood,
     )
 
-    return smoother_result
+    return em_state, smoother_result
 
 
 
@@ -449,7 +471,7 @@ def disturbance_smoother_blas(y, F, R, em_state, use_lapack=True):
     A = em_state.A
     
     # smoother operates on filtered states
-    filter_result = forward_filter_blas(y, F, R, em_state, use_lapack)
+    em_state, filter_result = forward_filter_blas(y, F, R, em_state, use_lapack)
 
     innovation_precision = filter_result.innovation_precision
     kalman_gain = filter_result.kalman_gain
