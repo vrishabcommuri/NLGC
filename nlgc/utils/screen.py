@@ -80,16 +80,13 @@ def sparsity_screen(em_state, smoother_result, ROIs, config):
 def wald_screen(links_to_check, em_state, smoother_result, config):
     wald_scores = []
 
-    # set family-wise error rate with multiple comparison correction
-    # Bonferroni correction: alpha = 0.05 / number_of_tests
-    target_alpha = 0.05 / len(links_to_check)
+    target_alpha = 0.05
     
     surviving_links = []
     screened_links_to_check = []
 
     if config.numerical.verbose:
-        print(f"screening {len(links_to_check)} links at corrected alpha= "
-              f"{target_alpha}")
+        print(f"screening {len(links_to_check)} links at alpha={target_alpha}")
 
     for idx, (targ, src) in enumerate(links_to_check):
         curr_wald, k_dof = wald_by_idx(src, targ, em_state.Q, em_state.A, 

@@ -141,6 +141,10 @@ class ModelNumericalConfig:
     use_lapack: bool = True
     verbose: bool = False
 
+@dataclass(frozen=True)
+class ModelDebugConfig:
+    verbose: bool = False
+    plotlevel: int = 0
 
 @dataclass(frozen=True)
 class ModelConfig:
@@ -151,6 +155,7 @@ class ModelConfig:
     validation: ModelValidationConfig
     numerical: ModelNumericalConfig
     parallel: ModelParallelConfig
+    debug: ModelDebugConfig
 
     @classmethod
     def from_legacy_kwargs(cls, kwargs):
@@ -178,6 +183,7 @@ class ModelConfig:
         
         return cls(
             parallel = parallel,
+
             latent = ModelLatentConfig(
                 order = kwargs.pop("order"),
                 n_eigenmodes = kwargs.pop("n_eigenmodes", 2),
@@ -223,5 +229,10 @@ class ModelConfig:
             numerical = ModelNumericalConfig(
                 use_lapack = kwargs.pop("use_lapack", True),
                 verbose = kwargs.pop("verbose", False),
+            ),
+
+            debug = ModelDebugConfig(
+                verbose = kwargs.pop("verbose", False),
+                plotlevel = kwargs.pop("plotlevel", 0),
             ),
         )

@@ -135,15 +135,17 @@ def gc_extraction(y, F, R, ROIs, em_state, config):
         
     lambda_ = model_f.lambda_
 
-    # if config.numerical.verbose > 2:
-    print("plotting transition matrices")
-    from nlgc.test.viz import plot_transition_blurred
-    import matplotlib.pyplot as plt
-    plot_transition_blurred(model_f._ravel_a(model_f._parameters[0]), em_state.N_sources_upper, 2)
-    plt.show()
+    if config.debug.plotlevel > 0:
+        print("plotting transition matrices")
+        from nlgc.test.viz import plot_transition_blurred
+        import matplotlib.pyplot as plt
+        plot_transition_blurred(model_f._ravel_a(model_f._parameters[0]), 
+                                em_state.N_sources_upper, config.latent.order)
+        plt.show()
 
-    plot_transition_blurred(model_f._ravel_a(model_f._parameters[0]) > 0.0001, em_state.N_sources_upper, 2)
-    plt.show()
+        plot_transition_blurred(model_f._ravel_a(model_f._parameters[0]) > 0.0001, 
+                                em_state.N_sources_upper, config.latent.order)
+        plt.show()
         
     if config.numerical.verbose:
         print(f"finished full model fit in {em_state.em_iter} EM iterations")

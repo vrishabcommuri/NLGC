@@ -83,7 +83,7 @@ def solve_ss_covariance_qz(a, f, q, r):
         except ValueError:
             P, _, _ = control.dare(a.T, f.T, q, r, stabilizing=False, 
                                    method=None)
-    return P, None
+    return P, np.zeros_like(P)
 
 
 def solve_ss_covariance(a, f, q, r, s_init=None):
