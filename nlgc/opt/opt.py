@@ -1,6 +1,5 @@
 from multiprocessing import shared_memory, current_process
 import numpy as np
-import re
 import warnings
 from joblib import Parallel, delayed
 from sklearn import preprocessing
@@ -10,7 +9,6 @@ import mne
 from mne.utils import logger
 from nlgc.opt.em import solve_params
 from nlgc.opt.kalman.filter import forward_filter_blas
-from nlgc.utils.restriction import link_tuples_to_zero_indices
 import copy
 
 
@@ -25,8 +23,6 @@ class NeuraLVAR:
     _lls = None
     ll = None
     lambda_ = None
-    _zeroed_index = None
-    restriction = None
 
     def __init__(self, order, self_history=None, n_eigenmodes=None, 
                  n_orients=None, copy=True, standardize=False, normalize=False, 
@@ -70,34 +66,11 @@ class NeuraLVAR:
     def _fit(self, y, F, R, lambda_, em_state):
         warnings.filterwarnings('always')
         
-        m = em_state.N_sources_upper 
-        p = self.config.latent.order
-        n_eigenmodes = self.config.latent.n_eigenmodes
-        n_orients = self.config.latent.n_orients
-
-        zeroed_index = None
-        # TODO: rework restriction formatting to take tuple and deprecate using
-        # this string parsing approach
-        if self.restriction is not None:
-            src, targ = re.split(r'->', self.restriction)
-            src = int(src)
-            targ = int(targ)
-
-            zeroed_index = link_tuples_to_zero_indices([(src, targ)], m, p, 
-                                                        n_eigenmodes, n_orients)
-            
-        # convert zi = (i,j) to zi = [(i,j)]
-        if zeroed_index is not None and isinstance(zeroed_index, tuple):
-            zeroed_index = [zeroed_index]
-
-        self._zeroed_index = zeroed_index
-
         em_state, smoother_result = solve_params(
                 y, F, R,
                 em_state=em_state,
                 config=self.config,
                 lambda_=lambda_,
-                zeroed_index=zeroed_index,
         )
         
         return em_state, smoother_result
@@ -116,12 +89,7 @@ class NeuraLVAR:
         return (np.sqrt(np.sum(B * B, axis=(1, 4), keepdims=True)).sum())
     
 
-    def fit(self, y, F, R, lambda_, em_state, restriction=None):
-        # precedence: `(x or Match) is False` is always False, so the original
-        # form could never fire and malformed restrictions passed straight through
-        if restriction is not None and re.search('->', restriction) is None:
-            raise ValueError(f"restriction:{restriction} should be None or should have format 'i->j'!")
-        self.restriction = restriction
+    def fit(self, y, F, R, lambda_, em_state):        
         em_state, smoother_result = self._fit(y, F, R, lambda_, em_state)
         
         m = em_state.N_sources_upper
@@ -258,7 +226,7 @@ class NeuraLVARCV(NeuraLVAR):
         return None
     
 
-    def fit(self, y, F, R, em_state, restriction=None):
+    def fit(self, y, F, R, em_state):
         """Fits the model from given m/eeg data, forward gain and noise 
         covariance
 
@@ -267,14 +235,7 @@ class NeuraLVARCV(NeuraLVAR):
         R : ndarray of shape (n_channels, n_channels)
         em_state: 
         config: 
-        restriction : regular expression like 'i->j', default = None
-            i and j should be integers.
         """
-
-        if restriction is not None and re.search('->', restriction) is None:
-            raise ValueError(f"restriction:{restriction} should be None or should have format 'i->j'!")
-        self.restriction = restriction
-
         kf = TimeSeriesSplit(n_splits=self.cv)
         cvsplits = [split for split in kf.split(y.T)]
         lambda_range = self.config.sparsity.lambda_range

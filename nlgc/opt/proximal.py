@@ -33,7 +33,7 @@ def proximal_param_update(em_state, smoother_result, config, lambda_):
                     lambda_,
                     n_orients=n_orients,
                     max_iter=max_fasta_iter,
-                    tol=1e-4,
+                    tol=1e-8,
                     verbose=config.numerical.verbose,
                     vmap_method='sequential')
 

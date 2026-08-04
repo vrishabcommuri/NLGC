@@ -5,8 +5,7 @@
 # already imported via the nlgc/__init__.py -> nlgc.opt chain.
 import numpy as np
 
-from nlgc.utils.restriction import (jax_expand_zeroindex_masks,  
-                                    link_tuples_to_zero_indices)
+from nlgc.utils.restriction import link_to_A_mask
 from nlgc.opt.em import em_jax, _copycast_em_state_numpy
 from nlgc.bias_utils import compute_bias
 import dataclasses
@@ -20,9 +19,8 @@ from threadpoolctl import threadpool_limits
 jax.config.update("jax_enable_x64", True)
                                          
 
-def batch_em_state(em_state, zeroed_indices):
-    K = len(zeroed_indices)
-    A_masks = jax_expand_zeroindex_masks(zeroed_indices, em_state)
+def batch_em_state(em_state, A_masks):
+    K = len(A_masks)
 
     batched_state = dataclasses.replace(
         em_state,
@@ -78,10 +76,10 @@ def batched_test_links(links_to_check, y, F, R, lambda_, full_em_state, config):
     m = full_em_state.N_sources_upper
     nx = m // (eff_eigenmodes)
     fullmodel_log_likelihood = full_em_state.log_likelihood
-    p = config.latent.order
 
-    zeroed_indices = link_tuples_to_zero_indices(links_to_check, m, p, 
-                                                 n_eigenmodes, n_orients)
+    A_masks = []
+    for targ, src in links_to_check:
+        A_masks.append(link_to_A_mask(targ, src))
 
     batched_em = jax.pmap(
         em_jax, 
@@ -101,7 +99,7 @@ def batched_test_links(links_to_check, y, F, R, lambda_, full_em_state, config):
             
         stop = min(start + N_devices, K)
 
-        curr_zeroed = zeroed_indices[start:stop]
+        curr_zeroed = A_masks[start:stop]
         N_valid = len(curr_zeroed)
 
         if N_valid < N_devices:
@@ -162,7 +160,9 @@ def multiprocess_test_links(links_to_check, y, F, R, lambda_, em_state, config):
     eff_eigenmodes = config.latent.n_eigenmodes * config.latent.n_orients
     m = em_state.N_sources_upper
     nx = m // (eff_eigenmodes)
-    fullmodel_log_likelihood = em_state.log_likelihood
+
+    fullmodel_log_likelihood = em_state.log_likelihood[em_state.em_iter]
+    print(f"{fullmodel_log_likelihood=}")
 
     dev_raw = np.zeros((nx, nx))
     bias_r = np.zeros((nx, nx))
@@ -177,7 +177,7 @@ def multiprocess_test_links(links_to_check, y, F, R, lambda_, em_state, config):
     shared_bias_r, info_bias_r, shm_bias_r = create_shared_mem(bias_r)
     shared_ll_r, info_ll_r, shm_ll_r = create_shared_mem(dev_raw)
     shared_nonconv_flag, info_nonconv_flag, shm_nonconv_flag = \
-        create_shared_mem(dev_raw)
+        create_shared_mem(nonconv_flag)
     
     shared_args = (info_y, info_f, info_bias_r, info_ll_r, info_nonconv_flag) 
     args = (R, lambda_, em_state, config)  
@@ -193,7 +193,7 @@ def multiprocess_test_links(links_to_check, y, F, R, lambda_, em_state, config):
 
     ll_r = np.reshape(shared_ll_r, dev_raw.shape).copy()
     bias_r = np.reshape(shared_bias_r, dev_raw.shape).copy()
-    nonconv_flag = np.reshape(shared_nonconv_flag, dev_raw.shape).copy()
+    nonconv_flag = np.reshape(shared_nonconv_flag, nonconv_flag.shape).copy()
 
     for shm in (shm_nonconv_flag, shm_bias_r, shm_f, shm_ll_r, shm_y):
         shm.close()
@@ -203,7 +203,7 @@ def multiprocess_test_links(links_to_check, y, F, R, lambda_, em_state, config):
             print(f"\nUnlink shared-memory issue: {exc}")
 
     indices = tuple(z for z in zip(*links_to_check))
-    dev_raw[indices] = 2 * fullmodel_log_likelihood[em_state.em_iter]
+    dev_raw[indices] = 2 * fullmodel_log_likelihood
     dev_raw[indices] -= 2 * ll_r[indices]
 
     return dev_raw, bias_r, nonconv_flag
@@ -211,18 +211,23 @@ def multiprocess_test_links(links_to_check, y, F, R, lambda_, em_state, config):
 
 def _learn_reduced_model(targ, src, y, F, R, lambda_f, em_state, config):    
     print(f"reduced model {current_process().name} processing {src}->{targ}")
-    restriction = f"{src}->{targ}"
     
     model_r = NeuraLVAR.from_config(config)
-    em_state, smoother_result = model_r.fit(y, F, R, lambda_f, em_state, 
-                                            restriction=restriction)
 
+    em_state = dataclasses.replace(
+        em_state,
+        A_mask = link_to_A_mask(targ, src, em_state, config)
+    )
+    
+    em_state, smoother_result = model_r.fit(y, F, R, lambda_f, em_state)
+
+    ll = em_state.log_likelihood[em_state.em_iter]
     if config.numerical.verbose:
         print(f"\t reduced model {current_process().name} iters: "
-                f"{em_state.em_iter}")
+                f"{em_state.em_iter} ll: {ll}")
     
     bias = compute_bias(em_state, smoother_result, config)
-    ll = em_state.log_likelihood[em_state.em_iter]
+
     nonconv_flag = em_state.em_iter == config.optimizer.max_iter
     return ll, bias, nonconv_flag
 

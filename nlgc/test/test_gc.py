@@ -15,8 +15,8 @@ import jax
 import time
 from nlgc.opt.em import (solve_params, em_jax, _copycast_em_state_numpy)
 from nlgc.opt.proximal import instantiate_proximal_solvers
-from nlgc.parallel_gc import (link_tuples_to_zero_indices, 
-                              batch_em_state, slice_batched_output)
+from nlgc.parallel_gc import batch_em_state, slice_batched_output
+from nlgc.utils.restriction import link_to_A_mask
 from nlgc.config import ModelConfig
 from nlgc.test.ssm_gen import gen_sparse_var_ssm
 from nlgc.test.test_em import make_initial_em_state
@@ -26,6 +26,7 @@ from nlgc.nlgc_utils import gc_extraction
 from nlgc.bias_utils import debias_deviances
 from nlgc.stat import fdr_control
 import matplotlib.pyplot as plt
+import dataclasses
 jax.config.update("jax_enable_x64", True)
 
 show_plots = False
@@ -119,11 +120,17 @@ def test_zeroindex_vector_var3():
                                                 order=order)
 
     # (target, source) -- zeroes A[ROI 1 rows, ROI 0 cols], i.e. link 0 -> 1
-    links = [(1, 0)]
+    targ = 1
+    src = 0
 
-    zeroed_indices = link_tuples_to_zero_indices(links, em_state, config)
+    A_mask = link_to_A_mask(targ, src, em_state, config)
+    em_state = dataclasses.replace(
+        em_state, 
+        A = em_state.A * A_mask,
+        A_mask = A_mask
+    )
 
-    batched = batch_em_state(em_state, zeroed_indices)
+    batched = batch_em_state(em_state, [A_mask])
 
     mask = np.array(batched.A_mask[0])
 
@@ -153,16 +160,17 @@ def test_zeroindex_multiple_links():
     # (target, source): links 0 -> 1 and 2 -> 0
     links = [(1, 0), (0, 2)]
 
-    zeroed = link_tuples_to_zero_indices(links, em_state, config)
+    A_masks = []
+    for targ, src in links:
+        A_masks.append(link_to_A_mask(targ, src, em_state, config))
 
-    batched = batch_em_state(em_state, zeroed)
+    batched = batch_em_state(em_state, A_masks)
 
     mask1 = np.array(batched.A_mask[0])
     mask2 = np.array(batched.A_mask[1])
     mask = mask1.astype(bool) & mask2.astype(bool)
 
     expected1 = _expected_block_mask(n_sources, n_orients, order, src=0, dst=1)
-
 
     expected2 = _expected_block_mask(n_sources, n_orients, order, 
                                                src=2, dst=0)
@@ -186,9 +194,11 @@ def test_batch_shapes():
 
     links = [(0, 1), (1, 2), (2, 0)]
 
-    zeroed = link_tuples_to_zero_indices(links, em_state, config)
+    A_masks = []
+    for targ, src in links:
+        A_masks.append(link_to_A_mask(targ, src, em_state, config))
 
-    batched = batch_em_state(em_state, zeroed)
+    batched = batch_em_state(em_state, A_masks)
 
     K = len(links)
 
@@ -212,9 +222,11 @@ def test_masks_differ_between_links():
 
     links = [(0, 1), (1, 2), (2, 0)]
 
-    zeroed = link_tuples_to_zero_indices(links, em_state, config)
+    A_masks = []
+    for targ, src in links:
+        A_masks.append(link_to_A_mask(targ, src, em_state, config))
 
-    batched = batch_em_state(em_state, zeroed)
+    batched = batch_em_state(em_state, A_masks)
 
     masks = np.array(batched.A_mask)
 
@@ -243,10 +255,18 @@ def test_reduced_model_enforces_zero_block():
     # (target, source): link 0 -> 4, so A[ROI 4 rows, ROI 0 cols] must be zero
     links = [(4, 0)]
 
-    zeroed_indices = link_tuples_to_zero_indices(links, em_state, config)
+    A_masks = []
+    for targ, src in links:
+        A_masks.append(link_to_A_mask(targ, src, em_state, config))
+
+    em_state = dataclasses.replace(
+        em_state, 
+        A = em_state.A * A_masks[0],
+        A_mask = A_masks[0]
+    )
 
     reduced_state, _ = solve_params(ssm.y, ssm.F, ssm.R, em_state, config,
-                                    lambda_, zeroed_index=zeroed_indices)
+                                    lambda_)
 
     reduced_A = np.array(reduced_state.A)
     full_A = ssm.A
@@ -279,26 +299,31 @@ def test_batched_matches_sequential():
 
     links_to_check = [(0, 4), (1, 2), (2, 0)]
 
-    zeroed_indices = link_tuples_to_zero_indices(links_to_check, em_state, 
-                                                 config)
+    A_masks = []
+    for targ, src in links_to_check:
+        A_masks.append(link_to_A_mask(targ, src, em_state, config))
 
     sequential = []
 
     full_em_state, _ = solve_params(ssm.y, ssm.F, ssm.R, em_state, config, 
-                                    lambda_, zeroed_index=None)
+                                    lambda_)
 
-    for idx, zi in enumerate(zeroed_indices):
-        print("fitting sequential reduced model link "
-              f"{links_to_check[idx][0]}->{links_to_check[idx][1]}")
-        curr_reduced_em_state, _ = solve_params(ssm.y, ssm.F, ssm.R, em_state, 
-                                                config, lambda_, 
-                                                zeroed_index=[zi])
+    for idx, (targ, src) in enumerate(links_to_check):
+        print(f"fitting sequential reduced model link {src}->{targ}")
+        em_state_red = dataclasses.replace(
+            em_state, 
+            A = em_state.A * A_masks[idx],
+            A_mask = A_masks[idx]
+        )
+        curr_reduced_em_state, _ = solve_params(ssm.y, ssm.F, ssm.R, 
+                                                em_state_red, 
+                                                config, lambda_)
         
         sequential.append(curr_reduced_em_state)
 
     batched_state = batch_em_state(
         full_em_state,
-        zeroed_indices,
+        A_masks,
     )
 
     print("fitting pmapped reduced models")
@@ -377,13 +402,22 @@ def test_full_ll_exceeds_reduced():
     full_state, _ = solve_params(ssm.y, ssm.F, ssm.R, em_state, config, 
                                  lambda_, zeroed_index=None)
 
-    links = [(0, 4)]
-
-    zeroed_index = link_tuples_to_zero_indices(links, full_state, config)
     full_state = _copycast_em_state_numpy(full_state)
 
-    reduced_state, _ = solve_params(ssm.y, ssm.F, ssm.R, full_state, config, 
-                                    lambda_, zeroed_index=zeroed_index)
+    links = [(0, 4)]
+
+    A_masks = []
+    for targ, src in links:
+        A_masks.append(link_to_A_mask(targ, src, em_state, config))
+
+    red_state = dataclasses.replace(
+        full_state, 
+        A = em_state.A * A_masks[0],
+        A_mask = A_masks[0]
+    )
+
+    reduced_state, _ = solve_params(ssm.y, ssm.F, ssm.R, red_state, config, 
+                                    lambda_)
 
     ll_full = float(full_state.log_likelihood[-1])
     ll_reduced = float(reduced_state.log_likelihood[-1])
@@ -426,9 +460,10 @@ def test_pmap_benchmark():
         if src != dst:
             links_to_check.append((src, dst))
 
-    zeroed_indices = link_tuples_to_zero_indices(links_to_check,
-                                                 full_em_state,
-                                                 config)
+    A_masks = []
+    for targ, src in links_to_check:
+        A_masks.append(link_to_A_mask(targ, src, em_state, config))
+
 
     # ------------------------------------------------------------
     # Sequential
@@ -438,11 +473,15 @@ def test_pmap_benchmark():
 
     t0 = time.perf_counter()
 
-    for idx, zi in enumerate(zeroed_indices):
-        print(f"fit sequential {links_to_check[idx][0]}->"
-              f"{links_to_check[idx][1]}")
-        reduced_state, _ = solve_params(ssm.y, ssm.F, ssm.R, full_em_state,
-                                        config, lambda_, zeroed_index=[zi])
+    for idx, (targ, src) in enumerate(links_to_check):
+        print(f"fitting sequential reduced model link {src}->{targ}")
+        em_state_red = dataclasses.replace(
+            em_state, 
+            A = em_state.A * A_masks[idx],
+            A_mask = A_masks[idx]
+        )
+        reduced_state, _ = solve_params(ssm.y, ssm.F, ssm.R, em_state_red,
+                                        config, lambda_)
         sequential.append(reduced_state)
 
     t_seq = time.perf_counter() - t0
@@ -465,7 +504,7 @@ def test_pmap_benchmark():
     for start in range(0, K, n_devices):
         stop = min(start + n_devices, K)
 
-        curr_zeroed = zeroed_indices[start:stop]
+        curr_zeroed = A_masks[start:stop]
         
         # pad input
         if len(curr_zeroed) < n_devices:
@@ -490,7 +529,7 @@ def test_pmap_benchmark():
     for start in range(0, K, n_devices):
         stop = min(start + n_devices, K)
 
-        curr_zeroed = zeroed_indices[start:stop]
+        curr_zeroed = A_masks[start:stop]
         n_valid = len(curr_zeroed)
 
         if n_valid < n_devices:

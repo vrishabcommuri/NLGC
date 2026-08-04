@@ -197,7 +197,7 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, patch_idx,
         'use_es': config.validation.use_es,
         'nlgc_map_time': total_time
     }
-    if save_dir != None:
+    if save_dir is not None:
         generate_report(save_dir = save_dir, model = nlgc_obj, param_dict = nlgc_param_dict)
 
     return nlgc_obj

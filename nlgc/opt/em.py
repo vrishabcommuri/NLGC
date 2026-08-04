@@ -7,7 +7,6 @@ import jax
 import jax.numpy as jnp  
 from nlgc.opt.kalman.filter import (rts_smoother_blas, rts_smoother_jax)  
 from nlgc.opt.proximal import proximal_param_update  
-from nlgc.utils.restriction import expand_zeroindex_masks  
 from functools import partial  
 jax.config.update("jax_enable_x64", True)
 
@@ -63,40 +62,17 @@ def _copycast_em_state_jax(em_state):
     )
 
 
-def solve_params(y, F, R, em_state, config, lambda_, zeroed_index=None):
+def solve_params(y, F, R, em_state, config, lambda_):
     """
     top-level function to set up filters and optimizers
-
-    One call == one fit: `em_iter` and `log_likelihood` are per-fit quantities and
-    are reset here. `em_blas` indexes log_likelihood[em_iter+1] directly and
-    callers compare `em_iter == max_iter` to detect non-convergence -- both assume
-    a fresh count, so carrying one fit's counter into the next silently breaks
-    them (and overruns the trajectory).
     """
-    if zeroed_index is not None:
-        assert isinstance(zeroed_index, list)
-        assert len(zeroed_index) >= 1
-        assert [isinstance(zeroed_index[i], tuple)
-                for i in range(len(zeroed_index))]
-        A_mask = zeroed_index_to_mask(zeroed_index, em_state)
-    else:
-        A_mask = np.ones_like(em_state.A)
-
-    # dataclasses.replace, NOT in-place assignment: callers re-fit a state they
-    # still hold a reference to (see test_gc.test_full_ll_exceeds_reduced, which
-    # reads full_state.log_likelihood after re-fitting full_state). Rebinding
-    # log_likelihood on the caller's object would zero the array out from under
-    # them.
 
     em_state = dataclasses.replace(
         em_state,
-        A_mask=A_mask,
+        A = zero_entries(em_state.A, em_state.A_mask),
         em_iter=0,
         log_likelihood=np.zeros(config.optimizer.max_iter + 1),
     )
-    
-    em_state.A_mask = A_mask
-    em_state.A = zero_entries(em_state.A, em_state.A_mask)
 
     _triage_em_state(em_state)
 
@@ -108,7 +84,7 @@ def solve_params(y, F, R, em_state, config, lambda_, zeroed_index=None):
     if config.numerical.verbose:
         print(f"running JAX EM with {config.optimizer.max_iter} "
               "iterations")
-
+        
     em_state, smoother_result = em_jax(y, F, R, em_state, config, lambda_,
                                            config.optimizer.max_iter)
         
@@ -167,16 +143,17 @@ def em_jax(y, F, R, em_state, config, lambda_, N_iter):
             
             def print_progress():
                 jax.debug.print(
-                    "curr_iter={i}: curr_ll={ll}, rel_change={rc}, rel_A_change={rac}",
+                    "curr_iter={i}: curr_ll={ll} prev_ll={pll} rel_change={rc}, rel_A_change={rac}",
                     i=prev_iter,
                     ll=curr_ll,
+                    pll=prev_ll,
                     rc=rel_change,
                     rac=rel_A_change
                 )
 
             # only run the print callback every 25 iterations
             jax.lax.cond(
-                ((prev_iter % 25) == 0) & config.numerical.verbose,
+                ((prev_iter % 10) == 0) & config.numerical.verbose,
                 print_progress,
                 lambda: None
             )
@@ -209,11 +186,6 @@ def em_jax(y, F, R, em_state, config, lambda_, N_iter):
 def zero_entries(A, A_mask):
     A_masked = A * A_mask
     return A_masked 
-
-
-def zeroed_index_to_mask(zeroed_index, em_state):
-    assert len(zeroed_index) == 1
-    return expand_zeroindex_masks(zeroed_index, em_state)[0]
 
 
 def project_psd(Q, eps=1e-8):
