@@ -45,3 +45,22 @@ def link_to_A_mask(targ, src, em_state, config):
     A_mask[targ_block, :][:, src_cols] = 0.0
 
     return A_mask
+
+
+def mask_to_zeroed_index(A_mask):
+    """
+    Convert an A_mask into indices of coefficients to be forced to zero.
+
+    Parameters
+    ----------
+    A_mask : ndarray, shape (m, m*p)
+        Boolean or binary mask. False entries indicate coefficients to zero.
+
+    Returns
+    -------
+    tuple of lists
+        Tuple containing row and column indices:
+        ([row1, row2, ...], [col1, col2, ...])
+    """
+    zero_rows, zero_cols = np.where(~A_mask.astype(bool))
+    return (zero_rows.tolist(), zero_cols.tolist())

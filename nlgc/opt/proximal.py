@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import dataclasses
 from nlgc.opt.fastac import Fasta
 from functools import partial
+import numpy as np
 jax.config.update("jax_enable_x64", True)    
 
 
@@ -14,6 +15,7 @@ def proximal_param_update(em_state, smoother_result, config, lambda_):
     m = em_state.N_sources_upper
     max_fasta_iter = config.optimizer.max_fasta_iter
     p = config.latent.order
+    lagsparsity = config.sparsity.lagsparsity
 
     A_prev = em_state.A[:m]
     Q_upper = em_state.Q[:m, :m]
@@ -33,6 +35,7 @@ def proximal_param_update(em_state, smoother_result, config, lambda_):
                     lambda_,
                     n_orients=n_orients,
                     max_iter=max_fasta_iter,
+                    lagsparsity=lagsparsity,
                     tol=1e-8,
                     verbose=config.numerical.verbose,
                     vmap_method='sequential')
@@ -48,13 +51,17 @@ def proximal_param_update(em_state, smoother_result, config, lambda_):
     em_state = dataclasses.replace(em_state,
                                    Q = em_state.Q.at[:m, :m].set(Q_new))
     
+
+    obj, _, _, _ = penalized_q_objective(A_shrunk, Q_new, s1, s2, s3, lambda_, 
+                                         n_orients, lagsparsity)
+    
     rel_A_change = relative_A_change_jax(A_shrunk, A_prev)
 
-    return em_state, rel_A_change
+    return em_state, rel_A_change, obj
 
 
 def solve_for_a(Q, s1, s2, A, A_mask, lambda2, n_orients=3, max_iter=5000, 
-                tol=1e-5, verbose=0):
+                lagsparsity=True, tol=1e-5, verbose=0):
     """
     solve for A using group sparse proximal gradient.
     """
@@ -63,6 +70,8 @@ def solve_for_a(Q, s1, s2, A, A_mask, lambda2, n_orients=3, max_iter=5000,
 
     m = A.shape[0]
     p = A.shape[1] // m
+
+    assert np.count_nonzero(A != (A*A_mask)) == 0
 
     # ------------------------------------------------------------
     # feature standardization and target whitening
@@ -106,7 +115,10 @@ def solve_for_a(Q, s1, s2, A, A_mask, lambda2, n_orients=3, max_iter=5000,
 
         B = x.reshape(n_sources, n_orients, p, n_sources, n_orients)
 
-        norms = jnp.sqrt(jnp.sum(B * B, axis=(1, 4), keepdims=True))
+        if lagsparsity:
+            norms = jnp.sqrt(jnp.sum(B * B, axis=(1, 4), keepdims=True))
+        else:
+            norms = jnp.sqrt(jnp.sum(B * B, axis=(1, 2, 4), keepdims=True))
 
         return lambda2 * jnp.sum(norms)
 
@@ -115,15 +127,24 @@ def solve_for_a(Q, s1, s2, A, A_mask, lambda2, n_orients=3, max_iter=5000,
 
         B = x.reshape(n_sources, n_orients, p, n_sources, n_orients)
 
-        norms = jnp.sqrt(jnp.sum(B * B, axis=(1, 4), keepdims=True))
+        if lagsparsity:
+            norms = jnp.sqrt(jnp.sum(B * B, axis=(1, 4), keepdims=True))
+        else:
+            norms = jnp.sqrt(jnp.sum(B * B, axis=(1, 2, 4), keepdims=True))
 
         scale = jnp.maximum(1.0 - lambda2 * t / jnp.maximum(norms, 1e-12), 0.0)
 
         B = B * scale
         x_new = B.reshape(x.shape)
 
-        # enforce link testing constraints
-        x_new = x_new * A_mask
+        # !! need to unwhiten the A matrix to apply the mask correctly !!
+
+        # enforce link testing constraints in unrotated space
+        A_current = (q_sqrt @ x_new) / d_safe[None, :]
+        A_masked = A_current * A_mask
+        
+        # re-whiten to rotated space for next proxgrad step
+        x_new = (q_inv_sqrt @ A_masked) * d_safe[None, :]
 
         return x_new
 
@@ -151,7 +172,9 @@ def solve_for_a(Q, s1, s2, A, A_mask, lambda2, n_orients=3, max_iter=5000,
     # ------------------------------------------------------------
     
     A_new = (q_sqrt @ A_tilde_new) / d_safe[None, :]
-
+    
+    assert (A_new * (~A_mask.astype(bool)).astype(float)).sum() == 0
+    
     return A_new
 
 
@@ -164,15 +187,14 @@ def solve_for_Q(A, s1, s2, s3, alpha, beta, n_orients):
 
     idx = jnp.arange(n_blocks)
 
-    # (n_blocks, n_orients, n_blocks, n_orients)
     S = sigma.reshape(n_blocks, n_orients,
                       n_blocks, n_orients)
 
-    # Extract block diagonal
+    # extract block diagonal
     blocks = S[idx, :, idx, :]
     blocks = blocks + beta * jnp.eye(n_orients, dtype=sigma.dtype)
 
-    # Construct block-diagonal Q
+    # construct block-diagonal Q
     Q_new = jnp.zeros_like(sigma)
     Q_new = Q_new.reshape(n_blocks, n_orients,
                       n_blocks, n_orients)
@@ -182,6 +204,43 @@ def solve_for_Q(A, s1, s2, s3, alpha, beta, n_orients):
     Q_new = Q_new / (1.0 + alpha)
 
     return Q_new
+
+
+def penalized_q_objective(A, Q, s1, s2, s3, lambda_, n_orients, lagsparsity):
+    """
+    compute the penalized Q function objective (up to additive constants).
+    """
+
+    m = A.shape[0]
+    p = A.shape[1] // m
+
+    # -------- quadratic A term --------
+    quad = jnp.trace((A @ s2) @ A.T) - 2.0 * jnp.trace(s1 @ A.T)
+
+    # -------- covariance term --------
+    Sigma = s3 - A @ s1.T - s1 @ A.T + A @ s2 @ A.T
+
+    Sigma = 0.5 * (Sigma + Sigma.T)
+
+    sign, logdet = jnp.linalg.slogdet(Q)
+
+    q_term = logdet + jnp.trace(jnp.linalg.solve(Q, Sigma))
+
+    # -------- sparsity penalty --------
+    n_sources = m // n_orients
+
+    B = A.reshape(n_sources, n_orients, p, n_sources, n_orients)
+
+    if lagsparsity:
+        norms = jnp.sqrt(jnp.sum(B * B, axis=(1, 4)))
+    else:
+        norms = jnp.sqrt(jnp.sum(B * B, axis=(1, 2, 4)))
+
+    penalty = lambda_ * jnp.sum(norms)
+
+    total = quad + q_term + penalty
+
+    return total, quad, q_term, penalty
 
 
 def calculate_ss_jax(em_state, smoother_result):

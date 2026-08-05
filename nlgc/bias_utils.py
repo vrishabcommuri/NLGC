@@ -14,13 +14,11 @@ def compute_bias(em_state, smoother_result, config):
     P = smoother_result.smoothed_cov
     B = smoother_result.smoother_gain
 
-    n_eigenmodes = config.latent.n_eigenmodes
     n_orients = config.latent.n_orients
     p = config.latent.order
     
     bias = sample_path_bias(Q, A, x, P, B, A_mask, 
-                            n_eigenmodes, n_orients, 
-                            m, p)
+                            n_orients, m, p)
     return bias
 
 
@@ -43,33 +41,31 @@ def compute_bias_idx(source, target, em_state, smoother_result, config):
     return bias
 
 
-def _voxel_block(v, n_orient=3):
-    """Return slice for RAS components of voxel v."""
-    return slice(n_orient * v, n_orient * (v + 1))
-
-
-def sample_path_bias(q, a, x_bar, s_bar, b, A_mask, n_eigenmodes, n_orients, 
-                     m, p):
+def sample_path_bias(q, a, x_bar, s_bar, b, A_mask, n_orients, m, p):
     """Computes the expected complete-data bias in the deviance"""
     _, dtot = a.shape
-    
     s1, s2, s3, n = calculate_ss(x_bar, s_bar, b, m, p)
 
-    eff_eigenmodes = n_eigenmodes * n_orients
     bias = 0
     
-    dxn_voxels = m // n_orients
+    # sources couple covariance structure only within shared orients
+    n_sources = m // n_orients 
 
-    for idx_v in range(dxn_voxels):
-        block = _voxel_block(idx_v, n_orients)
+    # remove sources one by one and test the perturbation/optimism. 
+    # sources are coupled via shared orientations are removed as blocks, but
+    # otherwise sources are independent so we can proceed blockwise and sum to
+    # get the total bias
+    for idx_s in range(n_sources):
+        # block encompasses the entire source structure
+        block = slice(idx_s * n_orients, (idx_s + 1) * n_orients)
 
         ai = a[block, :]
         Q_block = q[block, block]
         Q_inv_block = np.linalg.inv(Q_block)
 
-        # residual 
+        # residual
         diff = s1[block, :] - ai @ s2
-        
+
         # gradient
         ldot_matrix = Q_inv_block @ diff
         ldot = ldot_matrix.reshape(-1)
@@ -77,26 +73,25 @@ def sample_path_bias(q, a, x_bar, s_bar, b, A_mask, n_eigenmodes, n_orients,
         # Hessian 
         ldotdot = -np.kron(Q_inv_block, s2)
 
-        delete_idxs = []
+        delete_idxs_1d = []
+        source_start = idx_s * n_orients
 
-        idx_large_voxel = idx_v // n_eigenmodes
-        voxel_start = idx_large_voxel * eff_eigenmodes
+        for ori in range(n_orients):
+            global_row_idx = source_start + ori
+            
+            removed_cols = transition_mask_to_parameter_indices(A_mask, 
+                                                                global_row_idx, 
+                                                                m, dtot)
+            for col in removed_cols:
+                # gradient is flattened, so translate to flat (1d) idxs
+                delete_idxs_1d.append(ori * dtot + col)
 
-        for idx in range(voxel_start, voxel_start + eff_eigenmodes):
-            removed_idx = transition_mask_to_parameter_indices(A_mask, idx, m, dtot)
-            delete_idxs.extend(removed_idx)
+        delete_idxs_1d = sorted(set(delete_idxs_1d))
 
-        delete_idxs_3d = []
-        for r in range(n_orients):
-            for idx in delete_idxs:
-                delete_idxs_3d.append(r * dtot + idx)
-
-        delete_idxs_3d = sorted(set(delete_idxs_3d))
-
-        if len(delete_idxs_3d) > 0:
-            ldot = np.delete(ldot, delete_idxs_3d)
-            ldotdot = np.delete(ldotdot, delete_idxs_3d, axis=0)
-            ldotdot = np.delete(ldotdot, delete_idxs_3d, axis=1)
+        if len(delete_idxs_1d) > 0:
+            ldot = np.delete(ldot, delete_idxs_1d)
+            ldotdot = np.delete(ldotdot, delete_idxs_1d, axis=0)
+            ldotdot = np.delete(ldotdot, delete_idxs_1d, axis=1)
 
         step, _, _, _ = np.linalg.lstsq(-ldotdot, ldot, rcond=None)
         bias += n * (ldot @ step)
@@ -104,16 +99,25 @@ def sample_path_bias(q, a, x_bar, s_bar, b, A_mask, n_eigenmodes, n_orients,
     return bias
 
 
+def _voxel_block(v, n_orient=3):
+    """Return slice for RAS components of voxel v."""
+    return slice(n_orient * v, n_orient * (v + 1))
+
+
 def bias_by_idx(src, targ, q, a, x_bar, s_bar, b, A_mask, n_eigenmodes, 
                 n_orients, m, p):
     """Computes the expected bias for a specific source -> target connection."""
+    # TODO !!!this is probably a bug where the blocks are not correctly aligned
+    # to the effective eigenmodes, resulting in incorrect steps in the iteration
+    # for eigenmodes > 1. since this func is vestigial for now, we can leave it,
+    # but we should come back to it
     
     _, dtot = a.shape
 
     s1, s2, s3, n = calculate_ss(x_bar, s_bar, b, m, p)
 
     eff_eigenmodes = n_eigenmodes * n_orients
-    
+
     # identify target block (rows in A)
     targ_block = _voxel_block(targ, n_orients)
 

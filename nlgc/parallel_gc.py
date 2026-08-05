@@ -162,7 +162,6 @@ def multiprocess_test_links(links_to_check, y, F, R, lambda_, em_state, config):
     nx = m // (eff_eigenmodes)
 
     fullmodel_log_likelihood = em_state.log_likelihood[em_state.em_iter]
-    print(f"{fullmodel_log_likelihood=}")
 
     dev_raw = np.zeros((nx, nx))
     bias_r = np.zeros((nx, nx))
@@ -184,7 +183,7 @@ def multiprocess_test_links(links_to_check, y, F, R, lambda_, em_state, config):
 
    
     n_jobs = min(config.parallel.n_workers, len(links_to_check))
-    print(f"{n_jobs=}")
+
     Parallel(n_jobs=n_jobs, verbose=10)(
         delayed(_learn_reduced_model_parallel)(
             link, *(shared_args + args)
@@ -209,8 +208,9 @@ def multiprocess_test_links(links_to_check, y, F, R, lambda_, em_state, config):
     return dev_raw, bias_r, nonconv_flag
 
 
-def _learn_reduced_model(targ, src, y, F, R, lambda_f, em_state, config):    
-    print(f"reduced model {current_process().name} processing {src}->{targ}")
+def _learn_reduced_model(targ, src, y, F, R, lambda_f, em_state, config):   
+    if config.numerical.verbose: 
+        print(f"reduced model {current_process().name} processing {src}->{targ}")
     
     model_r = NeuraLVAR.from_config(config)
 

@@ -10,6 +10,8 @@ from nlgc.utils.restriction import roi_to_link_restriction
 from nlgc.bias_utils import compute_bias
 from nlgc.utils.screen import sparsity_screen, wald_screen
 from nlgc.config import ModelMultiprocessConfig
+from nlgc.test.profile import pretty_print_elapsed
+import time
 
 class NLGC:
     """NLGC object
@@ -120,6 +122,7 @@ def gc_extraction(y, F, R, ROIs, em_state, config):
         raise ValueError("lambda range must be a float or list of floats")
     
     if config.numerical.verbose:
+        start = time.time()
         print("running full model fit")
 
     if len(lambda_range) > 1:
@@ -135,6 +138,13 @@ def gc_extraction(y, F, R, ROIs, em_state, config):
         
     lambda_ = model_f.lambda_
 
+    if config.numerical.verbose:
+        end = time.time()
+        elapsed = end - start
+
+        print(f"finished full model fit in {em_state.em_iter} EM iterations.")
+        pretty_print_elapsed(elapsed)
+
     if config.debug.plotlevel > 0:
         print("plotting transition matrices")
         from nlgc.test.viz import plot_transition_blurred
@@ -147,9 +157,6 @@ def gc_extraction(y, F, R, ROIs, em_state, config):
                                 em_state.N_sources_upper, config.latent.order)
         plt.show()
         
-    if config.numerical.verbose:
-        print(f"finished full model fit in {em_state.em_iter} EM iterations")
-    
     if config.numerical.verbose:
         print("computing bias")
 
@@ -177,6 +184,11 @@ def gc_extraction(y, F, R, ROIs, em_state, config):
         dev_raw, bias_r, nonconv_flag = batched_test_links(links_to_check, 
                                                            y, F, R, lambda_,
                                                            em_state, config)
+        
+    if config.numerical.verbose:
+        print("GC testing finished. Total fit+link testing time:")
+        end = time.time()
+        pretty_print_elapsed(end-start)
 
     return dev_raw, bias_r, bias_f, model_f, nonconv_flag
 

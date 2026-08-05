@@ -174,6 +174,10 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, patch_idx,
         models.append(model_f)
         conv_flag[this_segment] = conv_flag_
 
+    # TODO !!!SHOULD NOT return nlgc object because a common workflow is to
+    # pickle the result and pickling a class is sensitive to internal class
+    # changes and will only be unpickleable with the exact version of nlgc used
+    # to produce it installed
     nlgc_obj = NLGC(name, nx, n, t, 
                     config.latent.order, 
                     config.latent.n_eigenmodes, 

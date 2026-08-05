@@ -102,6 +102,7 @@ class ModelLatentConfig:
 
 @dataclass(frozen=True)
 class ModelSparsityConfig:
+    lagsparsity: bool = True
     self_history : Union[int, None] = None
     alpha: float = 0.0
     beta: float = 0.0
@@ -126,8 +127,7 @@ class ModelOptimizerConfig:
     max_iter: int = field(default=500, metadata={"static": True})  
     max_cyclic_iter: int = 3  # legacy; deprecated
     max_fasta_iter: int = 1000
-    tol: float = 1e-5
-    A_tol: float = 5e-3
+    tol: float = 1e-4
     warm_start: bool = False
     
 @dataclass(frozen=True)
@@ -192,6 +192,7 @@ class ModelConfig:
             ),
 
             sparsity = ModelSparsityConfig(
+                lagsparsity = kwargs.pop("lagsparsity", True),
                 self_history = kwargs.pop("self_history", None),
                 alpha = kwargs.pop("alpha", 0.0),
                 beta = kwargs.pop("beta", 0.0),
@@ -214,8 +215,7 @@ class ModelConfig:
             optimizer = ModelOptimizerConfig(
                 max_iter = kwargs.pop("max_iter", 500),
                 max_cyclic_iter = kwargs.pop("max_cyclic_iter", 3),
-                tol = kwargs.pop("tol", 1e-5),
-                A_tol = kwargs.pop("A_tol", 5e-3),
+                tol = kwargs.pop("tol", 1e-4),
                 warm_start = kwargs.pop("warm_start", False),
                 max_fasta_iter = kwargs.pop("max_fasta_iter", 1000),
             ),
