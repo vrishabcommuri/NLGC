@@ -67,7 +67,7 @@ def solve_ss_covariance_newton_raphson(a, f, q, r, s_init, maxiter=50,
             return x_k, n_k
 
 
-    return solve_ss_covariance_qz(a, f, q, r)
+    return solve_ss_covariance_qz(a.T, f.T, q, r)
 
 
 def solve_ss_covariance_qz(a, f, q, r):
