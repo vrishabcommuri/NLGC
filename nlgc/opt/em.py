@@ -180,10 +180,10 @@ def em_jax(y, F, R, em_state, config, lambda_, N_iter):
 
             return convergence_count_new, curr_objective, em_new, smoother_result
 
-        # must have been below convergence tol threshold 10 times in a row
+        # must have been below convergence tol threshold N times in a row
         # before we declare final convergence. otherwise a transient small step
         # may be responsible for early stopping
-        return jax.lax.cond(convergence_count >= 10, skip, update, operand=None)
+        return jax.lax.cond(convergence_count >= 1, skip, update, operand=None)
         
     converged = 0
     init_objective = -jnp.inf

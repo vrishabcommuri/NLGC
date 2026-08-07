@@ -101,8 +101,8 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, patch_idx,
     n_segments = config.latent.n_segments
 
     # free-orientation forwards are the volume/mixed source space case, which
-    # prepare_eigenmodes supports via _reduce_lead_field_vol -- but only when the
-    # config actually asks for multiple orientations
+    # prepare_eigenmodes supports via _reduce_lead_field_vol -- but only when
+    # the config actually asks for multiple orientations
     if not is_fixed_orient(forward) and n_orients <= 1:
         raise ValueError(f"Can't work with free orientation forward: {forward} "
                          f"unless config.latent.n_orients > 1")
@@ -155,15 +155,16 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, patch_idx,
         y = M[:, this_segment * tt: (this_segment + 1) * tt]
         F = G
 
-        # keyword args: the positional form landed `evoked` in the `config` slot.
-        # initialize_em_state expects sensor-major y (data_driven_Q_init does
-        # U.T @ y with U shaped (n_sensors, n_sensors)).
+        # keyword args: the positional form landed `evoked` in the `config`
+        # slot. initialize_em_state expects sensor-major y (data_driven_Q_init
+        # does U.T @ y with U shaped (n_sensors, n_sensors)).
         F_companion, R_companion, em_state = initialize_em_state(
             y=y, F=F, r=r, config=config, evoked=evoked, forward=forward,
             noise_cov=noise_cov, weights=weights)
 
         # gc_extraction wants TIME-major y: it feeds the kalman layer, which
-        # asserts y.shape[1] == F.shape[0]. Opposite of initialize_em_state above.
+        # asserts y.shape[1] == F.shape[0]. Opposite of initialize_em_state
+        # above.
         d_raw_, bias_r_, bias_f_, model_f, conv_flag_ = \
             gc_extraction(y.T, F_companion, R_companion, ROIs=patch_idx,
                           em_state=em_state, config=config)
@@ -202,6 +203,7 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, patch_idx,
         'nlgc_map_time': total_time
     }
     if save_dir is not None:
-        generate_report(save_dir = save_dir, model = nlgc_obj, param_dict = nlgc_param_dict)
+        generate_report(save_dir = save_dir, model = nlgc_obj, 
+                        param_dict = nlgc_param_dict)
 
     return nlgc_obj

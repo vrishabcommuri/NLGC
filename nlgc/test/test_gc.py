@@ -14,7 +14,6 @@ import numpy as np
 import jax
 import time
 from nlgc.opt.em import (solve_params, em_jax, _copycast_em_state_numpy)
-from nlgc.opt.proximal import instantiate_proximal_solvers
 from nlgc.parallel_gc import batch_em_state, slice_batched_output
 from nlgc.utils.restriction import link_to_A_mask
 from nlgc.config import ModelConfig
@@ -40,6 +39,7 @@ def make_gc_test_setup(
     T=2000,
     lambda_=1,
     parallel_mode='shard',
+    n_eigenmodes=1,
     **ssm_kwargs,
 ):
     ssm, _, _ = gen_sparse_var_ssm(
@@ -52,16 +52,6 @@ def make_gc_test_setup(
         **ssm_kwargs,
     )
 
-    instantiate_proximal_solvers(
-        {
-            "n_orients": n_orients,
-            "order": order,
-            "alpha": 0.0,
-            "beta": 0.0,
-        },
-        N_sources=n_sources * n_orients,
-    )
-
     em_state = make_initial_em_state(
         ssm,
         order=order,
@@ -72,15 +62,15 @@ def make_gc_test_setup(
         {
             "order": order,
             "n_orients": n_orients,
-            "n_eigenmodes": 1,
+            "n_eigenmodes": n_eigenmodes,
             "parallel_mode": parallel_mode,
             "lambda_range": (lambda_,),
             "verbose": True,
             "n_devices": jax.device_count(),
-            "n_workers": jax.device_count(),
-            "negligible_candidate_link_energy_thr":0.2,
-            "tol":1e-5,
-            "A_tol":5e3,
+            "n_workers": 8,
+            "negligible_candidate_link_energy_thr":1.0,
+            "tol":1e-4,
+            "lagsparsity":False,
         }
     )
 
@@ -558,18 +548,30 @@ def test_pmap_benchmark():
 
 
 def test_gc_extraction(parallel_mode="shard"):
-    n_sources=50 
-    n_sensors=100
-    n_orients=3
+    # huge em
+    # n_sources=50 
+    # n_sensors=100
+    # n_orients=3
+    # n_eigenmodes=1
+    # order=2
+    # T=5000
+    # lambda_=0.2
+    # sparsity=0.01
+
+    n_sources=160 
+    n_sensors=75
+    n_orients=1
+    n_eigenmodes=2
     order=2
     T=5000
-    lambda_=0.2
-    sparsity=0.01
+    lambda_=0.05
+    sparsity=0.001
     print(f"jax device count: {jax.device_count()}")
 
     ssm, em_state, config, _ = make_gc_test_setup(n_sources=n_sources,
                                                   n_sensors=n_sensors,
                                                   n_orients=n_orients,
+                                                  n_eigenmodes=n_eigenmodes,
                                                   order=order,
                                                   T=T,
                                                   lambda_=lambda_,
@@ -579,13 +581,16 @@ def test_gc_extraction(parallel_mode="shard"):
     plot_transition_blurred(ssm.A, em_state.N_sources_upper, 2)
     plt.show()
 
-    ROIs = list(range(n_sources))
+    plot_transition_blurred((ssm.A != 0).astype(float), 
+                            em_state.N_sources_upper, 2)
+    plt.show()
+
+    ROIs = list(range(n_sources//n_eigenmodes))
     dev_raw, bias_r, bias_f, model_f, nonconv_flag = \
         gc_extraction(ssm.y, ssm.F, ssm.R, ROIs, em_state, config)
     
     avg_debiased_dev = debias_deviances(dev_raw, bias_f, bias_r)
 
-    n_eigenmodes = 1
     eff_eigenmodes = n_orients * n_eigenmodes
     alpha = 0.1
 
@@ -607,6 +612,21 @@ def test_gc_extraction(parallel_mode="shard"):
                         "Nonzero A"), 
                         bind_colorbars=False)
         plt.show()
+
+        plot_transition_comparison(ssm.A[:m], 
+                                   dev_raw, 
+                titles=("Ground Truth A", 
+                        "dev raw"), 
+                        bind_colorbars=False)
+        plt.show()
+
+        plot_transition_comparison(ssm.A[:m], 
+                                   avg_debiased_dev, 
+                titles=("Ground Truth A", 
+                        "avg deb dev"), 
+                        bind_colorbars=False)
+        plt.show()
+
         plot_transition_comparison(ssm.A[:m], 
                                    J, 
                 titles=("Ground Truth A", 
@@ -654,10 +674,10 @@ if __name__ == '__main__':
     # test_pmap_benchmark()
     # print("done\n\n")
 
-    print("running test pmapped gc_extraction") 
-    test_gc_extraction()
-    print("done\n\n")
-
-    # print("running test multiprocess gc_extraction") 
-    # test_gc_extraction(parallel_mode="multiprocess")
+    # print("running test pmapped gc_extraction") 
+    # test_gc_extraction()
     # print("done\n\n")
+
+    print("running test multiprocess gc_extraction") 
+    test_gc_extraction(parallel_mode="multiprocess")
+    print("done\n\n")

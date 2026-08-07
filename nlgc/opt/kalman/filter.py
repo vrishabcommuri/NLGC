@@ -515,7 +515,6 @@ def disturbance_smoother_blas(y, F, R, em_state, use_lapack=True):
             backward_information[t - 1] = proj_innovation_information[t] + \
                                           L.T @ backward_information[t]
             
-
     # sum_t (n_t^T C n_t) where n is disturbance vec and C is disturbance info
     # constructed from precision matrices. Similar to mahalanobis distance
     # x^T\Sigma^{-1}x. this gives us the average disturbances (state noise 

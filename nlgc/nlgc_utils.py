@@ -16,7 +16,8 @@ import time
 class NLGC:
     """NLGC object
 
-    Provides a an object including captured connectivity map via NLGC and its related parameters.
+    Provides a an object including captured connectivity map via NLGC and its
+    related parameters.
 
     Parameters
     ----------
@@ -77,7 +78,8 @@ class NLGC:
                                               self.bias_f, 
                                               self.bias_r)]
         if self.n_segments > 1:
-            return reduce(lambda x, y: x + y, debiased_deviances) / self.n_segments
+            return reduce(lambda x, y: x + y, debiased_deviances) / \
+                self.n_segments
         else:
             return debiased_deviances[0]
         
@@ -93,7 +95,8 @@ class NLGC:
         
         eff_eigenmodes = self.n_orients * self.n_eigenmodes
 
-        return fdr_control(self.avg_debiased_dev, self.p * (eff_eigenmodes**2), alpha)
+        return fdr_control(self.avg_debiased_dev, self.p * (eff_eigenmodes**2), 
+                           alpha)
 
 
     def pickle_as(self, filename):
@@ -104,7 +107,8 @@ class NLGC:
         filename : str
             file name (including directory address)
             """
-        if filename.endswith('.pkl') or filename.endswith('.pickled') or filename.endswith('.pickle'):
+        if filename.endswith('.pkl') or filename.endswith('.pickled') or \
+            filename.endswith('.pickle'):
             pass
         else:
             filename += '.pkl'
@@ -153,7 +157,8 @@ def gc_extraction(y, F, R, ROIs, em_state, config):
                                 em_state.N_sources_upper, config.latent.order)
         plt.show()
 
-        plot_transition_blurred(model_f._ravel_a(model_f._parameters[0]) > 0.0001, 
+        plot_transition_blurred(model_f._ravel_a(model_f._parameters[0]) \
+                                > 0.0001, 
                                 em_state.N_sources_upper, config.latent.order)
         plt.show()
         

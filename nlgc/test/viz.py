@@ -149,6 +149,24 @@ def plot_transition_blurred(A, m, order):
     plt.imshow(A, cmap='seismic', vmax=vm, vmin=-vm)
 
 
+def plot_transition_and_mask(A, A_mask, m, src="", targ=""):
+    A = A[:m]
+    A_mask = A_mask[:m]
+    fig, ax = plt.subplots(1,2)
+    vm = np.abs(A).max()
+    ax[0].imshow(A, cmap='seismic', vmax=vm, vmin=-vm)
+    ax[1].imshow(A_mask, vmax=1, vmin=-1, cmap='seismic')
+    plt.title(f"{src}->{targ}")
+
+
+def plot_transition_and_mask_blurred(A, A_mask, m, p, src="", targ=""):
+    A = A[:m].reshape(m, p, m).mean(axis=1)
+    A = scipy.signal.convolve2d(A, np.ones((3,3)), mode='same')
+    A_mask = A_mask[:m].reshape(m, p, m).mean(axis=1)
+    A_mask = scipy.signal.convolve2d(A_mask, np.ones((3,3)), mode='same')
+
+    plot_transition_and_mask(A, A_mask, m, src=src, targ=targ)
+    
 def plot_transition_single(
     A,
     n_sources=None,

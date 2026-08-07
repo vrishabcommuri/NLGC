@@ -8,6 +8,9 @@ import numpy as np
 from nlgc.utils.restriction import link_to_A_mask
 from nlgc.opt.em import em_jax, _copycast_em_state_numpy
 from nlgc.bias_utils import compute_bias
+# from nlgc.test.viz import (plot_transition_and_mask, 
+#                            plot_transition_and_mask_blurred)
+# import matplotlib.pyplot as plt
 import dataclasses
 import jax
 import jax.numpy as jnp

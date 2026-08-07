@@ -58,20 +58,24 @@ def prepare_eigenmodes(info, forward, noise_cov, labels, n_eigenmodes=2,
             raise ValueError('Not supported {:s}: labels are expected to be either an mne.SourceSpace or'
                              'mne.Forward object.'.format(labels))
     else:
+        eff_eigenmodes = n_orients * n_eigenmodes
         if n_orients != 1:
-            raise ValueError('Number of orientations is not 1 but is using fixed orientation')
+            assert n_eigenmodes == 1
+            print("\nGot fixed orientation source space but with"
+                  f" n_orients = {n_orients}! "
+                  "Treating orientations as temporally coupled eigenmodes "
+                  "rather than independent eigenmodes (default).\n")
+            
         print('fixed orientation')
         if isinstance(labels, Forward):
             weights, G, label_vertidx, src_flip = \
-                _reduce_lead_field(forward, labels, n_eigenmodes, 
-                                   n_orients, data=gain.T)
+                _reduce_lead_field(forward, labels, eff_eigenmodes, data=gain.T)
             label_names = []
             for i, label in enumerate(labels['src']):
                 label_names.extend(map(lambda x: f'{i}-{x}', label['vertno']))
         elif isinstance(labels, SourceSpaces):
             weights, G, label_vertidx, src_flip = \
-                _reduce_lead_field(forward, labels, n_eigenmodes,
-                                    n_orients, data=gain.T)
+                _reduce_lead_field(forward, labels, eff_eigenmodes, data=gain.T)
             label_names = []
             for i, label in enumerate(labels):
                 label_names.extend(map(lambda x: f'{i}-{x}', label['vertno']))
@@ -80,7 +84,7 @@ def prepare_eigenmodes(info, forward, noise_cov, labels, n_eigenmodes=2,
                 weights = None # not implemented
                 G, label_vertidx, src_flip = \
                     _extract_label_eigenmodes(forward, labels, gain.T, mode, 
-                                              n_eigenmodes, allow_empty=True)
+                                              eff_eigenmodes, allow_empty=True)
                 
                 label_names = [label.name for label in labels]
             else:
@@ -89,6 +93,7 @@ def prepare_eigenmodes(info, forward, noise_cov, labels, n_eigenmodes=2,
         else:
             raise ValueError('Not supported {:s}: labels are expected to be either an mne.SourceSpace or'
                             'mne.Forward object or list of mne.Labels.'.format(labels))
+        
 
     # test if there are empty columns
     sel = np.any(G, axis=0)
@@ -113,7 +118,7 @@ def prepare_eigenmodes(info, forward, noise_cov, labels, n_eigenmodes=2,
     return weights, G, label_vertidx, label_names, gain_info, whitener
 
 
-def _reduce_lead_field(forward, src, n_eigenmodes, n_orients, data=None):
+def _reduce_lead_field(forward, src, n_eigenmodes, data=None):
     import mne
     if data is None:
         logger.info('Using the raw forward solution')

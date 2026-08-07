@@ -16,6 +16,7 @@ def proximal_param_update(em_state, smoother_result, config, lambda_):
     max_fasta_iter = config.optimizer.max_fasta_iter
     p = config.latent.order
     lagsparsity = config.sparsity.lagsparsity
+    fasta_tol = config.optimizer.fasta_tol
 
     A_prev = em_state.A[:m]
     Q_upper = em_state.Q[:m, :m]
@@ -36,7 +37,7 @@ def proximal_param_update(em_state, smoother_result, config, lambda_):
                     n_orients=n_orients,
                     max_iter=max_fasta_iter,
                     lagsparsity=lagsparsity,
-                    tol=1e-8,
+                    tol=fasta_tol,
                     verbose=config.numerical.verbose,
                     vmap_method='sequential')
 

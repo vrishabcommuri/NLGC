@@ -128,6 +128,7 @@ class ModelOptimizerConfig:
     max_cyclic_iter: int = 3  # legacy; deprecated
     max_fasta_iter: int = 1000
     tol: float = 1e-4
+    fasta_tol: float = 1e-5
     warm_start: bool = False
     
 @dataclass(frozen=True)
@@ -218,6 +219,7 @@ class ModelConfig:
                 tol = kwargs.pop("tol", 1e-4),
                 warm_start = kwargs.pop("warm_start", False),
                 max_fasta_iter = kwargs.pop("max_fasta_iter", 1000),
+                fasta_tol = kwargs.pop("fasta_tol", 1e-5),
             ),
             
             validation = ModelValidationConfig(

@@ -73,28 +73,17 @@ def sample_path_bias(q, a, x_bar, s_bar, b, A_mask, n_orients, m, p):
         # Hessian 
         ldotdot = -np.kron(Q_inv_block, s2)
 
-        delete_idxs_1d = []
-        source_start = idx_s * n_orients
+        block_mask = A_mask[block, :] 
+        
+        keep_idx = block_mask.reshape(-1).astype(bool)
 
-        for ori in range(n_orients):
-            global_row_idx = source_start + ori
-            
-            removed_cols = transition_mask_to_parameter_indices(A_mask, 
-                                                                global_row_idx, 
-                                                                m, dtot)
-            for col in removed_cols:
-                # gradient is flattened, so translate to flat (1d) idxs
-                delete_idxs_1d.append(ori * dtot + col)
+        # slice down the gradient and Hessian to only free parameters
+        ldot_free = ldot[keep_idx]
+        ldotdot_free = ldotdot[keep_idx][:, keep_idx]
 
-        delete_idxs_1d = sorted(set(delete_idxs_1d))
-
-        if len(delete_idxs_1d) > 0:
-            ldot = np.delete(ldot, delete_idxs_1d)
-            ldotdot = np.delete(ldotdot, delete_idxs_1d, axis=0)
-            ldotdot = np.delete(ldotdot, delete_idxs_1d, axis=1)
-
-        step, _, _, _ = np.linalg.lstsq(-ldotdot, ldot, rcond=None)
-        bias += n * (ldot @ step)
+        if len(ldot_free) > 0:
+            step, _, _, _ = np.linalg.lstsq(-ldotdot_free, ldot_free, rcond=None)
+            bias += n * (ldot_free @ step)
 
     return bias
 
@@ -203,6 +192,8 @@ def wald_by_idx(src, targ, q, a, x_bar, s_bar, b, A_mask, n_eigenmodes,
     for lag in range(p):
         src_cols.extend(range(src * eff_eigenmodes + lag * m, (src + 1) * eff_eigenmodes + lag * m))
         
+    # TODO: replace complicated delete logic with simpler mask raveling like
+    # what is done in sample_path_bias
     delete_cols = set()
     if A_mask is not None:
         idx_large_voxel = targ // n_eigenmodes
@@ -240,7 +231,7 @@ def wald_by_idx(src, targ, q, a, x_bar, s_bar, b, A_mask, n_eigenmodes,
 def debias_deviances(dev_raw, bias_f, bias_r):
     d = dev_raw.copy()
     bias_mat = bias_r - bias_f
-    d[bias_r != 0] += bias_mat[bias_r != 0]
+    d[bias_r != 0] -= bias_mat[bias_r != 0]
     np.fill_diagonal(d, 0)
     d[d < 0] = 0
     return d
