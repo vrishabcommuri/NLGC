@@ -257,8 +257,10 @@ def _learn_reduced_model_parallel(link_index, info_y, info_f, info_bias_r,
         ll_r[targ, src] = ll
         bias_r[targ, src] = bias
         nonconv_flag[targ, src] = flag
+        
         for shm in (shm_y, shm_f, shm_bias_r, shm_ll_r, shm_nonconv_flag):
             shm.close()    
+
     
 
 

@@ -1,7 +1,7 @@
 import numpy as np
 import warnings
 from scipy import linalg
-
+from scipy.sparse.linalg import LinearOperator, cg
 from nlgc.opt.proximal import calculate_ss
 
 
@@ -47,6 +47,8 @@ def sample_path_bias(q, a, x_bar, s_bar, b, A_mask, n_orients, m, p):
     s1, s2, s3, n = calculate_ss(x_bar, s_bar, b, m, p)
 
     bias = 0
+
+    s2_factor = linalg.cho_factor(s2)
     
     # sources couple covariance structure only within shared orients
     n_sources = m // n_orients 
@@ -58,6 +60,9 @@ def sample_path_bias(q, a, x_bar, s_bar, b, A_mask, n_orients, m, p):
     for idx_s in range(n_sources):
         # block encompasses the entire source structure
         block = slice(idx_s * n_orients, (idx_s + 1) * n_orients)
+        block_mask = A_mask[block, :] 
+        keep_idx = block_mask.reshape(-1).astype(bool)
+        n_free = keep_idx.sum()
 
         ai = a[block, :]
         Q_block = q[block, block]
@@ -66,25 +71,96 @@ def sample_path_bias(q, a, x_bar, s_bar, b, A_mask, n_orients, m, p):
         # residual
         diff = s1[block, :] - ai @ s2
 
-        # gradient
+        # ---- gradient ----
         ldot_matrix = Q_inv_block @ diff
         ldot = ldot_matrix.reshape(-1)
 
-        # Hessian 
-        ldotdot = -np.kron(Q_inv_block, s2)
-
-        block_mask = A_mask[block, :] 
-        
-        keep_idx = block_mask.reshape(-1).astype(bool)
-
-        # slice down the gradient and Hessian to only free parameters
+        # slice down to only free parameters
         ldot_free = ldot[keep_idx]
-        ldotdot_free = ldotdot[keep_idx][:, keep_idx]
 
-        if len(ldot_free) > 0:
-            step, _, _, _ = np.linalg.lstsq(-ldotdot_free, ldot_free, rcond=None)
-            bias += n * (ldot_free @ step)
+        # ---- Hessian ----
+        # The old hessian code explicity constructed the hessian operator from
+        # the gradient: ldot = Qinv (s1 - A s2)
+        # 
+        # The hessian ldotdot is the gradient of ldot wrt to A. This is done by
+        # vectorizing the expression and then using the vec property 
+        # vec(ABC) = kron(C^T, B) * vec(A)
+        #
+        # Taking the gradient explicitly would yield
+        # ldotdot = -np.kron(Q_inv_block, s2)
+        # but this matrix representation would scale poorly for even modest Q. 
+        # Instead, the Hessian can be viewed as a linear operator; the matrix 
+        # representation simply encodes a linear transformation of an input, so 
+        # we can construct an operator that does this and solve for the input 
+        # using conjugate gradients, similar to what was done in the previous 
+        # versions of em_jax lyapunov and riccati solvers. So instead of solving
+        # ldotdot * x = ldot
+        # which constructed both ldotdot and ldot as matrices and using lstsq we
+        # can simply construct 
+        # H[x] = ldot 
+        # and use CG to solve for x.
+        def neg_hess_mv(v):
+            # here X is basically the perturbation of A along gradient dirs
+            X = np.zeros((n_orients, dtot), dtype=v.dtype)
+            # effectively ldotdot_free = ldotdot[keep_idx][:, keep_idx] we can
+            # use the same indices for keep_idx, since this is pertubation of A
+            X.reshape(-1)[keep_idx] = v
 
+            HX = Q_inv_block @ X @ s2
+
+            return HX.reshape(-1)[keep_idx]
+
+        H_op = LinearOperator(
+            shape=(n_free, n_free),
+            matvec=neg_hess_mv,
+            dtype=np.result_type(Q_inv_block.dtype, s2.dtype),
+        )
+
+        # ---- preconditioner ---- 
+        # For the unrestricted problem the inverse Hessian has form 
+        # H(X) = Q_block^{-1} @ X @ s2 = Y, therefore
+        # H^{-1}(Y) = Q_block @ Y @ s2^{-1} = X
+        #
+        # For the restricted problem, this preconditioner will get us close to
+        # the restricted operator. 
+
+        def precond_mv(v):
+            Y = np.zeros((n_orients, dtot), dtype=v.dtype)
+            Y.reshape(-1)[keep_idx] = v
+
+            X = Q_block @ Y
+            X = linalg.cho_solve(s2_factor, X.T).T
+
+            return X.reshape(-1)[keep_idx]
+
+        M_op = LinearOperator(
+            shape=(n_free, n_free),
+            matvec=precond_mv,
+            dtype=np.result_type(Q_block.dtype, s2.dtype),
+        )
+
+        n_iter = 0
+
+        residuals = []
+
+        def callback(xk):
+            nonlocal n_iter
+            n_iter += 1
+            r = ldot_free - H_op @ xk
+            residuals.append(np.linalg.norm(r))
+
+        step, info = cg(
+            H_op,
+            ldot_free,
+            M=M_op,
+            callback=callback,
+            rtol=1e-10,
+            atol=0.0,
+        )
+        
+        assert info == 0, f"bias estimation Hessian CG exit with code {info}"
+
+        bias += n * np.dot(ldot_free, step)
     return bias
 
 
