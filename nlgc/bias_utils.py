@@ -44,6 +44,8 @@ def compute_bias_idx(source, target, em_state, smoother_result, config):
 def sample_path_bias(q, a, x_bar, s_bar, b, A_mask, n_orients, m, p):
     """Computes the expected complete-data bias in the deviance"""
     _, dtot = a.shape
+    # TODO: should this be smoother stats (current) or plug-in estimate as in
+    # nlgc_test_utils branch?
     s1, s2, s3, n = calculate_ss(x_bar, s_bar, b, m, p)
 
     bias = 0

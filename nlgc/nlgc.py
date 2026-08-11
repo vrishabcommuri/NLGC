@@ -124,13 +124,7 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, patch_idx,
 
     # whiten the data
     M = np.dot(whitener, M)
-
-    # Normalization
-    M_normalizing_factor = linalg.norm(np.dot(M, M.T) / M.shape[1], ord='fro')
-    G_normalizing_factor = np.sqrt(np.sum(G ** 2, axis=0))
-    G /= G_normalizing_factor
-    M /= np.sqrt(M_normalizing_factor)
-    r = 1 / M_normalizing_factor
+    r = 1.0
 
     if len(patch_idx) == 0:
         raise ValueError("Length of patch_idx should not be zero")

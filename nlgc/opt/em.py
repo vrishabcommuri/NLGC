@@ -87,6 +87,8 @@ def solve_params(y, F, R, em_state, config, lambda_):
         
     em_state, smoother_result = em_jax(y, F, R, em_state, config, lambda_,
                                            config.optimizer.max_iter)
+    
+    em_state, smoother_result = _finalize_em_state(y, F, R, em_state)
         
     if config.numerical.verbose:
         print(f"EM finished in {em_state.em_iter} iterations")
@@ -94,11 +96,23 @@ def solve_params(y, F, R, em_state, config, lambda_):
     return em_state, smoother_result
 
 
+
 @partial(jax.jit, static_argnames=("config",))
 def em_jax(y, F, R, em_state, config, lambda_, N_iter):
     """
-    jax EM which assumes all routines called are JAX-compatible.
+    JAX EM which assumes all routines called are JAX-compatible.
+
+    convergence is based on the penalized objective. the model must remain below
+    the objective tolerance for `convergence_patience` consecutive iterations
+    before EM terminates.
+
+    the likelihood trajectory is retained for diagnostics, but the final
+    likelihood used for inference should be recomputed from the final returned
+    state by `_finalize_em_state`.
     """
+
+    # can be increased if desired
+    convergence_patience = 2
 
     def em_step(iter, carry):
         convergence_count, prev_objective, em_state, _ = carry
@@ -108,67 +122,93 @@ def em_jax(y, F, R, em_state, config, lambda_, N_iter):
 
         def update(_):
             prev_iter = em_state.em_iter
-            prev_ll = em_state.log_likelihood[prev_iter]
-            
 
+            # E-step 
             em_new, smoother_result = rts_smoother_jax(y, F, R, em_state)
 
+            # M-step
             em_new, rel_A_change, curr_objective = proximal_param_update(
-                                                         em_new, 
-                                                         smoother_result,
-                                                         config,
-                                                         lambda_)
-            
+                em_new,
+                smoother_result,
+                config,
+                lambda_,
+            )
 
+            # likelihood belonging to the smoother_result generated from the OLD
+            # parameter state, not em_new.A.
             curr_ll = -smoother_result.negative_log_likelihood
 
-            safe_prev_ll = jnp.where(jnp.abs(prev_ll) > 1e-12, prev_ll, 1.0)
-            safe_prev_objective = jnp.where(jnp.abs(prev_objective) > 1e-12, 
-                                            prev_objective, 1.0)
-
-            rel_change = jnp.where(
-                jnp.abs(prev_ll) > 1e-12,
-                jnp.abs(curr_ll - prev_ll) / jnp.abs(safe_prev_ll),
-                jnp.inf,
-            )
-
-            rel_obj_change = jnp.where(
-                jnp.abs(prev_objective) > 1e-12,
-                jnp.abs(curr_objective - prev_objective) / \
-                    jnp.abs(safe_prev_objective),
-                jnp.inf,
-            )
-
-            below_tol = (rel_obj_change <= config.optimizer.tol) | \
-                        jnp.isnan(curr_ll)
-
-            convergence_count_new = jnp.where(below_tol, convergence_count + 1, 
-                                              0)
-
-            converged = convergence_count_new >= 10
-
-            curr_iter = jnp.where(converged, prev_iter, prev_iter + 1)
+    
+            # Increment the iteration whenever we actually perform an EM update.
+            curr_iter = prev_iter + 1
 
             safe_iter = jnp.minimum(curr_iter, len(em_new.log_likelihood) - 1)
+
             updated_ll_trajectory = em_new.log_likelihood.at[safe_iter]\
-                                        .set(curr_ll)
-            
+                                          .set(curr_ll)
+
+            # ---- ll diagnostic ----
+            prev_ll = em_state.log_likelihood[
+                jnp.minimum(
+                    prev_iter,
+                    len(em_state.log_likelihood) - 1,
+                )
+            ]
+
+            rel_ll_change = jnp.where(
+                prev_iter > 0,
+                jnp.abs(curr_ll - prev_ll)
+                / jnp.maximum(jnp.abs(prev_ll), 1e-12),
+                jnp.inf,
+            )
+
+            # ---- objective convergence ----
+            first_iteration = jnp.isneginf(prev_objective)
+
+            rel_obj_change = jnp.where(
+                first_iteration,
+                jnp.inf,
+                jnp.abs(curr_objective - prev_objective)
+                / jnp.maximum(jnp.abs(prev_objective), 1e-12),
+            )
+
+            below_tol = (
+                (~first_iteration)
+                & (rel_ll_change <= config.optimizer.tol)
+                & (~jnp.isnan(curr_ll))
+            )
+
+            convergence_count_new = jnp.where(
+                below_tol,
+                convergence_count + 1,
+                0,
+            )
+
+
             def print_progress():
                 jax.debug.print(
-                    "curr_iter={i}: curr_obj={cobj} prev_obj={pobj} rel_obj_change={roc} curr_ll={ll} rel_ll_change(unused)={rc}",
-                    i=prev_iter,
+                    "curr_iter={i}: "
+                    "curr_obj={cobj} "
+                    "prev_obj={pobj} "
+                    "rel_obj_change={roc} "
+                    "curr_ll={ll} "
+                    "rel_ll_change={rlc} "
+                    "rel_A_change={rac} "
+                    "conv_count={cc}",
+                    i=curr_iter,
                     cobj=curr_objective,
                     pobj=prev_objective,
                     roc=rel_obj_change,
                     ll=curr_ll,
-                    rc=rel_change,
+                    rlc=rel_ll_change,
+                    rac=rel_A_change,
+                    cc=convergence_count_new,
                 )
 
-            # only run the print callback every N iterations
             jax.lax.cond(
-                ((prev_iter % 10) == 0) & config.numerical.verbose,
+                ((curr_iter % 10) == 0) & config.numerical.verbose,
                 print_progress,
-                lambda: None
+                lambda: None,
             )
 
             em_new = dataclasses.replace(
@@ -178,23 +218,75 @@ def em_jax(y, F, R, em_state, config, lambda_, N_iter):
                 log_likelihood=updated_ll_trajectory,
             )
 
-            return convergence_count_new, curr_objective, em_new, smoother_result
+            return convergence_count_new, curr_objective, em_new, \
+                   smoother_result
 
-        # must have been below convergence tol threshold N times in a row
-        # before we declare final convergence. otherwise a transient small step
-        # may be responsible for early stopping
-        return jax.lax.cond(convergence_count >= 1, skip, update, operand=None)
-        
-    converged = 0
+        # must have been below convergence tol threshold convergence_patience
+        # times in a row before we declare final convergence. otherwise a
+        # transient small step may be responsible for early stopping
+        return jax.lax.cond(
+            convergence_count >= convergence_patience,
+            skip,
+            update,
+            operand=None,
+        )
+
+    # ---- initialize objective ----
+    _, smoother_result_init = rts_smoother_jax(
+        y,
+        F,
+        R,
+        em_state,
+    )
+
+    # first iteration explicitly treated as non-converged.
     init_objective = -jnp.inf
-    _, smoother_result_init = rts_smoother_jax(y, F, R, em_state)
-    init_carry = (converged, init_objective, em_state, smoother_result_init)
 
-    converged, _, em_state, smoother_result = jax.lax.fori_loop(
+    init_carry = (
+        0,
+        init_objective,
+        em_state,
+        smoother_result_init,
+    )
+
+    _, _, em_state, smoother_result = jax.lax.fori_loop(
         lower=0,
         upper=N_iter,
         body_fun=em_step,
         init_val=init_carry,
+    )
+
+    return em_state, smoother_result
+
+
+@jax.jit
+def _finalize_em_state(y, F, R, em_state):
+    """
+    recompute the smoother and likelihood using the final parameter state
+    returned by EM.
+
+    this is intentionally separate from the final EM update because the
+    smoother_result generated inside an EM iteration corresponds to the
+    parameters BEFORE the subsequent proximal parameter update.
+    """
+
+    _, smoother_result = rts_smoother_jax(y, F, R,  em_state)
+
+    final_ll = -smoother_result.negative_log_likelihood
+
+    # Store the likelihood at the iteration corresponding to the
+    # final parameter state.
+    safe_iter = jnp.minimum(em_state.em_iter, len(em_state.log_likelihood) - 1)
+
+    updated_ll_trajectory = (
+        em_state.log_likelihood
+        .at[safe_iter]
+        .set(final_ll)
+    )
+
+    em_state = dataclasses.replace(
+        em_state,
+        log_likelihood=updated_ll_trajectory,
     )
 
     return em_state, smoother_result

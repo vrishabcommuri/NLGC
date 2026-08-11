@@ -163,11 +163,6 @@ def gc_extraction(y, F, R, ROIs, em_state, config):
         plt.show()
         
     if config.numerical.verbose:
-        print("computing bias")
-
-    bias_f = compute_bias(em_state, smoother_result, config)
-
-    if config.numerical.verbose:
         print("link screening")
 
     sparsity, ROIs = sparsity_screen(em_state, smoother_result, ROIs, config)
@@ -180,13 +175,13 @@ def gc_extraction(y, F, R, ROIs, em_state, config):
         print(f"Checking {len(links_to_check)} links...")
     
     if isinstance(config.parallel, ModelMultiprocessConfig):
-        dev_raw, bias_r, nonconv_flag = multiprocess_test_links(links_to_check, 
+        dev_raw, bias_r, bias_f, nonconv_flag = multiprocess_test_links(links_to_check, 
                                                                 y, F, R, 
                                                                 lambda_,
                                                                 em_state, 
                                                                 config)
     else:
-        dev_raw, bias_r, nonconv_flag = batched_test_links(links_to_check, 
+        dev_raw, bias_r, bias_f, nonconv_flag = batched_test_links(links_to_check, 
                                                            y, F, R, lambda_,
                                                            em_state, config)
         

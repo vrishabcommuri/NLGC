@@ -164,7 +164,20 @@ def multiprocess_test_links(links_to_check, y, F, R, lambda_, em_state, config):
     m = em_state.N_sources_upper
     nx = m // (eff_eigenmodes)
 
-    fullmodel_log_likelihood = em_state.log_likelihood[em_state.em_iter]
+    # do one warm-started full model to compare to warm-started reduced models
+    # the idea is that if EM takes full model k iterations and removing a param
+    # immediately puts us within the convergence envelope, it still takes two
+    # additional iterations to establish convergence. because EM is a
+    # hillclimbing algorithm, the reduced model ll will increase slightly,
+    # artificially diminishing the deviance difference. so do one run of the
+    # full model as if it were reduced and then compare to reduced lls
+    model_f = NeuraLVAR.from_config(config)
+    em_state_warm, smoother_result_warm = model_f.fit(y, F, R, lambda_, 
+                                                      em_state)
+    fullmodel_log_likelihood = em_state_warm\
+                                .log_likelihood[em_state_warm.em_iter]
+    
+    bias_f = compute_bias(em_state_warm, smoother_result_warm, config)
 
     dev_raw = np.zeros((nx, nx))
     bias_r = np.zeros((nx, nx))
@@ -208,7 +221,7 @@ def multiprocess_test_links(links_to_check, y, F, R, lambda_, em_state, config):
     dev_raw[indices] = 2 * fullmodel_log_likelihood
     dev_raw[indices] -= 2 * ll_r[indices]
 
-    return dev_raw, bias_r, nonconv_flag
+    return dev_raw, bias_r, bias_f, nonconv_flag
 
 
 def _learn_reduced_model(targ, src, y, F, R, lambda_f, em_state, config):   
@@ -257,7 +270,7 @@ def _learn_reduced_model_parallel(link_index, info_y, info_f, info_bias_r,
         ll_r[targ, src] = ll
         bias_r[targ, src] = bias
         nonconv_flag[targ, src] = flag
-        
+
         for shm in (shm_y, shm_f, shm_bias_r, shm_ll_r, shm_nonconv_flag):
             shm.close()    
 
