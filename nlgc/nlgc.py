@@ -93,7 +93,12 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, patch_idx,
 
     if config is None:
         config = ModelConfig.from_legacy_kwargs(kwargs)
-        
+
+
+    if any(l <= 0 for l in config.sparsity.lambda_range):
+        raise ValueError('only positive lambdas are allowed, got '
+                         f'{config.sparsity.lambda_range}')
+
     _check_reference(evoked)
 
     n_eigenmodes = config.latent.n_eigenmodes

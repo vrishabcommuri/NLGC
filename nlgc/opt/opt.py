@@ -7,7 +7,7 @@ from sklearn.model_selection import TimeSeriesSplit
 from multiprocessing import cpu_count
 import mne
 from mne.utils import logger
-from nlgc.opt.em import solve_params
+from nlgc.opt.em import solve_params, _copycast_em_state_numpy
 from nlgc.opt.kalman.filter import forward_filter_blas
 import copy
 
@@ -65,14 +65,14 @@ class NeuraLVAR:
 
     def _fit(self, y, F, R, lambda_, em_state):
         warnings.filterwarnings('always')
-        
+
         em_state, smoother_result = solve_params(
                 y, F, R,
                 em_state=em_state,
                 config=self.config,
                 lambda_=lambda_,
         )
-        
+
         return em_state, smoother_result
 
    
@@ -186,11 +186,13 @@ class NeuraLVARCV(NeuraLVAR):
 
         lambda_range = config.sparsity.lambda_range
         train, test = splits[split]
-        y_train, y_test = y[:, train], y[:, test]
-
+        # y is time-major (n_samples, n_channels), so folds index rows
+        print(f'y shape is {y.shape}')
+        y_train, y_test = y[train], y[test]
+        print(f'y train shape is {y_train.shape}')
         # full data/train data scale factor since the ll depends to the number
         # of observations, and the training set has a reduced number 
-        lambda_scale = np.sqrt(y.shape[-1] / y_train.shape[-1])
+        lambda_scale = np.sqrt(y.shape[0] / y_train.shape[0])
 
         for idx, lambda_full in enumerate(lambda_range):
             curr_lambda = lambda_full * lambda_scale
@@ -201,17 +203,25 @@ class NeuraLVARCV(NeuraLVAR):
             # otherwise it warm-starts from the previous (larger) lambda's fit
             fit_state, _ = self._fit(y_train, F, R, curr_lambda,
                                      copy.deepcopy(em_state))
+
+            # solve_params runs the jax pipeline and hands back an em_state
+            # whose fields are jax arrays. forward_filter_blas below reaches for
+            # .flags to check F-contiguity, which jax arrays do not have, so
+            # cast back to numpy at the boundary.
+            fit_state = _copycast_em_state_numpy(fit_state)
             A_cv = fit_state.A
 
-            # test set prediction
-            filter_result_test = forward_filter_blas(y_test, F, R,
-                                                     em_state=fit_state,
-                                                     use_lapack=True)
+            # test set prediction. forward_filter_blas returns
+            # (em_state, filter_result) -- binding the whole tuple made the
+            # attribute lookups below fail.
+            _, filter_result_test = forward_filter_blas(y_test, F, R,
+                                                        em_state=fit_state,
+                                                        use_lapack=True)
 
             # full-data prediction
-            filter_result_full = forward_filter_blas(y, F, R,
-                                                     em_state=fit_state,
-                                                     use_lapack=True)
+            _, filter_result_full = forward_filter_blas(y, F, R,
+                                                        em_state=fit_state,
+                                                        use_lapack=True)
 
 
             # TODO this should probably use the disturbance smoother to evaluate
@@ -230,18 +240,32 @@ class NeuraLVARCV(NeuraLVAR):
         """Fits the model from given m/eeg data, forward gain and noise 
         covariance
 
-        y : ndarray of shape (n_channels, n_samples)
+        y : ndarray of shape (n_samples, n_channels)
         F : ndarray of shape (n_channels, n_sources)
         R : ndarray of shape (n_channels, n_channels)
-        em_state: 
-        config: 
+        em_state:
+        config:
+
+        Notes
+        -----
+        y is TIME-major here. The kalman layer defines the convention -- both
+        forward_filter_blas and forward_filter_jax read N_times = y.shape[0] and
+        assert y.shape[1] == F.shape[0] -- and gc_extraction feeds this class
+        `y_seg.T` accordingly. This docstring previously said (n_channels,
+        n_samples) and the body split on the wrong axis, so every CV fold
+        partitioned CHANNELS instead of time and the filter asserted out.
         """
         kf = TimeSeriesSplit(n_splits=self.cv)
-        cvsplits = [split for split in kf.split(y.T)]
+        # split axis 0 = time. Splitting y.T here partitioned the channel axis,
+        # handing each fold a y_train with fewer rows than F had columns.
+        cvsplits = [split for split in kf.split(y)]
         lambda_range = self.config.sparsity.lambda_range
 
         cv_mat = np.zeros((2, len(cvsplits), len(lambda_range)), dtype=y.dtype)
-        pred_mat = np.zeros((len(cvsplits), len(lambda_range)) + y.shape, 
+        # holds filtered_state, which is (n_samples, n_sources) -- NOT y.shape.
+        # F.shape[1] is the companion source count, so this is n_sources*order.
+        pred_mat = np.zeros((len(cvsplits), len(lambda_range),
+                             y.shape[0], F.shape[1]),
                             dtype=y.dtype)
 
         # Use parallel processing
@@ -274,19 +298,18 @@ class NeuraLVARCV(NeuraLVAR):
                 shm.unlink()
             except Exception as exc:
                 logger.info(f"Unlink shared-memory issue: {exc}")
-
         # Find best mu
         # If Estimation stability criterion is used we need cv_mat[0] and 
         # pred_mat else we just use $\lambda * ||A||_1$ as the metric.
+        index = self.mse_path[0].mean(axis=0).argmin()
+
         if self.config.validation.use_es:
-            index = self.mse_path[0].mean(axis=0).argmax()
             try:
                 best_lambda = lambda_range[np.nanargmin(self.es_path[:index])]
             except ValueError:
                 best_lambda = lambda_range[index]
             logger.info(f'best_regularizing parameter: {best_lambda} using es')
         else:
-            index = self.mse_path[1].mean(axis=0).argmax()
             best_lambda = lambda_range[index]
             logger.info(f'best_regularizing parameter: {best_lambda}')
 
@@ -302,7 +325,9 @@ class NeuraLVARCV(NeuraLVAR):
         self.ll = -smoother_result.negative_log_likelihood
         self.lambda_ = best_lambda
 
-        _, t = y.shape
+        # y is time-major, so the sample count is axis 0. Reading axis 1 here
+        # normalised aic/bic by the CHANNEL count.
+        t, _ = y.shape
         df = (abs(em_state.A[:m]) > 1e-15).sum()
         self.aic = (2*df - 2*self.ll) / t
         self.bic = (np.log(t)*df - 2*self.ll) / t

@@ -60,6 +60,7 @@ def fdr_control(d, k, alpha, method='BY'):
         gc_test_indices = list(zip(row_indices[gc_idx_off], 
                                    col_indices[gc_idx_off]))
 
+    print(f'p_val {p_val}')
 
     j_val = np.zeros_like(d, dtype=float)
 

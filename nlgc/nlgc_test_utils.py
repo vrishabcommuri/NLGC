@@ -157,7 +157,7 @@ def zplane(z, p, title, lim=1):
     return fig
 
 # Save information in 
-def save_info(dir, a, JG, model, order, param_dict, ggc_model = None, J_GGC = None, ggc_model_extras = None,  zip_pkl = True):
+def save_info(dir, a, JG, model, order, param_dict, ggc_model = None, J_GGC = None, ggc_model_extras = None,  zip_pkl = True, debug_report = False):
 
     conv = int(np.floor((5/350)*a.shape[1]) + 1)
     if not os.path.exists(dir):
@@ -320,7 +320,9 @@ a: ground truth a matrix which VAR model is trying to estimate, contains GC link
 
     
 # Assume folder setup follows eelbrain pipeline
-def lead_field_generation(root, subject_id, src_space, n_eigenmodes, n_orients, loose=0.0, depth=0.0, pca=True, rank=None, trans = None):
+def lead_field_generation(root, subject_id, src_space, n_eigenmodes, n_orients, loose=0.0, depth=0.0, pca=True, rank=None, trans = None,
+                          vol_pos_origin=10.0, vol_pos_target=30.0):
+    
     full_empty_room_path = root + "meg/" + subject_id + "/" + subject_id + "_emptyroom-raw.fif"
     raw_empty_room = mne.io.read_raw_fif(full_empty_room_path)
     info = raw_empty_room.info
@@ -370,8 +372,8 @@ def lead_field_generation(root, subject_id, src_space, n_eigenmodes, n_orients, 
                     f'volume source space')
             print(f'inner_skull.surf not found, bounding volume with {bem_file}')
             vol_bounds = dict(bem=bem_file)
-        src_origin = mne.setup_volume_source_space(subject = subject_id, pos = 15.0, subjects_dir = subjects_dir, **vol_bounds)
-        src_target = mne.setup_volume_source_space(subject = subject_id, pos = 30.0, subjects_dir = subjects_dir, **vol_bounds)
+        src_origin = mne.setup_volume_source_space(subject = subject_id, pos = vol_pos_origin, subjects_dir = subjects_dir, **vol_bounds)
+        src_target = mne.setup_volume_source_space(subject = subject_id, pos = vol_pos_target, subjects_dir = subjects_dir, **vol_bounds)
         if src_space == 'mixed':
             surf_src = mne.setup_source_space(subject = subject_id, spacing = 'ico4', surface = 'white', subjects_dir = subjects_dir, add_dist = 'patch', verbose = None)
             src_origin = surf_src + src_origin
@@ -381,8 +383,6 @@ def lead_field_generation(root, subject_id, src_space, n_eigenmodes, n_orients, 
     # fwd_origin_data = fwd_origin['sol']
     weights, G, label_vertidx, label_names, gain_info, whitener = prepare_eigenmodes(info, fwd_origin, noise_cov, fwd_target, n_eigenmodes=n_eigenmodes, n_orients = n_orients, loose=loose, depth=depth, pca=pca, rank=rank,
     mode='svd_flip')
-    G_normalizing_factor = np.sqrt(np.sum(G ** 2, axis=0))
-    G /= G_normalizing_factor
     print(f'G shape: {G.shape}')
     return G, info, noise_cov, fwd_origin, weights
 
@@ -481,7 +481,7 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
 
     if G is None:
         
-        n_sensors = 40
+        n_sensors = 156
         n_voxels = int(np.floor(2*n_sensors/(n_eigenmodes*n_orients)))
         m = n_eigenmodes * n_orients * n_voxels
 
@@ -682,7 +682,7 @@ def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2,
         raise Exception('p should be at least 1')
     np.random.seed(seed)
     if (type(G) == type(None)):
-        n = 40 # number of sensors
+        n = 156 # number of sensors
         
         n_patches = int(np.floor(2*n/n_eigenmodes))
         print(f'n_patches is {n_patches}')
@@ -865,7 +865,9 @@ verbose: bool
 '''
 def nlgc_map_opt(M, G, r, order, self_history=None, var_thr=1.0, n_segments=1, lambda_range=None, max_iter=500,
                  max_cyclic_iter=3, tol=1e-5, sparsity_factor=0.0, cv=5, n_eigenmodes = 2, n_orients = 1, xs_init = None, a_init = None, use_es = False, patch_idx = None, verbose = False,
-                 parallel_mode = 'serial', n_devices = 1, n_workers = 1, n_warmup_iter = 25):
+                 parallel_mode = 'serial', n_devices = 1, n_workers = 1, n_warmup_iter = 25,
+                 use_wald_screen = True, wald_screen_alpha = 0.05,
+                 use_empirical_null = True):
     n_sensors, nnx = G.shape
     len_patch_idx = nnx // (n_eigenmodes * n_orients)
     _, t = M.shape
@@ -881,6 +883,9 @@ def nlgc_map_opt(M, G, r, order, self_history=None, var_thr=1.0, n_segments=1, l
         cv=cv, use_es=use_es, parallel_mode=parallel_mode,
         n_devices=n_devices, n_workers=n_workers,
         n_warmup_iter=n_warmup_iter,
+        use_wald_screen=use_wald_screen,
+        wald_screen_alpha=wald_screen_alpha,
+        use_empirical_null=use_empirical_null,
         patch_idx=tuple(patch_idx) if patch_idx is not None else (),
         verbose=verbose))
 
@@ -1012,10 +1017,20 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
         max_iter = 500, max_cyclic_iter = 3, tol = 1e-5, sparsity_factor = 0.0, cv = 5 ,var_thr = 1.0, alpha = .1, 
         m_active = 10, n_links = 10, warm_start = False, self_history = None, passed_evoked = None, use_es = False, 
         verbose = False, diff_lf = False, patch_idx = None, a_init = None, save_dir = None, run_ggc = False, ggc_kwargs = None,
-        parallel_mode = 'serial', n_devices = 1, n_workers = 1, n_warmup_iter = 25):
-    
+        parallel_mode = 'serial', n_devices = 1, n_workers = 1, n_warmup_iter = 25,
+        use_wald_screen = True, wald_screen_alpha = 0.05,
+        use_empirical_null = True,
+        vol_pos_origin = 10.0, vol_pos_target = 30.0, debug_report = False):
+
     if src_space not in ['surf', 'vol', 'mixed']:
         raise Exception(f'src_space {src_space} not implemented')
+
+    if lambda_range is not None:
+        _lams = ((lambda_range,) if isinstance(lambda_range, (int, float))
+                 else lambda_range)
+        if any(l <= 0 for l in _lams):
+            raise ValueError(
+                f'only positive lambdas are allowed, got {lambda_range}')
 
     if (passed_evoked != None):
         print('using passed in evoked')
@@ -1032,7 +1047,8 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
         G, info, noise_cov, fwd, weights = lead_field_generation(
             root=root, subject_id=subject_id, src_space=src_space,
             n_eigenmodes=n_eigenmodes, n_orients=n_orients, loose=loose,
-            depth=depth, pca=pca, rank=rank, trans=trans)
+            depth=depth, pca=pca, rank=rank, trans=trans,
+            vol_pos_origin=vol_pos_origin, vol_pos_target=vol_pos_target)
     elif (type(lf) != type(None)):
         print('Using passed in lead field')
         G = lf
@@ -1089,7 +1105,8 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
         f, info, noise_cov, fwd, weights = lead_field_generation(
             root=root, subject_id=subject_id, src_space=src_space,
             n_eigenmodes=n_eigenmodes, n_orients=n_orients, loose=loose,
-            depth=depth, pca=pca, rank=rank, trans=trans)
+            depth=depth, pca=pca, rank=rank, trans=trans,
+            vol_pos_origin=vol_pos_origin, vol_pos_target=vol_pos_target)
         print(f'Creating diff lf; shape of second lead field: {f.shape}')
     start_time = time.time()
     if run_ggc == False or (run_ggc and ggc_kwargs != None and ggc_kwargs['model_params'] == None):
@@ -1097,7 +1114,9 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
                                     var_thr=var_thr, max_iter=max_iter, max_cyclic_iter=max_cyclic_iter, tol=tol,
                                     sparsity_factor=sparsity_factor, n_eigenmodes = n_eigenmodes, n_orients = n_orients, xs_init = stc_init, a_init = a_init, use_es = use_es, patch_idx = patch_idx, verbose = verbose,
                                     parallel_mode = parallel_mode, n_devices = n_devices, n_workers = n_workers,
-                                    n_warmup_iter = n_warmup_iter)
+                                    n_warmup_iter = n_warmup_iter, use_wald_screen = use_wald_screen,
+                                    wald_screen_alpha = wald_screen_alpha,
+                                    use_empirical_null = use_empirical_null)
     else:
         temp_obj = ggc_kwargs['model']
     end_time = time.time()
@@ -1168,9 +1187,9 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
                 'ggc_mt': ggc_mt,
             }
         if run_ggc:
-            save_info(dir = save_dir,a = a, JG = JG, model = temp_obj, order = order, param_dict = param_dict, ggc_model = ggc_obj, J_GGC = J_GGC, ggc_model_extras = ggc_model_extras)
+            save_info(dir = save_dir,a = a, JG = JG, model = temp_obj, order = order, param_dict = param_dict, ggc_model = ggc_obj, J_GGC = J_GGC, ggc_model_extras = ggc_model_extras, debug_report = debug_report)
         else:
-            save_info(dir = save_dir,a = a, JG = JG, model = temp_obj, order = order, param_dict = param_dict)
+            save_info(dir = save_dir,a = a, JG = JG, model = temp_obj, order = order, param_dict = param_dict, debug_report = debug_report)
 
 
 

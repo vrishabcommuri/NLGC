@@ -283,7 +283,7 @@ def wald_by_idx(src, targ, q, a, x_bar, s_bar, b, A_mask, n_eigenmodes,
     valid_src_cols = [c for c in src_cols if c not in delete_cols]
 
     if len(valid_src_cols) == 0:
-        return 0.0
+        return 0.0, 0
 
     # extract parameter values for this specific link
     ai_edge = a[targ_block, :][:, valid_src_cols]

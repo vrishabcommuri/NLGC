@@ -191,26 +191,31 @@ def solve_for_a(Q, s1, s2, A, A_mask, lambda2, n_orients=3, max_iter=5000,
     return A_final
 
 
-def solve_for_Q(A, s1, s2, s3, alpha, beta, n_orients):
+def solve_for_Q(A, s1, s2, s3, alpha, beta, block_size):
+    """Block-diagonal innovation covariance, one block_size x block_size block
+    per source."""
     sigma = s3 - A @ s1.T - s1 @ A.T + A @ s2 @ A.T
     sigma = 0.5 * (sigma + sigma.T)
 
     m = sigma.shape[0]
-    n_blocks = m // n_orients
+    if m % block_size:
+        raise ValueError(
+            f'state dimension {m} is not divisible by block_size={block_size}')
+    n_blocks = m // block_size
 
     idx = jnp.arange(n_blocks)
 
-    S = sigma.reshape(n_blocks, n_orients,
-                      n_blocks, n_orients)
+    S = sigma.reshape(n_blocks, block_size,
+                      n_blocks, block_size)
 
     # extract block diagonal
     blocks = S[idx, :, idx, :]
-    blocks = blocks + beta * jnp.eye(n_orients, dtype=sigma.dtype)
+    blocks = blocks + beta * jnp.eye(block_size, dtype=sigma.dtype)
 
     # construct block-diagonal Q
     Q_new = jnp.zeros_like(sigma)
-    Q_new = Q_new.reshape(n_blocks, n_orients,
-                      n_blocks, n_orients)
+    Q_new = Q_new.reshape(n_blocks, block_size,
+                      n_blocks, block_size)
     Q_new = Q_new.at[idx, :, idx, :].set(blocks)
     Q_new = Q_new.reshape(m, m)
 

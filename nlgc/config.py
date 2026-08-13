@@ -113,6 +113,11 @@ class ModelSparsityConfig:
     lambda1: Union[float, None] = None
     lambda2: Union[float, None] = None
     negligible_candidate_link_energy_thr: float = 1.0
+    # Bool to use wald screen or not
+    use_wald_screen: bool = True
+    # Alpha for wald screen
+    wald_screen_alpha: float = 0.05
+    use_empirical_null: bool = True
 
 @dataclass(frozen=True)
 class ModelForwardConfig:
@@ -203,6 +208,9 @@ class ModelConfig:
                                 kwargs.pop("lambda_range", None)),
                 negligible_candidate_link_energy_thr = \
                     kwargs.pop("negligible_candidate_link_energy_thr", 1.0),
+                use_wald_screen = kwargs.pop("use_wald_screen", True),
+                wald_screen_alpha = kwargs.pop("wald_screen_alpha", 0.05),
+                use_empirical_null = kwargs.pop("use_empirical_null", True),
             ),
 
             forward = ModelForwardConfig(
