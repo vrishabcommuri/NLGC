@@ -149,16 +149,10 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, patch_idx,
         y = M[:, this_segment * tt: (this_segment + 1) * tt]
         F = G
 
-        # keyword args: the positional form landed `evoked` in the `config`
-        # slot. initialize_em_state expects sensor-major y (data_driven_Q_init
-        # does U.T @ y with U shaped (n_sensors, n_sensors)).
         F_companion, R_companion, em_state = initialize_em_state(
             y=y, F=F, r=r, config=config, evoked=evoked, forward=forward,
             noise_cov=noise_cov, weights=weights)
 
-        # gc_extraction wants TIME-major y: it feeds the kalman layer, which
-        # asserts y.shape[1] == F.shape[0]. Opposite of initialize_em_state
-        # above.
         d_raw_, bias_r_, bias_f_, model_f, conv_flag_ = \
             gc_extraction(y.T, F_companion, R_companion, ROIs=patch_idx,
                           em_state=em_state, config=config)

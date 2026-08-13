@@ -140,7 +140,7 @@ def _reduce_lead_field(forward, src, n_eigenmodes, data=None):
                 enumerate(zip(grouped_vertidx, grouped_vertidx_no_offset)):
         eig_src_weights, this_group_eigenmodes, percentage_explained = \
             _truncatedsvd(data[this_grouped_vertidx], n_eigenmodes, 
-                          return_pecentage_exaplained=True)
+                          return_pecentage_explained=True)
         
         print(
             f"patch {i}\n"
@@ -199,7 +199,7 @@ def _reduce_lead_field_vol(forward, src, n_eigenmodes, n_orients, data=None):
         print(f'subvoxel shape: {subvoxels.shape}')
         eig_src_weights, this_group_eigenmodes, percentage_explained = \
             _truncatedsvd_vol(subvoxels, n_eigenmodes, n_orients, 
-                              return_pecentage_exaplained=True)
+                              return_pecentage_explained=True)
         
         print(f'this_group_eigenmodes shape {this_group_eigenmodes.shape}')
         group_eigenmodes[coarse_idx * n_eigenmodes * n_orients:(coarse_idx + 1)\
@@ -406,7 +406,7 @@ def _extract_label_eigenmodes(fwd, labels, data=None, mode='mean',
 
 
 def _truncatedsvd_vol(a, n_components=2, n_orients = 3,
-                      return_pecentage_exaplained=False):
+                      return_pecentage_explained=False):
     n_total, n_sensors = a.shape
     n_voxels = n_total // n_orients
 
@@ -427,11 +427,11 @@ def _truncatedsvd_vol(a, n_components=2, n_orients = 3,
         for r in range(n_orients):
             modes[m * n_orients + r] = u[:, m] @ a3[:, r, :]
 
-    if return_pecentage_exaplained:
+    if return_pecentage_explained:
         return u, modes, s[:n_components].sum() / s.sum()
     return u, modes
 
-def _truncatedsvd(a, n_components=2, return_pecentage_exaplained=False):
+def _truncatedsvd(a, n_components=2, return_pecentage_explained=False):
     if n_components > min(*a.shape):
         raise ValueError('n_components={:d} should be smaller than '
                          'min({:d}, {:d})'.format(n_components, *a.shape))
@@ -439,7 +439,7 @@ def _truncatedsvd(a, n_components=2, return_pecentage_exaplained=False):
                           overwrite_a=True, check_finite=True,
                           lapack_driver='gesdd')    
 
-    if return_pecentage_exaplained:
+    if return_pecentage_explained:
         return u, vh[:n_components] * s[:n_components][:, None], \
                s[:n_components].sum() / s.sum()
     return u, vh[:n_components] * s[:n_components][:, None]

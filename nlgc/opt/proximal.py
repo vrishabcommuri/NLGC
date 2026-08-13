@@ -64,119 +64,131 @@ def proximal_param_update(em_state, smoother_result, config, lambda_):
 def solve_for_a(Q, s1, s2, A, A_mask, lambda2, n_orients=3, max_iter=5000, 
                 lagsparsity=True, tol=1e-5, verbose=0):
     """
-    solve for A using group sparse proximal gradient.
+    solve for A using group sparse proximal gradient descent.
     """
     if lambda2 == 0:
         return jnp.linalg.solve(s2, s1.T).T
 
     m = A.shape[0]
     p = A.shape[1] // m
-
-    assert np.count_nonzero(A != (A*A_mask)) == 0
+    n_sources = m // n_orients
 
     # ------------------------------------------------------------
     # feature standardization and target whitening
     # ------------------------------------------------------------
-
-    # precondition the problem to transform it into a standard least-squares
-    # space. this speeds up convergence and ensures the group lasso penalty
-    # treats all variances equally.
-
-    # standardize s2 by its diagonal
     d = jnp.sqrt(jnp.diag(s2))
     d_safe = jnp.maximum(d, 1e-12)
     s2_tilde = s2 / jnp.outer(d_safe, d_safe)
     s1_tilde = s1 / d_safe[None, :]
 
-    # whiten targets by Q^{-1/2} 
-    # (using eigh since Q is symmetric positive definite)
     evals, evecs = jnp.linalg.eigh(Q)
     evals_safe = jnp.maximum(evals, 1e-12)
     
     q_inv_sqrt = evecs @ jnp.diag(1.0 / jnp.sqrt(evals_safe)) @ evecs.T
     q_sqrt = evecs @ jnp.diag(jnp.sqrt(evals_safe)) @ evecs.T
 
-    # apply to s1 and initial A
     s1_tilde = q_inv_sqrt @ s1_tilde
     A_tilde = (q_inv_sqrt @ A) * d_safe[None, :]
 
     # ------------------------------------------------------------
-    # objective and related funcs
+    # objective 
     # ------------------------------------------------------------
+    # base Lipschitz constant approximation for minimum step size
+    h_norm = jnp.linalg.eigvalsh(s2_tilde).max()
+    tau_max = 0.99 / h_norm
 
-    def f_fun(x):
-        xs2 = x @ s2_tilde
-        return (jnp.trace(xs2 @ x.T) - 2.0 * jnp.trace(s1_tilde @ x.T))
+    # f = tr(A @ s2 @ A.T) - 2 * tr(A @ s1.T)
+    def calc_f(a_mat):
+        return jnp.sum(a_mat * (a_mat @ s2_tilde)) - 2.0 * \
+            jnp.sum(a_mat * s1_tilde)
 
-    def grad_fun(x):
-        return 2.0 * (x @ s2_tilde - s1_tilde)
+    f_old = calc_f(A_tilde)
+    A_prev = jnp.copy(A_tilde)
+    num_diff = 1.0
 
-    def g_fun(x):
-        n_sources = m // n_orients
+    # ------------------------------------------------------------
+    # proximal gradient loop 
+    # ------------------------------------------------------------
+    for i in range(max_iter):
+        if num_diff == 0:
+            break
+            
+        A_prev = A_tilde
 
-        B = x.reshape(n_sources, n_orients, p, n_sources, n_orients)
+        # Calculate gradient
+        grad = 2.0 * (A_tilde @ s2_tilde - s1_tilde)
 
-        if lagsparsity:
-            norms = jnp.sqrt(jnp.sum(B * B, axis=(1, 4), keepdims=True))
-        else:
-            norms = jnp.sqrt(jnp.sum(B * B, axis=(1, 2, 4), keepdims=True))
-
-        return lambda2 * jnp.sum(norms)
-
-    def prox_fun(x, t):
-        n_sources = m // n_orients
-
-        B = x.reshape(n_sources, n_orients, p, n_sources, n_orients)
-
-        if lagsparsity:
-            norms = jnp.sqrt(jnp.sum(B * B, axis=(1, 4), keepdims=True))
-        else:
-            norms = jnp.sqrt(jnp.sum(B * B, axis=(1, 2, 4), keepdims=True))
-
-        scale = jnp.maximum(1.0 - lambda2 * t / jnp.maximum(norms, 1e-12), 0.0)
-
-        B = B * scale
-        x_new = B.reshape(x.shape)
-
-        # !! need to unwhiten the A matrix to apply the mask correctly !!
-
-        # enforce link testing constraints in unrotated space
-        A_current = (q_sqrt @ x_new) / d_safe[None, :]
-        A_masked = A_current * A_mask
+        # find optimal step-size using quadratic approximation
+        # tau = 0.5 * sum(grad^2) / sum((grad @ s2) * grad)
+        temp2 = grad @ s2_tilde
+        den = jnp.sum(temp2 * grad)
+        num_grad = jnp.sum(grad * grad)
         
-        # re-whiten to rotated space for next proxgrad step
-        x_new = (q_inv_sqrt @ A_masked) * d_safe[None, :]
+        if den > 0:
+            tau = 0.5 * num_grad / den
+            tau = jnp.maximum(tau, tau_max)
+        else:
+            tau = tau_max
 
-        return x_new
+        # backtracking line search
+        while True:
+            # forward gradient step
+            temp = A_prev - tau * grad
 
-    # ------------------------------------------------------------
-    # FASTA
-    # ------------------------------------------------------------
+            # backward (proximal) step
+            B = temp.reshape(n_sources, n_orients, p, n_sources, n_orients)
+            if lagsparsity:
+                norms = jnp.sqrt(jnp.sum(B * B, axis=(1, 4), keepdims=True))
+            else:
+                norms = jnp.sqrt(jnp.sum(B * B, axis=(1, 2, 4), keepdims=True))
+            
+            # shrink by lambda2 * tau
+            scale = jnp.maximum(1.0 - (lambda2 * tau) /\
+                                jnp.maximum(norms, 1e-12), 0.0)
+            B = B * scale
+            A_tilde_new = B.reshape(temp.shape)
 
-    fasta = Fasta(
-        f_fun,
-        g_fun,
-        grad_fun,
-        prox_fun,
-        beta=0.5,
-        n_iter=max_iter,
-        verbose=verbose,
-    )
-    
-    # we train on the preconditioned matrix
-    fasta.learn(A_tilde, tol)
+            # masking constraints in unwhitened space
+            A_current = (q_sqrt @ A_tilde_new) / d_safe[None, :]
+            A_masked = A_current * A_mask
+            
+            # re-whiten to rotated space
+            A_tilde_new = (q_inv_sqrt @ A_masked) * d_safe[None, :]
 
-    A_tilde_new = fasta.coefs_
+            # check descent condition
+            f_new = calc_f(A_tilde_new)
+            diff = A_tilde_new - A_prev
+            
+            # f_new_upper = f_old + grad*diff + diff^2 / 2tau
+            f_new_upper = f_old + jnp.sum(grad * diff) + (jnp.sum(diff ** 2) /\
+                                                           (2.0 * tau))
+            
+            if f_new < f_new_upper or (tau / tau_max) < 1e-10:
+                A_tilde = A_tilde_new
+                break
+            else:
+                tau /= 2.0
+
+        # calculate changes for convergence
+        num_diff = jnp.sum(diff ** 2)
+        den_diff = jnp.sum(A_prev ** 2)
+        
+        change = jnp.sqrt(num_diff / den_diff) if den_diff > 0 else 1.0
+        
+        if verbose and i % 250 == 0:
+            print(f"iterate {i}/{max_iter}, change: {change:.6f}")
+            
+        if change < tol:
+            break
+            
+        f_old = f_new
 
     # ------------------------------------------------------------
     # reverse preconditioning
     # ------------------------------------------------------------
+    A_final = (q_sqrt @ A_tilde) / d_safe[None, :]
     
-    A_new = (q_sqrt @ A_tilde_new) / d_safe[None, :]
-    
-    assert (A_new * (~A_mask.astype(bool)).astype(float)).sum() == 0
-    
-    return A_new
+    return A_final
 
 
 def solve_for_Q(A, s1, s2, s3, alpha, beta, n_orients):

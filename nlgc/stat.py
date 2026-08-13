@@ -2,7 +2,7 @@ import numpy as np
 from scipy.stats import chi2, ncx2
 
 
-def fdr_control(d, k, alpha):
+def fdr_control(d, k, alpha, method='BY'):
     """
     CFDR control based on BY procedure
 
@@ -26,7 +26,12 @@ def fdr_control(d, k, alpha):
 
     # drop diagonal since we don't test it
     N_tests = N_sources * (N_sources - 1)
-    alpha_bar = alpha * (N_tests + 1) / (2 * N_tests * np.log(N_tests))
+    if method == 'BY':
+        alpha_bar = alpha * (N_tests + 1) / (2 * N_tests * np.log(N_tests))
+    elif method == 'BH':
+        alpha_bar = alpha * (N_tests + 1) / (2 * N_tests)
+    else:
+        raise Exception(f"FDR control method {method} not supported")
 
     # isolate the off-diagonals (valid tests) to avoid ranking the diagonals
     mask = ~np.eye(N_sources, dtype=bool)
