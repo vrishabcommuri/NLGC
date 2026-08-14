@@ -4,6 +4,7 @@ import dataclasses
 from nlgc.opt.fastac import Fasta
 from functools import partial
 import numpy as np
+import time
 jax.config.update("jax_enable_x64", True)    
 
 
@@ -66,6 +67,7 @@ def solve_for_a(Q, s1, s2, A, A_mask, lambda2, n_orients=3, max_iter=5000,
     """
     solve for A using group sparse proximal gradient descent.
     """
+    start = time.time()
     if lambda2 == 0:
         return jnp.linalg.solve(s2, s1.T).T
 
@@ -175,7 +177,7 @@ def solve_for_a(Q, s1, s2, A, A_mask, lambda2, n_orients=3, max_iter=5000,
         
         change = jnp.sqrt(num_diff / den_diff) if den_diff > 0 else 1.0
         
-        if verbose and i % 250 == 0:
+        if verbose > 1 and i % 250 == 0:
             print(f"iterate {i}/{max_iter}, change: {change:.6f}")
             
         if change < tol:
@@ -187,13 +189,18 @@ def solve_for_a(Q, s1, s2, A, A_mask, lambda2, n_orients=3, max_iter=5000,
     # reverse preconditioning
     # ------------------------------------------------------------
     A_final = (q_sqrt @ A_tilde) / d_safe[None, :]
+
+    if verbose > 1:
+        print(f"fasta A took :{time.time() - start} with {i} iters")
     
     return A_final
 
 
 def solve_for_Q(A, s1, s2, s3, alpha, beta, block_size):
-    """Block-diagonal innovation covariance, one block_size x block_size block
-    per source."""
+    """
+    block-diagonal innovation covariance, one block_size x block_size block per
+    source.
+    """    
     sigma = s3 - A @ s1.T - s1 @ A.T + A @ s2 @ A.T
     sigma = 0.5 * (sigma + sigma.T)
 
@@ -202,6 +209,7 @@ def solve_for_Q(A, s1, s2, s3, alpha, beta, block_size):
         raise ValueError(
             f'state dimension {m} is not divisible by block_size={block_size}')
     n_blocks = m // block_size
+
 
     idx = jnp.arange(n_blocks)
 

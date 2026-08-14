@@ -490,8 +490,6 @@ def disturbance_smoother_blas(y, F, R, em_state, use_lapack=True):
     disturbance_information = proj_innov_precision + \
                                     AK.T @ information_mat @ AK
     
-
-    
     innovation = y - predicted_state @ F.T
 
     # project innovations into information space

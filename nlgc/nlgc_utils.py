@@ -170,7 +170,7 @@ def gc_extraction(y, F, R, ROIs, em_state, config):
                                              eff_eigenmodes, config)    
     links_to_check = wald_screen(links_to_check, em_state, smoother_result, 
                                  config)
-    
+
     if config.numerical.verbose:
         print(f"Checking {len(links_to_check)} links...")
     
