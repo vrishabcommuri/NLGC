@@ -1,6 +1,7 @@
 import numpy as np
 import scipy
 from scipy import linalg
+from scipy.stats import chi2
 import os
 import time
 from .nlgc_utils import gc_extraction, NLGC
@@ -72,17 +73,29 @@ def find_poles_and_zeros(a_true, model, order):
     return zs_t, ps_t, zs, ps
 
 
-def zplane(z, p, title, lim=1):
+def zplane(z, p, title, lim=1, figsize=(10, 10), title_fontsize=20,
+           markersize=None):
 
 
     """Plot the complex z-plane given zeros and poles.
-    """
-    
-    # get a figure/plot
-    fig = plt.figure(figsize=(10,10))
 
-    ax = plt.subplot(2, 2, 1)
-    # TODO: should just inherit whatever subplot it's called in?
+    figsize/title_fontsize/markersize default to the original values so
+    param_vis.generate_report, which passes none of them, is unaffected;
+    save_info overrides them to match its other 75x75 pages.
+    """
+
+    # markers are in points, so they have to grow with the canvas or they
+    # vanish on a 75-inch page
+    scale = figsize[0] / 10
+    if markersize is None:
+        markersize = 9 * scale
+
+    # get a figure/plot
+    fig = plt.figure(figsize=figsize)
+
+    # subplot(2, 2, 1) confined this to one quadrant, leaving the axes at
+    # 35% x 35% of the canvas
+    ax = plt.subplot(1, 1, 1)
 
     # Add unit circle and zero axes    
     unit_circle = patches.Circle((0,0), radius=1, fill=False,
@@ -92,10 +105,10 @@ def zplane(z, p, title, lim=1):
     axhline(0, color='0.7')
     
     # Plot the poles and set marker properties
-    poles = plt.plot(p.real, p.imag, 'x', markersize=9, alpha=0.5)
-    
+    poles = plt.plot(p.real, p.imag, 'x', markersize=markersize, alpha=0.5)
+
     # Plot the zeros and set marker properties
-    zeros = plt.plot(z.real, z.imag,  'o', markersize=9, 
+    zeros = plt.plot(z.real, z.imag,  'o', markersize=markersize,
              color='none', alpha=0.5,
              markeredgecolor=poles[0].get_color(), # same color as poles
              )
@@ -135,9 +148,9 @@ def zplane(z, p, title, lim=1):
     for key, value in d.items():
         if value > 1:
             x, y = ax.transData.inverted().transform(coords[key])
-            plt.text(x, y, 
+            plt.text(x, y,
                         r' ${}^{' + str(value) + '}$',
-                        fontsize=13,
+                        fontsize=13 * scale,
                         )
 
     d = defaultdict(int)
@@ -149,14 +162,98 @@ def zplane(z, p, title, lim=1):
     for key, value in d.items():
         if value > 1:
             x, y = ax.transData.inverted().transform(coords[key])
-            plt.text(x, y, 
+            plt.text(x, y,
                         r' ${}^{' + str(value) + '}$',
-                        fontsize=13,
+                        fontsize=13 * scale,
                         )
-    plt.title(title, fontsize = 20)
+    plt.title(title, fontsize = title_fontsize)
     return fig
 
-# Save information in 
+def _json_default(obj):
+    """Fallback encoder so one unserializable param can't lose the whole file.
+
+    patch_idx is often an ndarray and rank a numpy scalar; json.dump raises
+    TypeError on both, which would kill save_info after the PDF is written but
+    before params.json is.
+    """
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, np.generic):
+        return obj.item()
+    return str(obj)
+
+
+def _plot_deviance_pages(pdf, model, alpha=0.1):
+    """Deviance pages for the debug report: the inputs to the J statistics.
+
+    Adds the raw and debiased deviance matrices, then the distribution of the
+    debiased deviances against the thresholds fdr_control actually applies --
+    which is what says whether any link *could* be detected.
+    """
+    # average over segments, the convention avg_debiased_dev already uses
+    d_raw = np.asarray(model.d_raw).mean(axis=0)
+    d_debiased = np.asarray(model.avg_debiased_dev)
+    bias_r = np.asarray(model.bias_r).mean(axis=0)
+
+    for arr, title in ((d_raw, 'Raw (Biased) Deviances'),
+                       (d_debiased, 'Debiased Deviances')):
+        fig = plt.figure(figsize=(75, 75))
+        # deviances are non-negative, so a sequential map uses its whole range
+        # where the 'seismic' of the A-coefficient pages would waste half
+        plt.imshow(arr, cmap='viridis')
+        # magnitudes matter here -- they get compared against a threshold below.
+        # fraction/pad keep the bar the same height as the square image instead
+        # of stretching it over the whole canvas
+        cbar = plt.colorbar(fraction=0.046, pad=0.04)
+        cbar.ax.tick_params(labelsize=40)
+        plt.title(title, fontsize=80)
+        pdf.savefig(fig)
+        plt.close()
+
+    n_sources = d_debiased.shape[0]
+    off_diag = ~np.eye(n_sources, dtype=bool)
+    # bias_r != 0 marks the links that actually got a reduced-model fit -- the
+    # same mask debias_deviances uses. Screened-out links stay at exactly 0 and
+    # would otherwise swamp the histogram.
+    tested = (bias_r != 0) & off_diag
+    vals = d_debiased[tested]
+
+    # dof as get_J_statistics computes it
+    k = model.p * (model.n_orients * model.n_eigenmodes) ** 2
+    n_tests = n_sources * (n_sources - 1)
+    # fdr_control's step-up threshold is i*alpha/(N log N) for 1-indexed rank i.
+    # i = N is the most permissive rank, so a deviance below this cannot be
+    # declared significant at ANY rank -- a hard necessary condition.
+    crit_fdr = chi2.isf(alpha / np.log(n_tests), k)
+    crit_nominal = chi2.isf(alpha, k)
+
+    fig = plt.figure(figsize=(75, 75))
+    ax = plt.subplot(1, 1, 1)
+    if vals.size:
+        ax.hist(vals, bins=min(50, max(10, vals.size)), color='steelblue')
+        n_pass = int((vals >= crit_fdr).sum())
+    else:
+        n_pass = 0
+        ax.text(0.5, 0.5, 'no links were tested', fontsize=80, ha='center',
+                transform=ax.transAxes)
+
+    ax.axvline(crit_nominal, color='darkorange', lw=8,
+               label=f'nominal chi2.isf({alpha}, {k}) = {crit_nominal:.2f}')
+    ax.axvline(crit_fdr, color='crimson', lw=8,
+               label=f'most permissive FDR cutoff = {crit_fdr:.2f}')
+
+    ax.set_xlabel('debiased deviance', fontsize=60)
+    ax.set_ylabel('tested links', fontsize=60)
+    ax.tick_params(labelsize=40)
+    ax.legend(fontsize=50)
+    ax.set_title(
+        f'Deviance vs FDR Threshold  (dof k={k}, {int(tested.sum())} of '
+        f'{n_tests} links tested, {n_pass} above cutoff)', fontsize=80)
+    pdf.savefig(fig)
+    plt.close()
+
+
+# Save information in
 def save_info(dir, a, JG, model, order, param_dict, ggc_model = None, J_GGC = None, ggc_model_extras = None,  zip_pkl = True, debug_report = False):
 
     conv = int(np.floor((5/350)*a.shape[1]) + 1)
@@ -194,8 +291,14 @@ def save_info(dir, a, JG, model, order, param_dict, ggc_model = None, J_GGC = No
         fig = plt.figure(figsize=(75, 75))
         plt.imshow(model.get_J_statistics())
         plt.title('Derived J Statistics', fontsize = 80)
-        pdf.savefig(fig)  
+        pdf.savefig(fig)
         plt.close()
+
+        if debug_report:
+            # the deviances those J statistics were derived from
+            _plot_deviance_pages(
+                pdf, model,
+                alpha=param_dict.get('screening', {}).get('alpha', 0.1))
 
 
         # if ggc_model != None:
@@ -229,11 +332,14 @@ def save_info(dir, a, JG, model, order, param_dict, ggc_model = None, J_GGC = No
 
         zs_t, ps_t, zs, ps = find_poles_and_zeros(a, model, order)
 
-        fig = zplane(np.array(zs_t), np.array(ps_t), 'Ground Truth Pole Zero Plot')
+        # sized to match the other pages in this PDF
+        fig = zplane(np.array(zs_t), np.array(ps_t), 'Ground Truth Pole Zero Plot',
+                     figsize=(75, 75), title_fontsize=80)
         pdf.savefig(fig)
         plt.close()
 
-        fig = zplane(np.array(zs),np.array(ps), 'Model Parameters Pole Zero Plot')
+        fig = zplane(np.array(zs),np.array(ps), 'Model Parameters Pole Zero Plot',
+                     figsize=(75, 75), title_fontsize=80)
         pdf.savefig(fig)
         plt.close()
 
@@ -285,7 +391,7 @@ def save_info(dir, a, JG, model, order, param_dict, ggc_model = None, J_GGC = No
             os.remove(ggc_model_extras_path)
 
         with open(dir + "params.json", "w") as f:
-            json.dump(param_dict, f, indent=4)
+            json.dump(param_dict, f, indent=4, default=_json_default)
         
 
 
@@ -465,7 +571,8 @@ def _voxel_mode_block(v, n_eigenmodes, n_orients=3):
 
 
 def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes = 2, G=None, p=2, t=500, n_active_voxels=10, n_links=10, target_spec_rad=0.9, coupling_mode="mixed",
-    process_noise_active=0.1, process_noise_inactive=0.001, measurement_noise_scale=1e2, plot_psd=False, n_orients=3, verbose=False):
+    process_noise_active=0.1, process_noise_inactive=0.001, measurement_noise_scale=1e2, plot_psd=False, n_orients=3, verbose=False,
+    n_sensors=None, n_voxels=None):
 
     if p < 1:
         raise ValueError("p should be at least 1")
@@ -480,15 +587,22 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
             f'vol_data_generation assumes 3 orientations per voxel, got {n_orients}')
 
     if G is None:
-        
-        n_sensors = 156
-        n_voxels = int(np.floor(2*n_sensors/(n_eigenmodes*n_orients)))
+
+        n_sensors = 156 if n_sensors is None else n_sensors
+        # default keeps sources at ~2x the sensor count; set n_voxels to hold
+        # the source count fixed while sweeping n_sensors
+        if n_voxels is None:
+            n_voxels = int(np.floor(2*n_sensors/(n_eigenmodes*n_orients)))
         m = n_eigenmodes * n_orients * n_voxels
 
         f = rng.normal(size=(n_sensors, m))
         f /= np.sqrt(np.sum(f ** 2, axis=0, keepdims=True)) + 1e-12
 
     else:
+        if n_sensors is not None or n_voxels is not None:
+            raise ValueError(
+                'n_sensors and n_voxels are dictated by the leadfield; omit '
+                'them when passing G')
         f = G
         n_sensors, m = f.shape
 
@@ -676,22 +790,32 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
     return f, y, x, r_cov, p, JG, pow_actives, a
 
 
-def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2, G = None, p = 2, t = 500, m_active = 10, n_links = 10, target_spec_rad = .9):
+# n_sensors/n_patches go LAST: this is called positionally from run_GT_sim, so
+# inserting them mid-signature would silently shift every argument after them
+def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2, G = None, p = 2, t = 500, m_active = 10, n_links = 10, target_spec_rad = .9,
+                    n_sensors = None, n_patches = None):
     print(f't is {t}')
     if p < 1:
         raise Exception('p should be at least 1')
     np.random.seed(seed)
     if (type(G) == type(None)):
-        n = 156 # number of sensors
-        
-        n_patches = int(np.floor(2*n/n_eigenmodes))
+        n = 156 if n_sensors is None else n_sensors  # number of sensors
+
+        # default keeps sources at ~2x the sensor count; set n_patches to hold
+        # the source count fixed while sweeping n_sensors
+        if n_patches is None:
+            n_patches = int(np.floor(2*n/n_eigenmodes))
         print(f'n_patches is {n_patches}')
         m = n_patches*n_eigenmodes # number of sources
 
-        
+
         # 4*4*1  x*1000
         # 168*168*2 155*60*50
     else:
+        if n_sensors is not None or n_patches is not None:
+            raise ValueError(
+                'n_sensors and n_patches are dictated by the leadfield; omit '
+                'them when passing G')
         n, m = G.shape
 
         print(f'G shape is {G.shape}')
@@ -1020,7 +1144,8 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
         parallel_mode = 'serial', n_devices = 1, n_workers = 1, n_warmup_iter = 25,
         use_wald_screen = True, wald_screen_alpha = 0.05,
         use_empirical_null = True,
-        vol_pos_origin = 10.0, vol_pos_target = 30.0, debug_report = False):
+        vol_pos_origin = 10.0, vol_pos_target = 30.0, debug_report = False,
+        n_sensors = None, n_sources = None):
 
     if src_space not in ['surf', 'vol', 'mixed']:
         raise Exception(f'src_space {src_space} not implemented')
@@ -1054,12 +1179,24 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
         G = lf
     else:
         G = None
+    # n_sources is the ROI count either way; each generator names it locally
+    # (patches on the surface, voxels in the volume)
     if src_space == 'surf':
-        f, y, x, r_cov, p, JG, pow_actives, a = data_generation(seed, band, fs, natures, n_eigenmodes, G, order, t, m_active, n_links, target_spec_rad)
+        # keyword form: the positional call silently shifted arguments once the
+        # signature grew, which is the bug already recorded at lead_field_generation
+        f, y, x, r_cov, p, JG, pow_actives, a = data_generation(
+            seed = seed, band = band, fs = fs, natures = natures,
+            n_eigenmodes = n_eigenmodes, G = G, p = order, t = t,
+            m_active = m_active, n_links = n_links,
+            target_spec_rad = target_spec_rad,
+            n_sensors = n_sensors, n_patches = n_sources)
     else:
         f, y, x, r_cov, p, JG, pow_actives, a = vol_data_generation(seed = seed, band = band, fs = fs, natures = natures, n_eigenmodes = n_eigenmodes, G = G, p = order, t = t
                                                                     ,n_active_voxels = m_active, n_links = n_links, target_spec_rad = target_spec_rad, n_orients = n_orients,
-                                                                    verbose = verbose)
+                                                                    verbose = verbose, n_sensors = n_sensors, n_voxels = n_sources)
+
+    # captured before the diff_lf branch below can reassign f
+    gen_lf_shape = tuple(int(v) for v in f.shape)
     if verbose:
         print(f"ground truth a: max {np.max(a):.4g} min {np.min(a):.4g} "
               f"median {np.median(a):.4g}")
@@ -1147,6 +1284,7 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
             'natures': natures,
             'm_active': m_active,
             'n_links': n_links,
+            'target_spec_rad': target_spec_rad,
         }
 
         ggc_dict = {
@@ -1155,28 +1293,83 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
             'multitaper_kwargs': ggc_kwargs['multitaper_kwargs'] if ggc_kwargs != None else None,
         }
 
-        if lead_field_gen:
-            lead_gen_dict = {
-                'root_dir': root,
-                'subject_id': subject_id,
-                'trans': trans,
-            }
-        else:
-            lead_gen_dict = None
+        # built unconditionally: vol_pos_* and the subject still describe the run
+        # even when lead_field_gen is False, since src_space also selects the
+        # data generator (data_generation vs vol_data_generation)
+        lead_gen_dict = {
+            'enabled': lead_field_gen,
+            'root_dir': root,
+            'subject_id': subject_id,
+            'session_name': session_name,
+            'trans': trans,
+            'vol_pos_origin': vol_pos_origin,
+            'vol_pos_target': vol_pos_target,
+        }
+
+        # dimensions of the leadfield actually used, as opposed to the ones
+        # requested -- on the common path the request is None and only these say
+        # how big the run really was
+        fit_lf_shape = tuple(int(v) for v in f.shape)
+        block_size = n_eigenmodes * n_orients
+        leadfield_dict = {
+            'n_sensors': fit_lf_shape[0],
+            'n_sources': fit_lf_shape[1],
+            # same convention as nlgc_map_opt, so this matches NLGC.nx
+            'n_patches': fit_lf_shape[1] // block_size,
+            'block_size': block_size,
+            'requested_n_sensors': n_sensors,
+            'requested_n_sources': n_sources,
+            'gen_shape': gen_lf_shape,
+            'fit_shape': fit_lf_shape,
+        }
 
         param_dict = {
             'best_lambda': temp_obj._model_f[0].lambda_,
             'lambda_range': lambda_range,
+            'leadfield': leadfield_dict,
             'order': order,
             'n_eigenmodes': n_eigenmodes,
+            'n_orients': n_orients,
+            'n_segments': n_segments,
+            'src_space': src_space,
             't': t,
             'use_es': use_es,
             'data_gen': data_gen_dict,
             'warm_start': warm_start,
             'self_history': self_history,
             'lead_field_gen': lead_gen_dict,
+            'diff_lf': diff_lf,
             'passed_evoked': passed_evoked,
+            'forward': {
+                'loose': loose,
+                'depth': depth,
+                'pca': pca,
+                'rank': rank,
+            },
+            'optimizer': {
+                'max_iter': max_iter,
+                'max_cyclic_iter': max_cyclic_iter,
+                'tol': tol,
+                'cv': cv,
+                'n_warmup_iter': n_warmup_iter,
+            },
+            'screening': {
+                'sparsity_factor': sparsity_factor,
+                'var_thr': var_thr,
+                'alpha': alpha,
+                'use_wald_screen': use_wald_screen,
+                'wald_screen_alpha': wald_screen_alpha,
+                'use_empirical_null': use_empirical_null,
+                'patch_idx': patch_idx,
+            },
+            'parallel': {
+                'parallel_mode': parallel_mode,
+                'n_devices': n_devices,
+                'n_workers': n_workers,
+            },
             'ggc_params':ggc_dict,
+            'verbose': verbose,
+            'debug_report': debug_report,
             'nlgc_map_time': total_time,
         }
         if run_ggc:
