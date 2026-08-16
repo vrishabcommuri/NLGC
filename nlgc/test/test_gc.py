@@ -827,7 +827,7 @@ def test_gc_extraction_real_leadfield_mismatch(parallel_mode="multiprocess"):
     )
 
     # ico-1 leadfield and dynamics
-    n_eigenmodes=2 
+    n_eigenmodes=4 
     n_sources=84
     n_sensors=None 
     n_orients=1
@@ -849,10 +849,39 @@ def test_gc_extraction_real_leadfield_mismatch(parallel_mode="multiprocess"):
     plot_transition_blurred((ssm.A != 0).astype(float), 
                             em_state.N_sources_upper, 2, kernel=4)
     plt.show()
+
+    ############################################################################
+    # diagnostics
+    ############################################################################
+    import scipy
+    m_d = em_state_dense.N_sources_upper
+    m = em_state_dense.N_sources_upper
+    # leadfield condensation spatial leakage
+    plt.imshow(ssm.F[:, :m].T @ ssm_dense.F[:, :m_d] @ ssm_dense.F[:, :m_d].T @ ssm.F[:, :m])
+    plt.show()
+
+    # --- leadfield condensation source leakage ---
+    # collapse A over lags
+    A_collapsed = ssm_dense.A[:em_state_dense.N_sources_upper]\
+        .reshape(em_state_dense.N_sources_upper, 2, 
+                 em_state_dense.N_sources_upper)\
+        .mean(axis=1)
     
+    # apply dense leadfield to sources and invert using condensed leadfield
+    A_leak = ssm.F[:, :m].T @ ssm_dense.F[:, :m_d] @ A_collapsed @ ssm_dense.F[:, :m_d].T @ ssm.F[:, :m]
+
+    # for viz    
+    kernel = 5
+
+    A = scipy.signal.convolve2d(A_leak, np.ones((kernel, kernel)), mode='same')
+    vm = np.abs(A).max()
+    plt.imshow(A, cmap='seismic', vmax=vm, vmin=-vm)
+    plt.show()
+
     ############################################################################
     # recover y_dense dynamics from condensed leadfield and system model
     ############################################################################
+    
 
     ROIs = list(range(84))
 
