@@ -142,9 +142,9 @@ def plot_transition_comparison(
 
     return fig, axes
 
-def plot_transition_blurred(A, m, order):
+def plot_transition_blurred(A, m, order, kernel=3):
     A = A[:m].reshape(m, order, m).mean(axis=1)
-    A = scipy.signal.convolve2d(A, np.ones((3,3)), mode='same')
+    A = scipy.signal.convolve2d(A, np.ones((kernel, kernel)), mode='same')
     vm = np.abs(A).max()
     plt.imshow(A, cmap='seismic', vmax=vm, vmin=-vm)
 

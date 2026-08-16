@@ -69,10 +69,11 @@ def make_gc_test_setup(
             "verbose": True,
             "n_devices": jax.device_count(),
             "n_workers": 8,
-            "negligible_candidate_link_energy_thr":1.0,
-            "tol":5e-5,
-            "fasta_tol":5e-6,
-            "lagsparsity":True,
+            "negligible_candidate_link_energy_thr": 1.0,
+            "tol": 5e-5,
+            "fasta_tol": 5e-6,
+            "lagsparsity": True,
+            "use_wald_screen": False,
         }
     )
 
@@ -753,6 +754,166 @@ def test_gc_extraction_real_leadfield(parallel_mode="multiprocess"):
                         bind_colorbars=False)
         plt.show()
 
+
+def test_gc_extraction_real_leadfield_mismatch(parallel_mode="multiprocess"):
+    import mne
+    root = "../../data/"
+    megdir = f"{root}/meg"
+    mridir = f"{root}/mri"
+    sub = "R2999"
+    session = "EO1"
+    trial = 0
+
+    evo_fname = f"{megdir}/{sub}/{sub}_{session}-[trial={trial}]-evoked-ave.fif"
+    cov_fname = f"{megdir}/{sub}/{sub}_cov.fif"
+    src_target_fname = f"{mridir}/{sub}/bem/{sub}_ico1-src.fif"
+    fwd_fname = f"{mridir}/{sub}/bem/{sub}_{session}-[trial={trial}]-solution-fwd.fif"
+
+    evoked = mne.read_evokeds(evo_fname)[0]
+    forward = mne.read_forward_solution(fwd_fname)
+    cov = mne.read_cov(cov_fname)
+    src_target = mne.read_source_spaces(src_target_fname)
+
+    evoked = evoked.resample(100)
+    forward = mne.convert_forward_solution(forward, force_fixed=True)
+
+    ############################################################################
+    # dense source model
+    ############################################################################
+
+    leadfield = NLGCMapTest(
+        evoked=evoked,
+        forward=forward,
+        noise_cov=cov,
+        labels=src_target,
+        eigen_decomp=False, # don't do the eigenmode decomposition on lf (ico-4)
+    )
+
+    # ico-4 leadfield and dynamics
+    n_eigenmodes=4
+    n_sources=5124//n_eigenmodes # num active source patches 
+    n_sensors=None 
+    n_orients=1
+    order=2
+    T=6000
+    lambda_=0.1
+    sparsity=0.00001
+    ssm_dense, em_state_dense, config_dense, _ = make_gc_test_setup(
+                                                  n_sources=n_sources,
+                                                  n_sensors=n_sensors,
+                                                  n_orients=n_orients,
+                                                  n_eigenmodes=n_eigenmodes,
+                                                  order=order,
+                                                  T=T,
+                                                  lambda_=lambda_,
+                                                  sparsity=sparsity,
+                                                  parallel_mode=parallel_mode,
+                                                  from_nlgc_map=leadfield)
+ 
+    plot_transition_blurred((ssm_dense.A != 0).astype(float), 
+                            em_state_dense.N_sources_upper, 2, kernel=40)
+    plt.show()
+
+    ############################################################################
+    # condensed source model
+    ############################################################################
+
+    leadfield = NLGCMapTest(
+        evoked=evoked,
+        forward=forward,
+        noise_cov=cov,
+        labels=src_target,
+        eigen_decomp=True, # do the eigenmode decomposition on lf (ico-1)
+    )
+
+    # ico-1 leadfield and dynamics
+    n_eigenmodes=2 
+    n_sources=84
+    n_sensors=None 
+    n_orients=1
+    order=2
+    T=6000
+    lambda_=0.1
+    sparsity=0.00001
+    ssm, em_state, config, _ = make_gc_test_setup(n_sources=n_sources,
+                                                  n_sensors=n_sensors,
+                                                  n_orients=n_orients,
+                                                  n_eigenmodes=n_eigenmodes,
+                                                  order=order,
+                                                  T=T,
+                                                  lambda_=lambda_,
+                                                  sparsity=sparsity,
+                                                  parallel_mode=parallel_mode,
+                                                  from_nlgc_map=leadfield)
+    
+    plot_transition_blurred((ssm.A != 0).astype(float), 
+                            em_state.N_sources_upper, 2, kernel=4)
+    plt.show()
+    
+    ############################################################################
+    # recover y_dense dynamics from condensed leadfield and system model
+    ############################################################################
+
+    ROIs = list(range(84))
+
+    # uses dense sensor measurements! 
+    dev_raw, bias_r, bias_f, model_f, nonconv_flag = \
+        gc_extraction(ssm_dense.y, ssm.F, ssm.R, ROIs, em_state, config)
+    
+    plot_transition_blurred(model_f._ravel_a(model_f._parameters[0]),
+                            em_state.N_sources_upper, 2)
+    plt.show()
+    
+    plot_transition_blurred((np.abs(model_f._ravel_a\
+                                  (model_f._parameters[0])) > 1e-4).astype(int),
+                            em_state.N_sources_upper, 2)
+    plt.show()
+    
+    avg_debiased_dev = debias_deviances(dev_raw, bias_f, bias_r)
+
+    eff_eigenmodes = n_orients * n_eigenmodes
+    alpha = 0.1
+
+    J = fdr_control(avg_debiased_dev, order * (eff_eigenmodes**2), alpha)
+
+    if show_plots:
+        m = em_state.N_sources_upper
+        plot_transition_comparison(ssm_dense.A[:m], 
+                                   model_f._ravel_a(model_f._parameters[0]), 
+                titles=("Ground Truth A", 
+                        "Estimated A"), 
+                        bind_colorbars=True)
+        plt.show()
+
+        plot_transition_comparison(ssm_dense.A[:m], 
+                                  (np.abs(model_f._ravel_a\
+                                  (model_f._parameters[0])) > 1e-4).astype(int), 
+                titles=("Ground Truth A", 
+                        "Nonzero A"), 
+                        bind_colorbars=False)
+        plt.show()
+
+        plot_transition_comparison(ssm_dense.A[:m], 
+                                   dev_raw, 
+                titles=("Ground Truth A", 
+                        "dev raw"), 
+                        bind_colorbars=False)
+        plt.show()
+
+        plot_transition_comparison(ssm_dense.A[:m], 
+                                   avg_debiased_dev, 
+                titles=("Ground Truth A", 
+                        "avg deb dev"), 
+                        bind_colorbars=False)
+        plt.show()
+
+        plot_transition_comparison(ssm_dense.A[:m], 
+                                   J, 
+                titles=("Ground Truth A", 
+                        "J"), 
+                        bind_colorbars=False)
+        plt.show()
+
 if __name__ == '__main__':
     show_plots = True
 
@@ -801,6 +962,10 @@ if __name__ == '__main__':
     # test_gc_extraction(parallel_mode="multiprocess")
     # print("done\n\n")
 
-    print("running test multiprocess gc_extraction real leadfield") 
-    test_gc_extraction_real_leadfield()
+    # print("running test multiprocess gc_extraction real leadfield") 
+    # test_gc_extraction_real_leadfield()
+    # print("done\n\n")
+
+    print("running test multiprocess gc_extraction real leadfield mismatch") 
+    test_gc_extraction_real_leadfield_mismatch()
     print("done\n\n")

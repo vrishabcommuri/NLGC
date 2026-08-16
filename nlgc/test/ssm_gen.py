@@ -114,6 +114,7 @@ class NLGCMapTest:
     forward: None
     noise_cov: None
     labels: None
+    eigen_decomp: True
 
 
 def gen_sparse_var_ssm(
@@ -175,19 +176,42 @@ def gen_sparse_var_ssm(
     if from_nlgc_map is not None:
         assert isinstance(from_nlgc_map, NLGCMapTest)
 
-        _, G, _, _, _, _ = \
-            prepare_eigenmodes(from_nlgc_map.evoked.info, 
-                               from_nlgc_map.forward, 
-                               from_nlgc_map.noise_cov, 
-                               from_nlgc_map.labels,
-                               n_eigenmodes=n_eigenmodes,
-                               n_orients=n_orients,
-                               loose=0.0,
-                               depth=0.0,
-                               pca=True,
-                               rank=None)
-        
+        if from_nlgc_map.eigen_decomp:
+            _, G, _, _, _, _ = \
+                prepare_eigenmodes(from_nlgc_map.evoked.info, 
+                                from_nlgc_map.forward, 
+                                from_nlgc_map.noise_cov, 
+                                from_nlgc_map.labels,
+                                n_eigenmodes=n_eigenmodes,
+                                n_orients=n_orients,
+                                loose=0.0,
+                                depth=0.0,
+                                pca=True,
+                                rank=None)
+        else:
+            from mne.forward import is_fixed_orient
+            from mne.inverse_sparse.mxne_inverse import _prepare_gain
+
+            assert is_fixed_orient(from_nlgc_map.forward)
+            
+            depth_dict = {'exp': 0.0, 
+                        'limit_depth_chs': 'whiten', 
+                        'combine_xyz': 'fro', 
+                        'limit': None}
+
+
+            _, G, _, _, _, _ = \
+                _prepare_gain(from_nlgc_map.forward, 
+                              from_nlgc_map.evoked.info, 
+                              from_nlgc_map.noise_cov, 
+                              True,
+                              depth_dict, 
+                              0.0, 
+                              None)
+            
+            
         n_sensors, _ = G.shape
+        print(f"{G.shape=}")
         print(f"generating ssm with leadfield ({n_sensors=} x {n_sources=})")
 
     rng = np.random.default_rng(seed)
@@ -205,7 +229,7 @@ def gen_sparse_var_ssm(
         n_sources = 4 if n_sources is None else n_sources
         n_sensors = 8 if n_sensors is None else n_sensors
 
-    
+    print("gen var lags")
 
     A_lags, supports = gen_sparse_var_lags(
         n_sources=n_sources,
@@ -217,8 +241,12 @@ def gen_sparse_var_ssm(
         seed=seed,
     )
 
+    print("gen companion")
+
     A = make_companion_from_lags(A_lags)
     rho = np.max(np.abs(np.linalg.eigvals(A)))
+    
+    print("squash spectral radius")
 
     # stable squash spectral radius
     while rho >= 0.95:
@@ -231,6 +259,8 @@ def gen_sparse_var_ssm(
 
     # lag-0 block; the rest of the companion state is lagged copies
     n_units = n_sources * n_eigenmodes * n_orients
+    
+    print("build system matrices")
 
     F = np.zeros((n_sensors, state_dim))
     F[:, :n_units] = (
@@ -247,22 +277,26 @@ def gen_sparse_var_ssm(
         q_scale * np.eye(n_units)
     )
 
-    x = np.zeros(
-        (T, state_dim)
+    x = np.zeros((T, state_dim))
+
+    print("gen proc noise")
+
+    process_noise = np.zeros((T, state_dim))
+    process_noise[:, :n_units] = (
+        rng.standard_normal((T, n_units)) * np.sqrt(q_scale)
     )
 
-    process_noise = rng.multivariate_normal(
-        np.zeros(state_dim),
-        Q,
-        size=T,
-    )
-
+    print("gen latent dynamics")
+    
     for t in range(1, T):
+        if t % 250 == 0:
+            print(f"{t} / {T}")
         x[t] = (
             A @ x[t-1]
             + process_noise[t]
         )
 
+    print("gen observed dynamics")
     y_clean = x @ F.T
 
     # from_nlgc_map whitens leadfield so sensor noise cov is diagonal and can
@@ -270,10 +304,8 @@ def gen_sparse_var_ssm(
     if G is None or from_nlgc_map is not None:
         R = r_scale * np.eye(n_sensors)
 
-        observation_noise = rng.multivariate_normal(
-            np.zeros(n_sensors),
-            R,
-            size=T,
+        observation_noise = (
+            rng.standard_normal((T, n_sensors)) * np.sqrt(r_scale)
         )
     else:
         # gain is whitened and column-normalized, so sensor scale is arbitrary
