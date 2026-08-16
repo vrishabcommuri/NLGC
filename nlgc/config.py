@@ -210,7 +210,7 @@ class ModelConfig:
                     kwargs.pop("negligible_candidate_link_energy_thr", 1.0),
                 use_wald_screen = kwargs.pop("use_wald_screen", True),
                 wald_screen_alpha = kwargs.pop("wald_screen_alpha", 0.05),
-                use_empirical_null = kwargs.pop("use_empirical_null", True),
+                use_empirical_null = kwargs.pop("use_empirical_null", False),
             ),
 
             forward = ModelForwardConfig(

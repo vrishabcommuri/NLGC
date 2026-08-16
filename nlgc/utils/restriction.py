@@ -8,6 +8,7 @@ def roi_to_link_restriction(ROIs, sparsity, eff_eigenmodes, config):
         print(f"nonzero sparsity entries: {np.count_nonzero(sparsity)}")
         print(f"{len(ROIs)=}")
         print(f"{config.sparsity.sparsity_factor=}")
+
     links_to_check = []
     for src, targ in itertools.product(ROIs, repeat=2):
         # Exclude i == j cases
@@ -18,6 +19,7 @@ def roi_to_link_restriction(ROIs, sparsity, eff_eigenmodes, config):
             continue
 
         links_to_check.append((targ, src))
+
     return links_to_check
 
 

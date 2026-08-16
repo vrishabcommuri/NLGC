@@ -184,7 +184,7 @@ def multiprocess_test_links(links_to_check, y, F, R, lambda_, em_state, config):
     nonconv_flag = np.zeros((nx, nx), dtype=np.bool_)
 
     if len(links_to_check) == 0:
-        return dev_raw, bias_r, nonconv_flag
+        return dev_raw, bias_r, bias_f, nonconv_flag
 
     # Memory management for Parallel implementation
     _, info_y, shm_y = create_shared_mem(y)

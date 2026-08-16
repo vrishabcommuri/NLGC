@@ -1,6 +1,8 @@
 import numpy as np
 from numpy.typing import NDArray
 from dataclasses import dataclass
+from nlgc.utils.leadfield import prepare_eigenmodes
+
 
 Array = NDArray[np.float64]
 
@@ -106,6 +108,14 @@ def gen_large_ssm(
     return ssm_state
 
 
+@dataclass
+class NLGCMapTest:
+    evoked: None
+    forward: None
+    noise_cov: None
+    labels: None
+
+
 def gen_sparse_var_ssm(
     T=1000,
     n_sources=None,
@@ -120,6 +130,7 @@ def gen_sparse_var_ssm(
     r_scale=0.05,
     seed=0,
     leadfield=None,
+    from_nlgc_map=None,
     measurement_noise_scale=1e2,
 ):
     """
@@ -142,6 +153,8 @@ def gen_sparse_var_ssm(
         replaces the random observation matrix and dictates `n_sources` and
         `n_sensors`, which must then be omitted. Default None.
 
+    from_nlgc_map: dict | None
+
     measurement_noise_scale : float
         Leadfield path only: signal power / noise power. A fixed `r_scale` is
         meaningless there because the gain is whitened and column-normalized.
@@ -156,6 +169,26 @@ def gen_sparse_var_ssm(
     supports : list[np.ndarray]
         True sparse connectivity masks.
     """
+    assert not ((leadfield is not None) and (from_nlgc_map is not None)), \
+           "Cannot specify both leadfield and from_nlgc_map"
+    
+    if from_nlgc_map is not None:
+        assert isinstance(from_nlgc_map, NLGCMapTest)
+
+        _, G, _, _, _, _ = \
+            prepare_eigenmodes(from_nlgc_map.evoked.info, 
+                               from_nlgc_map.forward, 
+                               from_nlgc_map.noise_cov, 
+                               from_nlgc_map.labels,
+                               n_eigenmodes=n_eigenmodes,
+                               n_orients=n_orients,
+                               loose=0.0,
+                               depth=0.0,
+                               pca=True,
+                               rank=None)
+        
+        n_sensors, _ = G.shape
+        print(f"generating ssm with leadfield ({n_sensors=} x {n_sources=})")
 
     rng = np.random.default_rng(seed)
 
@@ -163,14 +196,16 @@ def gen_sparse_var_ssm(
         # ignoring these would return an SSMState disagreeing with its own args
         if n_sources is not None or n_sensors is not None:
             raise ValueError(
-                'n_sources and n_sensors are dictated by the leadfield; omit them '
-                'when passing leadfield')
+                'n_sources and n_sensors are dictated by the leadfield; omit '
+                'them when passing leadfield')
         G, n_sources, n_sensors = _leadfield_observation(
             leadfield, n_eigenmodes, n_orients)
     else:
         G = None
         n_sources = 4 if n_sources is None else n_sources
         n_sensors = 8 if n_sensors is None else n_sensors
+
+    
 
     A_lags, supports = gen_sparse_var_lags(
         n_sources=n_sources,
@@ -200,8 +235,10 @@ def gen_sparse_var_ssm(
     F = np.zeros((n_sensors, state_dim))
     F[:, :n_units] = (
         G if G is not None
-        # draw the full width and slice: a smaller draw would shift the rng stream
-        else rng.normal(size=(n_sensors, state_dim))[:, :n_units] / np.sqrt(state_dim)
+        # draw the full width and slice: a smaller draw would shift the rng
+        # stream
+        else rng.normal(size=(n_sensors, state_dim))[:, :n_units] /\
+              np.sqrt(state_dim)
     )
 
     Q = np.zeros((state_dim, state_dim))
@@ -228,7 +265,9 @@ def gen_sparse_var_ssm(
 
     y_clean = x @ F.T
 
-    if G is None:
+    # from_nlgc_map whitens leadfield so sensor noise cov is diagonal and can
+    # use this path
+    if G is None or from_nlgc_map is not None:
         R = r_scale * np.eye(n_sensors)
 
         observation_noise = rng.multivariate_normal(
@@ -237,12 +276,14 @@ def gen_sparse_var_ssm(
             size=T,
         )
     else:
-        # gain is whitened and column-normalized, so sensor scale is arbitrary and
-        # r_scale says nothing about SNR -- set noise from realized signal power
+        # gain is whitened and column-normalized, so sensor scale is arbitrary
+        # and r_scale says nothing about SNR -- set noise from realized signal
+        # power
         white_noise = rng.standard_normal(y_clean.shape)
 
         var = np.trace(y_clean @ y_clean.T) / (
-            measurement_noise_scale * np.trace(white_noise @ white_noise.T) + 1e-12)
+            measurement_noise_scale * np.trace(white_noise @ white_noise.T) \
+                + 1e-12)
 
         observation_noise = white_noise * np.sqrt(var)
         R = var * np.eye(n_sensors)
@@ -315,8 +356,8 @@ def _leadfield_observation(leadfield, n_eigenmodes, n_orients):
     """
     (G, n_sources, n_sensors) from `lead_field_generation` keyword arguments.
 
-    n_eigenmodes / n_orients are injected here rather than read from the dict, so
-    the ground truth and the leadfield cannot disagree about block layout.
+    n_eigenmodes / n_orients are injected here rather than read from the dict,
+    so the ground truth and the leadfield cannot disagree about block layout.
     """
     # local: nlgc_test_utils pulls in mne, matplotlib and ggc
     from nlgc.nlgc_test_utils import lead_field_generation
@@ -333,8 +374,8 @@ def _leadfield_observation(leadfield, n_eigenmodes, n_orients):
 
 def expand_source_blocks(source_mask, block_size):
     """
-    expand source-level connectivity into per-source blocks. a source-source edge
-    activates the full block.
+    expand source-level connectivity into per-source blocks. a source-source
+    edge activates the full block.
 
     source edge i -> j becomes [block_size x block_size] i -> j
 
