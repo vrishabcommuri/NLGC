@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nlgc"
+version = "1.0.1"
+description = "Network Localized Granger Causality"
+readme = "README.md"
+requires-python = ">=3.11"
+
+dependencies = [
+    "numpy",
+    "scipy",
+    "mne",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["nlgc*"]
