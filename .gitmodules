@@ -1,0 +1,3 @@
+[submodule "connectivity_visualizer"]
+	path = connectivity_visualizer
+	url = https://github.com/vrishabcommuri/connectivity_visualizer.git
