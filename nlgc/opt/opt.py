@@ -5,11 +5,10 @@ from joblib import Parallel, delayed
 from sklearn import preprocessing
 from sklearn.model_selection import TimeSeriesSplit
 from multiprocessing import cpu_count
-import mne
-from mne.utils import logger
 from nlgc.opt.em import solve_params, _copycast_em_state_numpy
-from nlgc.opt.kalman.filter import forward_filter_blas
+from nlgc.opt.kalman.filter import forward_filter_blas, measurement_smoother_jax
 import copy
+from kneed import KneeLocator
 
 
 class NeuraLVAR:
@@ -75,10 +74,16 @@ class NeuraLVAR:
 
         return em_state, smoother_result
 
-   
     def compute_norm_one(self, a):
         return np.sum(np.absolute(a))
 
+    @staticmethod
+    def GCV(D, N, df):
+        """
+        Generalized CV metric
+        see 10.1016/j.automatica.2017.12.054
+        """
+        return D/(N * (1 - df/N)**2)
 
     def compute_two_one_norm(self, a):
         print(f'a_ shape is {a.shape}')
@@ -149,7 +154,6 @@ class NeuraLVARCV(NeuraLVAR):
         NeuraLVAR.__init__(self, order, self_history, n_eigenmodes, n_orients,
                            copy, standardize, normalize, use_lapack, config)
 
-
     @classmethod
     def from_config(cls, config):
         return cls(
@@ -158,7 +162,7 @@ class NeuraLVARCV(NeuraLVAR):
             n_eigenmodes = config.latent.n_eigenmodes,
             n_orients = config.latent.n_orients,
             cv = config.validation.cv,
-            n_jobs = min(config.validation.cv, cpu_count()),
+            n_jobs = cpu_count(),
             copy = True,
             standardize = False,
             normalize = False,
@@ -166,13 +170,12 @@ class NeuraLVARCV(NeuraLVAR):
             config=config,
         )
 
-    def _cvfit(self, split, info_y, info_f, info_r, info_cv, info_pred, 
+    def _cvfit(self, lambda_t, info_y, info_f, info_r, info_cv, info_pred, 
                splits, em_state, config):
+        lam_idx, lambda_ = lambda_t
+
         if config.numerical.verbose:
-            mne.set_log_level(True)
-            print(f"{current_process().name} working on {split}th split")
-            logger.info(f"{current_process().name} working on {split}th split")
-            logger.debug(f"{current_process().name} working on {split}th split")
+            print(f"{current_process().name} CV fitting with {lambda_}")
 
         try:
             y, shm_y = link_share_memory(info_y)
@@ -181,23 +184,22 @@ class NeuraLVARCV(NeuraLVAR):
             cv, shm_c = link_share_memory(info_cv)
             pred, shm_pred = link_share_memory(info_pred)
         except BaseException as exc:
-            logger.error(f"Could not link to memory: {exc}")
+            print(f"Could not link to memory: {exc}")
             raise exc
 
-        lambda_range = config.sparsity.lambda_range
-        train, test = splits[split]
-        # y is time-major (n_samples, n_channels), so folds index rows
-        print(f'y shape is {y.shape}')
-        y_train, y_test = y[train], y[test]
-        print(f'y train shape is {y_train.shape}')
-        # full data/train data scale factor since the ll depends to the number
-        # of observations, and the training set has a reduced number 
-        lambda_scale = np.sqrt(y.shape[0] / y_train.shape[0])
 
-        for idx, lambda_full in enumerate(lambda_range):
-            curr_lambda = lambda_full * lambda_scale
+        for split_idx in range(len(splits)):
+            train, test = splits[split_idx]
+            y_train, y_test = y[train], y[test]
+
+            # full data/train data scale factor since the ll depends to the
+            # number of observations, and the training set has a reduced number 
+            lambda_scale = np.sqrt(y.shape[0] / y_train.shape[0])
+            
+            curr_lambda = lambda_ * lambda_scale
+
             if config.numerical.verbose:
-                logger.info(f"{current_process().name} {split=} {curr_lambda=}")
+                print(f"{current_process().name} {split_idx=} {curr_lambda=}")
 
             # deepcopy: each lambda must start from the same initial state,
             # otherwise it warm-starts from the previous (larger) lambda's fit
@@ -209,7 +211,6 @@ class NeuraLVARCV(NeuraLVAR):
             # .flags to check F-contiguity, which jax arrays do not have, so
             # cast back to numpy at the boundary.
             fit_state = _copycast_em_state_numpy(fit_state)
-            A_cv = fit_state.A
 
             # test set prediction. forward_filter_blas returns
             # (em_state, filter_result) -- binding the whole tuple made the
@@ -217,19 +218,29 @@ class NeuraLVARCV(NeuraLVAR):
             _, filter_result_test = forward_filter_blas(y_test, F, R,
                                                         em_state=fit_state,
                                                         use_lapack=True)
-
-            # full-data prediction
+            
+            # full-data prediction for ES
             _, filter_result_full = forward_filter_blas(y, F, R,
                                                         em_state=fit_state,
                                                         use_lapack=True)
 
+            # full data prediction for GCV
+            _, smoother_result = measurement_smoother_jax(y, F, R, 
+                                                          em_state=fit_state)
+            
+            # get GCV params
+            A = fit_state.A[:fit_state.N_sources_upper]
+            df = np.sum(np.abs(A) > 1e-12)  # nonzero support
+            N = y.shape[0]                  # num samples
+            D = -smoother_result.model_fit  # positive fit criterion
 
-            # TODO this should probably use the disturbance smoother to evaluate
-            # model fit
-            # # different criteria for cross-validation
-            cv[0, split, idx] = filter_result_test.negative_log_likelihood
-            cv[1, split, idx] = curr_lambda * self.compute_norm_one(A_cv)
-            pred[split, idx][:] = filter_result_full.filtered_state 
+            # nll metric 
+            cv[0, split_idx, lam_idx] = \
+                filter_result_test.negative_log_likelihood
+            
+            # GCV metric
+            cv[1, split_idx, lam_idx] = self.GCV(D, N, df)
+            pred[split_idx, lam_idx][:] = filter_result_full.filtered_state 
 
         for shm in (shm_y, shm_f, shm_r, shm_c, shm_pred):
             shm.close()
@@ -237,36 +248,37 @@ class NeuraLVARCV(NeuraLVAR):
     
 
     def fit(self, y, F, R, em_state):
-        """Fits the model from given m/eeg data, forward gain and noise 
-        covariance
+        """
+        Fits the model from given m/eeg data, forward gain and noise covariance
 
         y : ndarray of shape (n_samples, n_channels)
         F : ndarray of shape (n_channels, n_sources)
         R : ndarray of shape (n_channels, n_channels)
-        em_state:
-        config:
-
-        Notes
-        -----
-        y is TIME-major here. The kalman layer defines the convention -- both
-        forward_filter_blas and forward_filter_jax read N_times = y.shape[0] and
-        assert y.shape[1] == F.shape[0] -- and gc_extraction feeds this class
-        `y_seg.T` accordingly. This docstring previously said (n_channels,
-        n_samples) and the body split on the wrong axis, so every CV fold
-        partitioned CHANNELS instead of time and the filter asserted out.
+        em_state: dataclass
+        config: dataclass
         """
         kf = TimeSeriesSplit(n_splits=self.cv)
-        # split axis 0 = time. Splitting y.T here partitioned the channel axis,
-        # handing each fold a y_train with fewer rows than F had columns.
-        cvsplits = [split for split in kf.split(y)]
-        lambda_range = self.config.sparsity.lambda_range
 
+        cvsplits = [split for split in kf.split(y)]
+
+        if self.config.validation.cv_type == 'GCV':
+            # use split structure for normal cv, but with one 'dummy' split
+            # including all of the data
+            self.cv = 1
+            idxs = np.arange(len(y))
+            cvsplits = [(idxs, idxs)] # use complete data
+
+        lambda_range = sorted(list(self.config.sparsity.lambda_range))
+        
+        # (cvmetric, split, lambda) -- cv info for each split
         cv_mat = np.zeros((2, len(cvsplits), len(lambda_range)), dtype=y.dtype)
-        # holds filtered_state, which is (n_samples, n_sources) -- NOT y.shape.
-        # F.shape[1] is the companion source count, so this is n_sources*order.
-        pred_mat = np.zeros((len(cvsplits), len(lambda_range),
-                             y.shape[0], F.shape[1]),
-                            dtype=y.dtype)
+        
+        # (split, lambda, time, sensor) -- model prediction for each split
+        pred_mat = np.zeros((len(cvsplits), 
+                             len(lambda_range),
+                             y.shape[0], 
+                             F.shape[1]),
+                             dtype=y.dtype)
 
         # Use parallel processing
         # A, b, mu_range, cv_mat needs to shared across processes
@@ -278,13 +290,19 @@ class NeuraLVARCV(NeuraLVAR):
         initargs = (info_y, info_f, info_r, info_cv, info_pred, cvsplits, 
                     copy.deepcopy(em_state), self.config)
 
-        logger.info('Starting cross-validation')
-
+        if self.config.numerical.verbose:
+            mode = self.config.validation.cv_type
+            n_splits = len(cvsplits)
+            print(f"Starting cross-validation with N_jobs:{self.n_jobs}, "
+                  f"mode:{mode}, splits:{n_splits}")
+    
         Parallel(n_jobs=self.n_jobs, verbose=10)(
-            delayed(self._cvfit)(i, *initargs) for i in range(len(cvsplits))
+            delayed(self._cvfit)((lam_idx, lam_), *initargs) 
+                for lam_idx, lam_ in enumerate(lambda_range)
         )
 
-        logger.info('Done cross-validation')
+        if self.config.numerical.verbose:
+            print('Done cross-validation')
 
         self.cv_lambdas = lambda_range
         cv_mat[:] = np.reshape(shared_cv_mat, cv_mat.shape)
@@ -297,21 +315,33 @@ class NeuraLVARCV(NeuraLVAR):
             try:
                 shm.unlink()
             except Exception as exc:
-                logger.info(f"Unlink shared-memory issue: {exc}")
-        # Find best mu
-        # If Estimation stability criterion is used we need cv_mat[0] and 
-        # pred_mat else we just use $\lambda * ||A||_1$ as the metric.
-        index = self.mse_path[0].mean(axis=0).argmin()
-
+                print(f"Unlink shared-memory issue: {exc}")
+        
+        # find best lambda 
+        # if Estimation Stability criterion we use cv_mat[0] and pred_mat else
+        # we use the Generalized CV metric.
         if self.config.validation.use_es:
+            # best log likelihood lambda
+            index = self.mse_path[0].mean(axis=0).argmin()
             try:
                 best_lambda = lambda_range[np.nanargmin(self.es_path[:index])]
-            except ValueError:
+            except ValueError as ex:
+                print(f"Estimation Stability error: {ex} fallback to ML lambda")
                 best_lambda = lambda_range[index]
-            logger.info(f'best_regularizing parameter: {best_lambda} using es')
+            print(f'\n\nbest_regularizing parameter: {best_lambda} using es\n')
         else:
-            best_lambda = lambda_range[index]
-            logger.info(f'best_regularizing parameter: {best_lambda}')
+            # lambda list
+            x_gcv = lambda_range
+
+            # GCV values
+            y_gcv = self.mse_path[1, 0, :] 
+
+            # find knee in L-shaped curve
+            best_lambda = KneeLocator(x_gcv, y_gcv, 
+                                      direction='decreasing',
+                                      curve='convex').knee
+            
+            print(f'\n\nbest_regularizing parameter: {best_lambda} using GCV\n')
 
         em_state, smoother_result = self._fit(y, F, R, best_lambda, em_state)
         m = em_state.N_sources_upper

@@ -140,7 +140,7 @@ class ModelOptimizerConfig:
 class ModelValidationConfig:
     cv: int = 5
     use_es: bool = False
-    cv_type: str = 'seeded'
+    cv_type: str = 'GCV'
 
 @dataclass(frozen=True)
 class ModelNumericalConfig:
@@ -232,7 +232,7 @@ class ModelConfig:
             
             validation = ModelValidationConfig(
                 cv = kwargs.pop("cv", 5),
-                cv_type = kwargs.pop("cv_type", "seeded"),
+                cv_type = kwargs.pop("cv_type", "GCV"),
                 use_es = kwargs.pop("use_es", True),
             ),
             

@@ -170,20 +170,18 @@ def gc_extraction(y, F, R, ROIs, em_state, config):
                                              eff_eigenmodes, config)    
     links_to_check = wald_screen(links_to_check, em_state, smoother_result, 
                                  config)
-
+    
     if config.numerical.verbose:
         print(f"Checking {len(links_to_check)} links...")
     
     if isinstance(config.parallel, ModelMultiprocessConfig):
-        dev_raw, bias_r, bias_f, nonconv_flag = multiprocess_test_links(links_to_check, 
-                                                                y, F, R, 
-                                                                lambda_,
-                                                                em_state, 
-                                                                config)
+        dev_raw, bias_r, bias_f, nonconv_flag = multiprocess_test_links(
+                                                links_to_check, y, F, R, 
+                                                lambda_, em_state, config)
     else:
-        dev_raw, bias_r, bias_f, nonconv_flag = batched_test_links(links_to_check, 
-                                                           y, F, R, lambda_,
-                                                           em_state, config)
+        dev_raw, bias_r, bias_f, nonconv_flag = batched_test_links(
+                                                links_to_check, y, F, R, 
+                                                lambda_, em_state, config)
         
     if config.numerical.verbose:
         print("GC testing finished. Total fit+link testing time:")

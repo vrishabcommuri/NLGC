@@ -4,6 +4,7 @@ import numpy as np
 import jax
 jax.config.update("jax_enable_x64", True)
 
+DEBUG = True
 
 def solve_ss_covariance_newton_raphson(a, f, q, r, s_init, maxiter=50, 
                                         tol=1e-7, maxerror=0.02, verbose=True):
@@ -66,12 +67,12 @@ def solve_ss_covariance_newton_raphson(a, f, q, r, s_init, maxiter=50,
         if error < tol:
             return x_k, n_k
 
-
+    if DEBUG:
+        print("ss cov newton raphson nonconvergence, try qz solver")
     return solve_ss_covariance_qz(a.T, f.T, q, r)
 
 
 def solve_ss_covariance_qz(a, f, q, r):
-    print("newton raphson failed! falling back to qz solver")
     try:
         P = linalg.solve_discrete_are(a.T, f.T, q, r, balanced=False)           
     except np.linalg.LinAlgError:
@@ -88,8 +89,15 @@ def solve_ss_covariance_qz(a, f, q, r):
 
 def solve_ss_covariance(a, f, q, r, s_init=None):
     if s_init is None:
+        if DEBUG:
+            print("ss covariance uninitialized, using qz solver")
         P, N = solve_ss_covariance_qz(a, f, q, r)
     else:
-        P, N = solve_ss_covariance_newton_raphson(a.T, f.T, q, r, s_init)
+        try:
+            P, N = solve_ss_covariance_newton_raphson(a.T, f.T, q, r, s_init)
+        except np.linalg.LinAlgError:
+            if DEBUG:
+                print("ss cov newton raphson failed! try qz solver")
+            P, N = solve_ss_covariance_qz(a, f, q, r)
 
     return P, N

@@ -459,67 +459,92 @@ def rts_smoother_blas(y, F, R, em_state, use_lapack=True):
     return em_state, smoother_result
 
 
+def disturbance_smoother_preamble(A, kalman_gain, F, innovation_precision):
+    # L is the closed-loop state transition matrix 
+    L = A - A @ kalman_gain @ F
+    
+    # M is the projected innovation precision 
+    proj_innov_precision = F.T @ innovation_precision @ F
 
-def disturbance_smoother_blas(y, F, R, em_state, use_lapack=True):
+    # solve the discrete Lyapunov equation for the state disturbance information
+    # N. we want N = L^T N L + M. scipy solves a x a^H - x + q = 0, therefore
+    # we must pass L.T to compute the backward variance.
+    information_mat = linalg.solve_discrete_lyapunov(L.T, proj_innov_precision)
+    information_mat = 0.5 * (information_mat + information_mat.T)
+
+    return L, information_mat
+
+
+def disturbance_smoother_jax(y, F, R, em_state):
     #---------------------------------------------------------------------------
     # disturbance smoother setup
     #---------------------------------------------------------------------------
 
     assert y.shape[1] == F.shape[0]
     N_times = y.shape[0]
-    N_sensors, N_sources = F.shape
+    N_sources = F.shape[1]
     A = em_state.A
-    
+
     # smoother operates on filtered states
-    em_state, filter_result = forward_filter_blas(y, F, R, em_state, use_lapack)
+    em_state, filter_result = forward_filter_jax(y, F, R, em_state)
 
     innovation_precision = filter_result.innovation_precision
     kalman_gain = filter_result.kalman_gain
     predicted_state = filter_result.predicted_state
 
     # --------------------------------------------------------------------------
-    # disturbance smoother
+    # disturbance smoother preamble
     # --------------------------------------------------------------------------
 
-    proj_innov_precision = F.T @ innovation_precision @ F
-    L = A - A @ kalman_gain @ F 
-    information_mat = linalg.solve_discrete_lyapunov(L, proj_innov_precision)
-    
-    AK = A @ kalman_gain
+    dtype = A.dtype
+    out_types = (
+        jax.ShapeDtypeStruct((N_sources, N_sources), dtype), # L
+        jax.ShapeDtypeStruct((N_sources, N_sources), dtype), # information_mat
+    )
 
-    disturbance_information = proj_innov_precision + \
-                                    AK.T @ information_mat @ AK
-    
+    L, information_mat = jax.pure_callback(
+        disturbance_smoother_preamble,
+        out_types, A, kalman_gain, F, innovation_precision,
+        vmap_method='broadcast_all'
+    )
+
+    # for latent state process noise, the disturbance information is exactly N
+    disturbance_information = information_mat
+
+    # --------------------------------------------------------------------------
+    # backward smoothing
+    # --------------------------------------------------------------------------
+
     innovation = y - predicted_state @ F.T
 
     # project innovations into information space
+    # (T, N_sensors) @ (N_sensors, N_sensors) = (T, N_sensors)
     innovation_information = innovation @ innovation_precision
+    
+    # (T, N_sensors) @ (N_sensors, N_sources) = (T, N_sources)
+    proj_innovation_information = innovation_information @ F
 
-    # disturbance smoother recursion
-    backward_information = np.empty((N_times, N_sources), dtype=np.float64)
-    smoothed_disturbance = np.empty_like(y)
+    def smoother_step(r_t_plus_1, proj_innov_t):
+        # backward information recursion for the latent state disturbance (r_t)
+        # r_t = F^T \Omega v_t + L^T r_{t+1}
+        r_t = proj_innov_t + L.T @ r_t_plus_1
+        return r_t, r_t
 
-    backward_information[-1] = 0.0
+    # init
+    r_last = jnp.zeros(N_sources, dtype=dtype)
 
-    proj_innovation_information = F.T @ innovation_information
+    _, smoothed_disturbance = jax.lax.scan(
+        smoother_step,
+        init=r_last,
+        xs=proj_innovation_information,
+        reverse=True,
+    )
 
-    for t in reversed(range(N_times)):
-        # smoothed measurement disturbance
-        smoothed_disturbance[t] = innovation_information[t] - \
-                                  AK.T @ backward_information[t]
-
-        # backward information recursion
-        if t > 0:
-            backward_information[t - 1] = proj_innovation_information[t] + \
-                                          L.T @ backward_information[t]
-            
-    # sum_t (n_t^T C n_t) where n is disturbance vec and C is disturbance info
-    # constructed from precision matrices. Similar to mahalanobis distance
-    # x^T\Sigma^{-1}x. this gives us the average disturbances (state noise 
-    # residuals) basically scaled by the noise variances
+    # sum_t (r_t^T N r_t) where r_t is the state disturbance vector 
+    # and N is its variance/information matrix
     negative_avg_scaled_disturbance = \
-                    -np.sum((smoothed_disturbance @ disturbance_information) * \
-                    smoothed_disturbance)
+        -jnp.sum((smoothed_disturbance @ disturbance_information) * \
+        smoothed_disturbance)
 
     smoother_result = DisturbanceSmootherResult(
         disturbance = smoothed_disturbance,
@@ -528,8 +553,107 @@ def disturbance_smoother_blas(y, F, R, em_state, use_lapack=True):
         negative_log_likelihood = filter_result.negative_log_likelihood,
     )
 
-    return smoother_result
+    return em_state, smoother_result
 
+
+
+def measurement_smoother_preamble(A, kalman_gain, F, innovation_precision):
+    L = A - A @ kalman_gain @ F
+    proj_innov_precision = F.T @ innovation_precision @ F
+
+    # solve N = L^T N L + F^T \Omega F for the backward information variance
+    information_mat = linalg.solve_discrete_lyapunov(L.T, proj_innov_precision)
+    information_mat = 0.5 * (information_mat + information_mat.T)
+
+    AK = A @ kalman_gain
+    
+    # we use innovation_precision (N_sensors, N_sensors) rather than
+    # proj_innov_precision (N_sources, N_sources) so it aligns with (AK)^T N
+    # (AK).
+    disturbance_information = innovation_precision + AK.T @ information_mat @ AK
+
+    return L, AK, disturbance_information
+
+
+def measurement_smoother_jax(y, F, R, em_state):
+    #---------------------------------------------------------------------------
+    # disturbance smoother setup
+    #---------------------------------------------------------------------------
+
+    assert y.shape[1] == F.shape[0]
+    N_times = y.shape[0]
+    N_sensors, N_sources = F.shape
+    A = em_state.A
+
+    # smoother operates on filtered states
+    em_state, filter_result = forward_filter_jax(y, F, R, em_state)
+
+    innovation_precision = filter_result.innovation_precision
+    kalman_gain = filter_result.kalman_gain
+    predicted_state = filter_result.predicted_state
+
+    # --------------------------------------------------------------------------
+    # disturbance smoother preamble
+    # --------------------------------------------------------------------------
+
+    dtype = A.dtype
+    out_types = (
+        jax.ShapeDtypeStruct((N_sources, N_sources), dtype),  # L
+        jax.ShapeDtypeStruct((N_sources, N_sensors), dtype),  # AK
+        jax.ShapeDtypeStruct((N_sensors, N_sensors), dtype),  # dist info
+    )
+
+    L, AK, disturbance_information = jax.pure_callback(
+        measurement_smoother_preamble,
+        out_types, A, kalman_gain, F, innovation_precision,
+        vmap_method='broadcast_all'
+    )
+
+    # --------------------------------------------------------------------------
+    # backward smoothing
+    # --------------------------------------------------------------------------
+
+    innovation = y - predicted_state @ F.T
+
+    # (T, N_sensors) @ (N_sensors, N_sensors) = (T, N_sensors)
+    innovation_information = innovation @ innovation_precision
+    
+    # (T, N_sensors) @ (N_sensors, N_sources) = (T, N_sources)
+    proj_innovation_information = innovation_information @ F
+
+    def smoother_step(r_t, inputs):
+        innov_info_t, proj_innov_info_t = inputs
+
+        smoothed_dist_t = innov_info_t - AK.T @ r_t
+
+        r_t_minus_1 = proj_innov_info_t + L.T @ r_t
+
+        return r_t_minus_1, smoothed_dist_t
+
+    # init
+    r_last = jnp.zeros(N_sources, dtype=dtype)
+
+    _, smoothed_disturbance = jax.lax.scan(
+        smoother_step,
+        init=r_last,
+        xs=(innovation_information, proj_innovation_information),
+        reverse=True,
+    )
+
+    # sum_t (e_t^T C e_t) where e is measurement disturbance vec 
+    # and C is disturbance information
+    negative_avg_scaled_disturbance = \
+        -jnp.sum((smoothed_disturbance @ disturbance_information) * \
+        smoothed_disturbance)
+
+    smoother_result = DisturbanceSmootherResult(
+        disturbance = smoothed_disturbance,
+        disturbance_information = disturbance_information,
+        model_fit = negative_avg_scaled_disturbance,
+        negative_log_likelihood = filter_result.negative_log_likelihood,
+    )
+
+    return em_state, smoother_result
 
 
 def align_cast(args, use_lapack):
