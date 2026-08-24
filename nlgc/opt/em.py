@@ -125,20 +125,32 @@ def em_jax(y, F, R, em_state, config, lambda_, N_iter):
 
             # E-step 
             em_new, smoother_result = rts_smoother_jax(y, F, R, em_state)
-
+        
             # M-step
-            em_new, rel_A_change, curr_objective = proximal_param_update(
-                em_new,
-                smoother_result,
-                config,
-                lambda_,
+            def ppu(i, val):
+                em_new, _, _ = val
+
+                em_out, rel_A_change, curr_objective = proximal_param_update(
+                    em_new,
+                    smoother_result,
+                    config,
+                    lambda_,
+                )
+
+                return em_out, rel_A_change, curr_objective
+            
+            # M-step cyclic iters
+            em_new, rel_A_change, curr_objective = jax.lax.fori_loop(
+                lower=0,
+                upper=config.optimizer.max_cyclic_iter, # num M-step cycles
+                body_fun=ppu,
+                init_val=(em_new, 0.0, 0.0)
             )
 
             # likelihood belonging to the smoother_result generated from the OLD
             # parameter state, not em_new.A.
             curr_ll = -smoother_result.negative_log_likelihood
 
-    
             # Increment the iteration whenever we actually perform an EM update.
             curr_iter = prev_iter + 1
 
@@ -184,17 +196,15 @@ def em_jax(y, F, R, em_state, config, lambda_, N_iter):
                 0,
             )
 
-
             def print_progress():
                 jax.debug.print(
-                    "curr_iter={i}: "
-                    "curr_obj={cobj} "
-                    "prev_obj={pobj} "
-                    "rel_obj_change={roc} "
-                    "curr_ll={ll} "
-                    "rel_ll_change={rlc} "
-                    "rel_A_change={rac} "
-                    "conv_count={cc}",
+                    "curr_iter={i:3d}: "
+                    "curr_obj={cobj:.3f} "
+                    "prev_obj={pobj:.3f} "
+                    "rel_obj_change={roc:.3e} "
+                    "curr_ll={ll:.3f} "
+                    "rel_ll_change={rlc:.3e} "
+                    "rel_A_change={rac:.3e}",
                     i=curr_iter,
                     cobj=curr_objective,
                     pobj=prev_objective,
@@ -202,11 +212,10 @@ def em_jax(y, F, R, em_state, config, lambda_, N_iter):
                     ll=curr_ll,
                     rlc=rel_ll_change,
                     rac=rel_A_change,
-                    cc=convergence_count_new,
                 )
 
             jax.lax.cond(
-                ((curr_iter % 10) == 0) & config.numerical.verbose,
+                ((curr_iter % 10) == 0) & (config.numerical.verbose > 0),
                 print_progress,
                 lambda: None,
             )

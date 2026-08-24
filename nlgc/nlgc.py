@@ -1,5 +1,6 @@
 import numpy as np
 from mne.forward import is_fixed_orient
+from mne.io.constants import FIFF
 from mne.minimum_norm.inverse import _check_reference
 from scipy import linalg
 from nlgc.utils.leadfield import prepare_eigenmodes
@@ -9,7 +10,7 @@ from nlgc.utils.initialize import initialize_em_state
 import time
 from nlgc.utils.param_vis import generate_report
 
-def nlgc_map(name, evoked, forward, noise_cov, labels, patch_idx, 
+def nlgc_map(name, evoked, forward, noise_cov, src_target, patch_idx, 
              config=None, save_dir = None, **kwargs):
     """NLGC connectivity map estimation
 
@@ -26,11 +27,9 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, patch_idx,
     forward: mne.Forward
         forward solution in MNE-python standard format
     noise_cov: mne.Covariance
-        measurement noise covariance matrix (could be obtained from empty room
+        measurement noise covariance matrix (obtained from empty room
         or base-line recordings)
-    labels: mne.SourceSpaces | mne.Forward | mne.Labels
-        source space, forward solution, or list of labels, all in MNE-python
-        standard format
+    src_target: mne.SourceSpaces used for leadfield summarization (e.g., ico1)
     order: int
         VAR model order
     self_history: int | None
@@ -108,14 +107,20 @@ def nlgc_map(name, evoked, forward, noise_cov, labels, patch_idx,
     # free-orientation forwards are the volume/mixed source space case, which
     # prepare_eigenmodes supports via _reduce_lead_field_vol -- but only when
     # the config actually asks for multiple orientations
-    if not is_fixed_orient(forward) and n_orients <= 1:
-        raise ValueError(f"Can't work with free orientation forward: {forward} "
-                         f"unless config.latent.n_orients > 1")
+    # if not is_fixed_orient(forward) and n_orients <= 1:
+    #     raise ValueError(f"Can't work with free orientation forward: {forward} "
+    #                      f"unless config.latent.n_orients > 1")
+                         
+    if src_target[0]["coord_frame"] != FIFF.FIFFV_COORD_HEAD:
+        raise ValueError("Can't work non-head source space orientation. "
+                         "Try applying trans to source space to put it in "
+                         "head coordinates")
+        
 
     # keyword args: the positional form put the whole ModelConfig into
     # prepare_eigenmodes' `n_eigenmodes: int` slot
     weights, G, label_vertidx, label_names, gain_info, whitener = \
-            prepare_eigenmodes(evoked.info, forward, noise_cov, labels,
+            prepare_eigenmodes(evoked.info, forward, noise_cov, src_target,
                                n_eigenmodes=n_eigenmodes,
                                n_orients=n_orients,
                                loose=config.forward.loose,

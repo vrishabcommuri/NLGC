@@ -4,7 +4,7 @@ import numpy as np
 import jax
 jax.config.update("jax_enable_x64", True)
 
-DEBUG = True
+DEBUG = False
 
 def solve_ss_covariance_newton_raphson(a, f, q, r, s_init, maxiter=50, 
                                         tol=1e-7, maxerror=0.02, verbose=True):

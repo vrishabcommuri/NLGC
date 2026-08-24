@@ -37,17 +37,12 @@ def prepare_eigenmodes(info, forward, noise_cov, labels, n_eigenmodes=2,
     logger.info('Whitening data matrix.')
     print('check orientation')
     if not is_fixed_orient(forward):
-        if n_orients <= 1:
-            raise ValueError('Number of orientations is less than or equal to 1 for not fixed orientation forward. Please use accurate number of orientations')
+        # if n_orients <= 1:
+        #     raise ValueError('Number of orientations is less than or equal to 1 for not fixed orientation forward. Please use accurate number of orientations')
+        
         print('The lead field is not fixed-orientation using mixed source space method')
-        if isinstance(labels, Forward):
-            weights, G, label_vertidx = \
-                _reduce_lead_field_vol(forward, labels, n_eigenmodes, 
-                                       n_orients, data=gain.T)
-            label_names = []
-            for i, label in enumerate(labels['src']):
-                label_names.extend(map(lambda x: f'{i}-{x}', label['vertno']))
-        elif isinstance(labels, SourceSpaces):
+        
+        if isinstance(labels, SourceSpaces):
             weights, G, label_vertidx = \
                 _reduce_lead_field_vol(forward, labels, n_eigenmodes, 
                                        n_orients, data=gain.T)
@@ -55,8 +50,8 @@ def prepare_eigenmodes(info, forward, noise_cov, labels, n_eigenmodes=2,
             for i, label in enumerate(labels):
                 label_names.extend(map(lambda x: f'{i}-{x}', label['vertno']))
         else:
-            raise ValueError('Not supported {:s}: labels are expected to be either an mne.SourceSpace or'
-                             'mne.Forward object.'.format(labels))
+            raise ValueError('Not supported {:s}: labels are expected to be' \
+                             ' mne.SourceSpace'.format(labels))
     else:
         eff_eigenmodes = n_orients * n_eigenmodes
         if n_orients != 1:
@@ -94,7 +89,6 @@ def prepare_eigenmodes(info, forward, noise_cov, labels, n_eigenmodes=2,
             raise ValueError('Not supported {:s}: labels are expected to be either an mne.SourceSpace or'
                             'mne.Forward object or list of mne.Labels.'.format(labels))
         
-
     # test if there are empty columns
     sel = np.any(G, axis=0)
     G = G[:, sel].copy()
@@ -171,50 +165,48 @@ def _reduce_lead_field_vol(forward, src, n_eigenmodes, n_orients, data=None):
     if isinstance(src, mne.Forward):
         src = src['src']
 
-
-    print(f'Data Reshaped shape is {data.shape}')
-    print(src)
-    print(forward['src'])
     groups, coarse_rr = _prepare_leadfield_reduction_vol(src, forward['src'])
  
-    group_eigenmodes = np.zeros((len(groups)*n_eigenmodes * n_orients, 
+    group_eigenmodes = np.zeros((len(groups) * n_eigenmodes * n_orients, 
                                  data.shape[-1]), dtype=data.dtype)
-    print(f'Group Eigenmodes Shape {group_eigenmodes.shape}')
+    
+    print(f'Reduced leadfield shape is {group_eigenmodes.shape}')
     
     weights = []
     
     for coarse_idx, members in groups.items():
-        print(f'coarse_idx: {coarse_idx}, and members: {members}')
         idxs = np.empty(0, dtype=int)
+
+        # forward source space is a list of sub-sourcespaces, typically just 1
+        # monolithic, but we loop over indices just in case
         for i in range(len(forward['src'])):
             if len(members[i]) > 0:
                 idxs = np.append(idxs, np.array(members[i]) + \
-                    int(np.sum([forward['src'][j]['nuse'] 
+                    int(np.sum([forward['src'][j]['nuse'] # subspace no. offset
                                 for j in range(i)])))
             else:
                 continue
+
         ras_idxs = np.concatenate([3 * idxs[:, None] + np.arange(3)], 
                                   axis=1).ravel()
         subvoxels = data[ras_idxs]
-        print(f'subvoxel shape: {subvoxels.shape}')
+
         eig_src_weights, this_group_eigenmodes, percentage_explained = \
-            _truncatedsvd_vol(subvoxels, n_eigenmodes, n_orients, 
+            _truncatedsvd(subvoxels, n_eigenmodes * n_orients, 
                               return_pecentage_explained=True)
         
-        print(f'this_group_eigenmodes shape {this_group_eigenmodes.shape}')
         group_eigenmodes[coarse_idx * n_eigenmodes * n_orients:(coarse_idx + 1)\
                           * n_eigenmodes * n_orients] = this_group_eigenmodes
         
         print(
             f"patch {coarse_idx}: vertices {subvoxels.shape[0]} -> "
-            f"{n_eigenmodes} leadfield reduction explained" 
+            f"{n_eigenmodes} leadfield reduction explained " 
             f"{percentage_explained*100:.3f}% variance"
         )
         
         weights.append(eig_src_weights)
 
     return weights, group_eigenmodes.T, groups
-
 
 
 def _prepare_label_extraction(labels, src):
@@ -301,6 +293,7 @@ def _prepare_leadfield_reduction(src_target, src_origin):
             grouped_vertidx_no_offset.append(vertidx_no_offset)
             
     return grouped_vertidx_no_offset, grouped_vertidx, n_groups, n_verts
+    
 
 def _prepare_leadfield_reduction_vol(vol_target, src_origin):
     # fine and coarse coordinates in RAS
@@ -320,7 +313,6 @@ def _prepare_leadfield_reduction_vol(vol_target, src_origin):
 
         for fine_idx, coarse_idx in enumerate(src_idx):
             groups[coarse_idx][i].append(fine_idx)
-
 
     return groups, coarse_rr
     
@@ -403,33 +395,7 @@ def _extract_label_eigenmodes(fwd, labels, data=None, mode='mean',
                     func(flip, this_data, n_eigenmodes)
 
         return label_eigenmodes.T, label_vertidx, src_flip
-
-
-def _truncatedsvd_vol(a, n_components=2, n_orients = 3,
-                      return_pecentage_explained=False):
-    n_total, n_sensors = a.shape
-    n_voxels = n_total // n_orients
-
-    # The spatial weighting comes from an SVD over voxels, so at most n_voxels
-    # components exist -- not min(*a.shape), which the old bound assumed.
-    if n_components > n_voxels:
-        raise ValueError('n_components={:d} should not exceed the number of voxels '
-                         'in the patch ({:d})'.format(n_components, n_voxels))
-
-    # (n_voxels, n_orients, n_sensors): each row is one voxel's full response
-    a3 = a.reshape(n_voxels, n_orients, n_sensors)
-    u, s, _ = linalg.svd(a3.reshape(n_voxels, n_orients * n_sensors),
-                         full_matrices=False, compute_uv=True,
-                         check_finite=True, lapack_driver='gesdd')
-
-    modes = np.empty((n_components * n_orients, n_sensors), dtype=a.dtype)
-    for m in range(n_components):
-        for r in range(n_orients):
-            modes[m * n_orients + r] = u[:, m] @ a3[:, r, :]
-
-    if return_pecentage_explained:
-        return u, modes, s[:n_components].sum() / s.sum()
-    return u, modes
+    
 
 def _truncatedsvd(a, n_components=2, return_pecentage_explained=False):
     if n_components > min(*a.shape):
