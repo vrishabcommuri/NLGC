@@ -1,8 +1,6 @@
 import numpy as np
-from mne.forward import is_fixed_orient
 from mne.io.constants import FIFF
 from mne.minimum_norm.inverse import _check_reference
-from scipy import linalg
 from nlgc.utils.leadfield import prepare_eigenmodes
 from nlgc.nlgc_utils import gc_extraction, NLGC
 from nlgc.config import ModelConfig
@@ -94,7 +92,7 @@ def nlgc_map(name, evoked, forward, noise_cov, src_target, patch_idx,
         config = ModelConfig.from_legacy_kwargs(kwargs)
 
 
-    if any(l <= 0 for l in config.sparsity.lambda_range):
+    if any(lam_ <= 0 for lam_ in config.sparsity.lambda_range):
         raise ValueError('only positive lambdas are allowed, got '
                          f'{config.sparsity.lambda_range}')
 

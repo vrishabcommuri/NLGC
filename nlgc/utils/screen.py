@@ -204,7 +204,7 @@ def _report_empirical_null(scores, null_fit, threshold, alpha):
     the group-lasso-shrunk estimator sits from the unpenalized chi2 the
     statistic would otherwise be compared against.
     """
-    print(f"\n--- Wald screen calibration ---")
+    print("\n--- Wald screen calibration ---")
     print(f"scores: min {scores.min():.3g}  median {np.median(scores):.3g}  "
           f"mean {scores.mean():.3g}  max {scores.max():.3g}")
 
@@ -229,7 +229,7 @@ def _report_chi2_null(scores, wald_scores, alpha):
     """
     k_dofs = np.array([k for _, _, _, k in wald_scores])
 
-    print(f"\n--- Wald screen calibration ---")
+    print("\n--- Wald screen calibration ---")
     print(f"scores: min {scores.min():.3g}  median {np.median(scores):.3g}  "
           f"mean {scores.mean():.3g}  max {scores.max():.3g}")
 

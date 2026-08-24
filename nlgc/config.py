@@ -130,7 +130,7 @@ class ModelForwardConfig:
 @dataclass(frozen=True)
 class ModelOptimizerConfig:
     max_iter: int = field(default=500, metadata={"static": True})  
-    max_cyclic_iter: int = 3  # legacy; deprecated
+    max_cyclic_iter: int = 3  
     max_fasta_iter: int = 1000
     tol: float = 1e-4
     fasta_tol: float = 1e-5
@@ -140,7 +140,7 @@ class ModelOptimizerConfig:
 class ModelValidationConfig:
     cv: int = 5
     use_es: bool = False
-    cv_type: str = 'GCV'
+    cv_type: str = "GCV"
 
 @dataclass(frozen=True)
 class ModelNumericalConfig:
@@ -153,6 +153,10 @@ class ModelDebugConfig:
     plotlevel: int = 0
 
 @dataclass(frozen=True)
+class ModelGCTestConfig:
+    gc_test_method: str = "likelihood ratio"
+
+@dataclass(frozen=True)
 class ModelConfig:
     latent: ModelLatentConfig
     sparsity: ModelSparsityConfig
@@ -161,6 +165,7 @@ class ModelConfig:
     validation: ModelValidationConfig
     numerical: ModelNumericalConfig
     parallel: ModelParallelConfig
+    gctest: ModelGCTestConfig
     debug: ModelDebugConfig
 
     @classmethod
@@ -239,6 +244,11 @@ class ModelConfig:
             numerical = ModelNumericalConfig(
                 use_lapack = kwargs.pop("use_lapack", True),
                 verbose = kwargs.pop("verbose", False),
+            ),
+
+            gctest = ModelGCTestConfig(
+                gc_test_method = kwargs.pop("gc_test_method", 
+                                            "likelihood ratio")
             ),
 
             debug = ModelDebugConfig(

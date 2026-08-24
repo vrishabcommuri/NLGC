@@ -3,6 +3,7 @@ import warnings
 from scipy import linalg
 from scipy.sparse.linalg import LinearOperator, cg
 from nlgc.opt.proximal import calculate_ss
+import dataclasses
 
 
 def compute_bias(em_state, smoother_result, config):
@@ -17,9 +18,33 @@ def compute_bias(em_state, smoother_result, config):
     n_orients = config.latent.n_orients
     p = config.latent.order
     
-    bias = sample_path_bias(Q, A, x, P, B, A_mask, 
+    bias, _ = sample_path_bias(Q, A, x, P, B, A_mask, 
                             n_orients, m, p)
     return bias
+
+def compute_bias_vdG(em_state, smoother_result, config):
+    m = em_state.N_sources_upper
+    A = em_state.A[:m]
+    Q = em_state.Q[:m, :m]
+    A_mask = em_state.A_mask[:m]
+    x = smoother_result.smoothed_state
+    P = smoother_result.smoothed_cov
+    B = smoother_result.smoother_gain
+
+    assert np.all(A_mask == 1), "van de Geer debiasing is only supported for "\
+            "the unrestricted full model, but got a model with a restriction"
+
+    n_orients = config.latent.n_orients
+    p = config.latent.order
+    
+    _, Theta_g = sample_path_bias(Q, A, x, P, B, A_mask, 
+                            n_orients, m, p)
+
+    A_debiased = em_state.A
+    A_debiased[:m] = A_debiased[:m] + Theta_g
+    em_state_debiased = dataclasses.replace(em_state, 
+                                            A = A_debiased)
+    return em_state_debiased
 
 
 def compute_bias_idx(source, target, em_state, smoother_result, config):
@@ -48,7 +73,11 @@ def sample_path_bias(q, a, x_bar, s_bar, b, A_mask, n_orients, m, p):
     # nlgc_test_utils branch?
     s1, s2, s3, n = calculate_ss(x_bar, s_bar, b, m, p)
 
-    bias = 0
+    bias = 0.0
+
+    # raw parameter debiasing term \Theta * g(\theta) from van de Geer. ('bias'
+    # is the debiasing newton step size in likelihood domain.)
+    Theta_g = np.zeros_like(a)
 
     s2_factor = linalg.cho_factor(s2)
     
@@ -161,9 +190,14 @@ def sample_path_bias(q, a, x_bar, s_bar, b, A_mask, n_orients, m, p):
         )
         
         assert info == 0, f"bias estimation Hessian CG exit with code {info}"
+        
+        # step is H^{-1} g(\theta) = \Theta g(\theta) for free parameters
+        step_block = np.zeros((n_orients, dtot), dtype=a.dtype)
+        step_block.reshape(-1)[keep_idx] = step
+        Theta_g[block, :] = step_block
 
         bias += n * np.dot(ldot_free, step)
-    return bias
+    return bias, Theta_g
 
 
 def _voxel_block(v, n_orient=3):

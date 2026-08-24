@@ -1,9 +1,7 @@
 import jax
 import jax.numpy as jnp
 import dataclasses
-from nlgc.opt.fastac import Fasta
 from functools import partial
-import numpy as np
 import time
 jax.config.update("jax_enable_x64", True)    
 

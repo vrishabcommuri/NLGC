@@ -6,8 +6,9 @@
 import numpy as np
 
 from nlgc.utils.restriction import link_to_A_mask
-from nlgc.opt.em import em_jax, _copycast_em_state_numpy
-from nlgc.bias_utils import compute_bias
+from nlgc.opt.em import em_jax, _copycast_em_state_numpy, _copycast_em_state_jax
+from nlgc.bias_utils import compute_bias, compute_bias_vdG
+from nlgc.opt.kalman.steady_state import solve_ss_covariance_qz
 # from nlgc.test.viz import (plot_transition_and_mask, 
 #                            plot_transition_and_mask_blurred)
 # import matplotlib.pyplot as plt
@@ -226,7 +227,8 @@ def multiprocess_test_links(links_to_check, y, F, R, lambda_, em_state, config):
 
 def _learn_reduced_model(targ, src, y, F, R, lambda_f, em_state, config):   
     if config.numerical.verbose: 
-        print(f"reduced model {current_process().name} processing {src}->{targ}")
+        print(f"reduced model {current_process().name} "
+              f"processing {src}->{targ}")
     
     model_r = NeuraLVAR.from_config(config)
 
@@ -259,7 +261,8 @@ def _learn_reduced_model_parallel(link_index, info_y, info_f, info_bias_r,
             F, shm_f = link_share_memory(info_f)
             bias_r, shm_bias_r = link_share_memory(info_bias_r)
             ll_r, shm_ll_r = link_share_memory(info_ll_r)
-            nonconv_flag, shm_nonconv_flag = link_share_memory(info_nonconv_flag)
+            nonconv_flag, shm_nonconv_flag = \
+                link_share_memory(info_nonconv_flag)
         except BaseException as e:
             logger.error("Could not link to memory")
             raise e
@@ -274,7 +277,91 @@ def _learn_reduced_model_parallel(link_index, info_y, info_f, info_bias_r,
         for shm in (shm_y, shm_f, shm_bias_r, shm_ll_r, shm_nonconv_flag):
             shm.close()    
 
+
+def compute_P(F, R, em_state):
+    A = em_state.A
+    Q = em_state.Q
+
+    # companion jitter for inversion stability
+    jitter = 1e-8
+    Q += jnp.eye(Q.shape[0]) * jitter
+    Q = 0.5 * (Q + Q.T)
+
+    N_sensors, _ = F.shape
+    (P_pred, N_pred) = solve_ss_covariance_qz(A, F, Q, R)
+    return P_pred
+
+
+def _eval_link_ggc(targ, src, F, R, em_state_debiased, detS_full, config):
+    """
+    worker function to evaluate a single restricted model link in parallel.
+    """
+    if config.numerical.verbose: 
+        print(f"reduced model {current_process().name} processing {src}->{targ}")
+        
+    A_mask = link_to_A_mask(targ, src, em_state_debiased, config)
+    em_state_debiased_red = dataclasses.replace(
+        em_state_debiased,
+        A_mask = A_mask,
+        A = em_state_debiased.A * A_mask
+    )
+
+    P_red = compute_P(F, R, em_state_debiased_red)
+    Sigma_red = F @ P_red @ F.T + R
+    Sigma_red = np.array(Sigma_red)
+
+    detS_red = np.linalg.det(Sigma_red)
+    gcval = np.log(detS_red / detS_full)
+
+    return targ, src, gcval
+
+
+def multiprocess_test_links_ggc(links_to_check, y, F, R, lambda_, em_state, 
+                                config):
+    em_state = _copycast_em_state_numpy(em_state)
+    eff_eigenmodes = config.latent.n_eigenmodes * config.latent.n_orients
+    m = em_state.N_sources_upper
+    nx = m // (eff_eigenmodes)
+    N_times = y.shape[0]
+
+    F_stat = np.zeros((nx, nx))
+
+    # warm-started model run, holdover from likelihood GC approach but preserved
+    # here for consistency
+    model_f = NeuraLVAR.from_config(config)
+    em_state_warm, smoother_result_warm = model_f.fit(y, F, R, lambda_, 
+                                                      em_state)
     
+    em_state_warm = _copycast_em_state_numpy(em_state_warm)
+    # debias A before inference
+    em_state_debiased = compute_bias_vdG(em_state_warm, smoother_result_warm, 
+                                     config)
+
+    P_full = compute_P(F, R, em_state_debiased)
+    Sigma_full = F @ P_full @ F.T + R   # GGC operates on observed quantities 
+    Sigma_full = np.array(Sigma_full)
+    detS_full = np.linalg.det(Sigma_full)
+
+    n_jobs = min(config.parallel.n_workers, len(links_to_check))
+    # Parallel loop over links_to_check
+    results = Parallel(n_jobs=n_jobs)(
+        delayed(_eval_link_ggc)(
+            targ, src, F, R, em_state_debiased, detS_full, config
+        )
+        for targ, src in links_to_check
+    )
+
+    # Populate the resulting F_stat matrix
+    for targ, src, gcval in results:
+        F_stat[targ, src] = N_times * gcval # GGC values are unscaled by samples
+
+    # conform to API but set to zeros since debiasing is already done before
+    # inference
+    bias_f = 0.0
+    bias_r = np.zeros((nx, nx))
+    nonconv_flag = np.zeros((nx, nx), dtype=np.bool_)
+
+    return F_stat, bias_r, bias_f, nonconv_flag
 
 
 

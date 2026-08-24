@@ -481,7 +481,6 @@ def disturbance_smoother_jax(y, F, R, em_state):
     #---------------------------------------------------------------------------
 
     assert y.shape[1] == F.shape[0]
-    N_times = y.shape[0]
     N_sources = F.shape[1]
     A = em_state.A
 
@@ -581,7 +580,6 @@ def measurement_smoother_jax(y, F, R, em_state):
     #---------------------------------------------------------------------------
 
     assert y.shape[1] == F.shape[0]
-    N_times = y.shape[0]
     N_sensors, N_sources = F.shape
     A = em_state.A
 

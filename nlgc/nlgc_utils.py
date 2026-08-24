@@ -5,9 +5,10 @@ from functools import reduce
 from nlgc.opt import NeuraLVAR, NeuraLVARCV
 from nlgc.stat import fdr_control
 from nlgc.bias_utils import debias_deviances
-from nlgc.parallel_gc import batched_test_links, multiprocess_test_links
+from nlgc.parallel_gc import (batched_test_links, 
+                              multiprocess_test_links,
+                              multiprocess_test_links_ggc)
 from nlgc.utils.restriction import roi_to_link_restriction
-from nlgc.bias_utils import compute_bias
 from nlgc.utils.screen import sparsity_screen, wald_screen
 from nlgc.config import ModelMultiprocessConfig
 from nlgc.test.profile import pretty_print_elapsed
@@ -174,15 +175,22 @@ def gc_extraction(y, F, R, ROIs, em_state, config):
     if config.numerical.verbose:
         print(f"Checking {len(links_to_check)} links...")
     
-    if isinstance(config.parallel, ModelMultiprocessConfig):
-        dev_raw, bias_r, bias_f, nonconv_flag = multiprocess_test_links(
-                                                links_to_check, y, F, R, 
-                                                lambda_, em_state, config)
+    if config.gctest.gc_test_method == 'likelihood ratio':
+        if isinstance(config.parallel, ModelMultiprocessConfig):
+            dev_raw, bias_r, bias_f, nonconv_flag = multiprocess_test_links(
+                                                    links_to_check, y, F, R, 
+                                                    lambda_, em_state, config)
+        else:
+            dev_raw, bias_r, bias_f, nonconv_flag = batched_test_links(
+                                                    links_to_check, y, F, R, 
+                                                    lambda_, em_state, config)
+    elif config.gctest.gc_test_method == 'geweke time-domain':
+        dev_raw, bias_r, bias_f, nonconv_flag = multiprocess_test_links_ggc(
+                                                    links_to_check, y, F, R, 
+                                                    lambda_, em_state, config)
     else:
-        dev_raw, bias_r, bias_f, nonconv_flag = batched_test_links(
-                                                links_to_check, y, F, R, 
-                                                lambda_, em_state, config)
-        
+        raise Exception(f"{config.gctest.gc_test_method=} not supported")
+
     if config.numerical.verbose:
         print("GC testing finished. Total fit+link testing time:")
         end = time.time()
