@@ -43,10 +43,12 @@ def proximal_param_update(em_state, smoother_result, config, lambda_):
     em_state = dataclasses.replace(em_state,
                                    A = em_state.A.at[:m].set(A_shrunk))
     
-    Q_new = solve_for_Q(em_state.A[:m], s1, s2, s3,
-                        config.sparsity.alpha,
-                        config.sparsity.beta,
-                        n_orients)
+    Q_new = solve_for_Q(em_state.A[:m], s1, s2, s3, n, n_orients, 
+                        nu0=None,           # set auto
+                        q_base=1e-4,        # TODO optarg?
+                        singular_values=em_state.Q_prior_scales, 
+                        source_mass=None,   # set auto
+                        sigma_gamma=1)      # TODO optarg?
 
     em_state = dataclasses.replace(em_state,
                                    Q = em_state.Q.at[:m, :m].set(Q_new))
@@ -194,40 +196,177 @@ def solve_for_a(Q, s1, s2, A, A_mask, lambda2, n_orients=3, max_iter=5000,
     return A_final
 
 
-def solve_for_Q(A, s1, s2, s3, alpha, beta, block_size):
+def solve_for_Q(A, s1, s2, s3, n_transitions, block_size, nu0=None, q_base=1e-4,
+    singular_values=None, source_mass=None, sigma_gamma=0.0, sigma_min=0.25,
+    sigma_max=4.0, eig_floor=1e-10):
     """
-    block-diagonal innovation covariance, one block_size x block_size block per
-    source.
-    """    
-    sigma = s3 - A @ s1.T - s1 @ A.T + A @ s2 @ A.T
-    sigma = 0.5 * (sigma + sigma.T)
+    Inverse-Wishart MAP update for a block-diagonal innovation covariance Q.
 
-    m = sigma.shape[0]
-    if m % block_size:
+    Qhat := scatter matrix Q update (from smoother statistics)
+
+                 [(nu0 + block_size + 1) * Q0_r] + [n_transitions * Qhat]
+    Q_wish_map = --------------------------------------------------------
+                           nu0 + n_transitions + block_size + 1    
+
+    Where Q0_r = Q_base * sigma^(2 * sigma_gamma)
+    
+    the sigma exponent scales the weighting of sigma, which are the normalized
+    singular values from the leadfield compression
+
+    Parameters
+    ----------
+    A, s1, s2, s3
+        A is the transition matrix. s1, s2, s3 are *average* RTS/EM sufficient
+        statistics, so their residual expression is an average expected
+        innovation covariance.
+
+    n_transitions : int
+        Number of time transitions used by the smoother statistics.
+
+    block_size : int
+        Number of retained modes per catchment, e.g. 3.
+
+    nu0 : float or None
+        Inverse-Wishart prior degrees of freedom. Must exceed block_size - 1. If
+        None, uses block_size + 2, a weak proper prior.
+
+    q_base : float
+        Global prior mode of Q when singular_values is None or sigma_gamma=0.
+
+    singular_values : array or None
+        Shape (n_blocks, block_size), one retained singular-value vector per
+        catchment. These should be from the local SVD before they would have
+        been placed in the leadfield.
+
+    source_mass : array or None
+        Shape (n_blocks,). Use fine-source count N_r for a basic correction only
+        when fine source columns represent equal mass. Prefer total quadrature
+        mass: sum(vertex areas) or sum(voxel volumes). Singular values are
+        divided by sqrt(source_mass).
+
+    sigma_gamma : float
+        Strength of normalized singular-value modulation:
+          0.0 -> Q prior ignores singular values 0.25 -> weak modulation 1.0 ->
+          full normalized sigma^2 scaling
+
+    eig_floor : float
+        Final strict-SPD eigenvalue floor.
+    """
+    q_hat = s3 - A @ s1.T - s1 @ A.T + A @ s2 @ A.T
+    q_hat = 0.5 * (q_hat + q_hat.T)
+
+    m = q_hat.shape[0]
+    if m % block_size != 0:
         raise ValueError(
-            f'state dimension {m} is not divisible by block_size={block_size}')
-    n_blocks = m // block_size
+            f"State dimension {m} is not divisible by block_size={block_size}"
+        )
 
+    n_blocks = m // block_size
+    if nu0 is None:
+        nu0 = float(block_size + 2)
+
+    if nu0 <= block_size - 1:
+        raise ValueError(
+            "nu0 must be greater than block_size - 1 for a proper "
+            "inverse-Wishart prior."
+        )
 
     idx = jnp.arange(n_blocks)
 
-    S = sigma.reshape(n_blocks, block_size,
-                      n_blocks, block_size)
+    q4 = q_hat.reshape(
+        n_blocks, block_size, n_blocks, block_size
+    )
+    q_blocks = q4[idx, :, idx, :]
+    q_blocks = 0.5 * (
+        q_blocks + jnp.swapaxes(q_blocks, -1, -2)
+    )
 
-    # extract block diagonal
-    blocks = S[idx, :, idx, :]
-    blocks = blocks + beta * jnp.eye(block_size, dtype=sigma.dtype)
+    # define the prior mode Q0_r = q_base * I
+    if singular_values is None or sigma_gamma == 0.0:
+        # in this case we don't normalize using leadfield metrics
+        q0_blocks = q_base * jnp.broadcast_to(
+            jnp.eye(block_size, dtype=q_hat.dtype),
+            (n_blocks, block_size, block_size),
+        )
+    else:
+        # normalize using leadfield metrics (e.g., catchment/voronoi region
+        # singular values)
+        sigma = jnp.asarray(singular_values, dtype=q_hat.dtype)
 
-    # construct block-diagonal Q
-    Q_new = jnp.zeros_like(sigma)
-    Q_new = Q_new.reshape(n_blocks, block_size,
-                      n_blocks, block_size)
-    Q_new = Q_new.at[idx, :, idx, :].set(blocks)
-    Q_new = Q_new.reshape(m, m)
+        if sigma.shape != (n_blocks, block_size):
+            raise ValueError(
+                "singular_values must have shape "
+                f"({n_blocks}, {block_size}), got {sigma.shape}"
+            )
 
-    Q_new = Q_new / (1.0 + alpha)
+        # remove first-order catchment-size/source-mass dependence. this is
+        # necessary because different catchment (voronoi) regions have different
+        # numbers of fine source vectors and represent differently-sized
+        # volumes. the condensed leadfield singular values scale with N, the
+        # number of fine vectors in the catchment, so we may optionally
+        # normalize them 
+        if source_mass is not None:
+            source_mass = jnp.asarray(
+                source_mass,
+                dtype=q_hat.dtype,
+            )
 
-    return Q_new
+            if source_mass.shape != (n_blocks,):
+                raise ValueError(
+                    "source_mass must have shape "
+                    f"({n_blocks},), got {source_mass.shape}"
+                )
+
+            sigma = sigma / jnp.sqrt(
+                jnp.maximum(source_mass[:, None], 1e-12)
+            )
+
+        # define a centering value and rescale all singular values to be wrt the
+        # reference
+        positive_sigma = jnp.where(sigma > 0.0, sigma, jnp.nan)
+        sigma_ref = jnp.nanmedian(positive_sigma)
+
+        sigma_norm = sigma / jnp.maximum(sigma_ref, 1e-12)
+        sigma_norm = jnp.clip(sigma_norm, sigma_min, sigma_max)
+
+        # q0_j = q_base * sigma_norm_j^(2 * gamma)
+        # gamma=0 returns isotropic blocks.
+        prior_var = q_base * sigma_norm ** (2.0 * sigma_gamma)
+        q0_blocks = jax.vmap(jnp.diag)(prior_var)
+
+    # if Q ~ IW(Psi0, nu0), select Psi0 so mode(Q) = Q0:
+    # mode(IW(Psi0, nu0)) = Psi0 / (nu0 + block_size + 1).
+    psi0_blocks = (nu0 + block_size + 1.0) * q0_blocks
+
+    # posterior: IW(Psi0 + n Qhat, nu0 + n).
+    # its mode is:
+    # (Psi0 + n Qhat) / (nu0 + n + block_size + 1).
+    q_blocks = psi0_blocks + n_transitions * q_blocks /\
+               (nu0 + n_transitions + block_size + 1.0)
+
+    # symmetrize for safety
+    q_blocks = 0.5 * (q_blocks + jnp.swapaxes(q_blocks, -1, -2))
+
+    # numerical SPD enforcement; should rarely change blocks if smoother
+    # statistics and model updates are internally consistent.
+    eigval, eigvec = jnp.linalg.eigh(q_blocks)
+
+    block_scale = jnp.maximum(jnp.max(jnp.abs(eigval), axis=-1, keepdims=True),
+                              q_base)
+
+    eigval = jnp.maximum(eigval, eig_floor * block_scale)
+
+    q_blocks = jnp.einsum("...ij,...j,...kj->...ik", eigvec, eigval, eigvec)
+
+    # symmetrize for safety
+    q_blocks = 0.5 * (q_blocks + jnp.swapaxes(q_blocks, -1, -2))
+
+    Q_new = jnp.zeros_like(q_hat).reshape(n_blocks, block_size, 
+                                          n_blocks, block_size)
+    
+    Q_new = Q_new.at[idx, :, idx, :].set(q_blocks)
+
+    return Q_new.reshape(m, m)
 
 
 def penalized_q_objective(A, Q, s1, s2, s3, lambda_, n_orients, lagsparsity):

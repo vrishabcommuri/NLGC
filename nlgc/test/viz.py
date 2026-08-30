@@ -217,3 +217,44 @@ def plot_transition_single(
         )
 
     return fig, axes
+
+
+def plot_leadfield_diagnostics(F, K):
+    # Gramian (shows source U block 'correlations')
+    S = F.T @ F
+
+    plt.imshow(S, vmin=-1, vmax=1, cmap="RdBu_r")
+    plt.colorbar(label="Signed sensor-mode inner product")
+    plt.show()
+
+    plt.figure()
+    plt.imshow(np.abs(S), vmin=0, vmax=1, cmap="magma")
+    plt.colorbar(label="Absolute sensor-mode overlap")
+    plt.show()
+
+    n_nodes = F.shape[1] // K
+    redundancy = np.zeros(n_nodes)
+
+    for r in range(n_nodes):
+        for s in range(n_nodes):
+            if r == s:
+                continue
+            B = S[K*r:K*(r+1), K*s:K*(s+1)]
+            redundancy[r] += np.linalg.norm(B, "fro")**2
+            
+    plt.imshow(redundancy[:, np.newaxis] @ redundancy[np.newaxis, :])
+    plt.colorbar(label="Nodal Redundancy (Higher Increases Unresolvability)")
+    plt.show()
+
+
+def plot_whitener_diagnostics(y, whitener):
+    vm = y.max()
+    plt.imshow(y, cmap='seismic', vmax=vm, vmin=-vm)
+    plt.show()
+
+    vm = whitener.max() 
+    plt.imshow(whitener, vmax=vm, vmin=-vm, cmap='seismic')
+    plt.show()
+
+
+    

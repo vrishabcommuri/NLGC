@@ -6,7 +6,7 @@
 import numpy as np
 
 from nlgc.utils.restriction import link_to_A_mask
-from nlgc.opt.em import em_jax, _copycast_em_state_numpy, _copycast_em_state_jax
+from nlgc.opt.em import em_jax, _copycast_em_state_numpy
 from nlgc.bias_utils import compute_bias, compute_bias_vdG
 from nlgc.opt.kalman.steady_state import solve_ss_covariance_qz
 # from nlgc.test.viz import (plot_transition_and_mask, 
@@ -292,26 +292,42 @@ def compute_P(F, R, em_state):
     return P_pred
 
 
-def _eval_link_ggc(targ, src, F, R, em_state_debiased, detS_full, config):
+def _eval_link_ggc(targ, src, y, F, R, em_state_debiased, 
+                   P_full, Sigma_full, log_detS_full, config):
     """
-    worker function to evaluate a single restricted model link in parallel.
+    evaluates a single link restricted model analytically without re-solving or
+    refitting.
     """
     if config.numerical.verbose: 
         print(f"reduced model {current_process().name} processing {src}->{targ}")
-        
+    
     A_mask = link_to_A_mask(targ, src, em_state_debiased, config)
+
+    # # delta A contains only the zeroed target link
+    # delta_A = em_state_debiased.A * (1.0 - A_mask)
     em_state_debiased_red = dataclasses.replace(
         em_state_debiased,
-        A_mask = A_mask,
         A = em_state_debiased.A * A_mask
     )
 
     P_red = compute_P(F, R, em_state_debiased_red)
-    Sigma_red = F @ P_red @ F.T + R
-    Sigma_red = np.array(Sigma_red)
+    Sigma_red = F @ P_red @ F.T + R   # GGC operates on observed quantities 
+    # Sigma_full = np.array(Sigma_full)
+    
+    sign_red, log_detS_red = np.linalg.slogdet(Sigma_red)
+    if sign_red <= 0:
+        raise ValueError("Non-positive definite Sigma_full for full model")
 
-    detS_red = np.linalg.det(Sigma_red)
-    gcval = np.log(detS_red / detS_full)
+    # project 1-step state error to observation space directly
+    # \Sigma_red = \Sigma_full + F @ (\Delta A @ P_full @ \Delta A^T) @ F^T
+    # error_cov_state = delta_A @ P_full @ delta_A.T
+    # Sigma_red = Sigma_full + F @ error_cov_state @ F.T
+
+    # sign_red, log_detS_red = np.linalg.slogdet(Sigma_red)
+    # if sign_red <= 0:
+    #     raise ValueError(f"Non-positive definite Sigma_red for {src}->{targ}")
+
+    gcval = log_detS_red - log_detS_full
 
     return targ, src, gcval
 
@@ -333,20 +349,25 @@ def multiprocess_test_links_ggc(links_to_check, y, F, R, lambda_, em_state,
                                                       em_state)
     
     em_state_warm = _copycast_em_state_numpy(em_state_warm)
-    # debias A before inference
+
     em_state_debiased = compute_bias_vdG(em_state_warm, smoother_result_warm, 
-                                     config)
+                                         config)
 
     P_full = compute_P(F, R, em_state_debiased)
     Sigma_full = F @ P_full @ F.T + R   # GGC operates on observed quantities 
     Sigma_full = np.array(Sigma_full)
-    detS_full = np.linalg.det(Sigma_full)
+    
+    sign_full, log_detS_full = np.linalg.slogdet(Sigma_full)
+    if sign_full <= 0:
+        raise ValueError("Non-positive definite Sigma_full for full model")
 
     n_jobs = min(config.parallel.n_workers, len(links_to_check))
     # Parallel loop over links_to_check
     results = Parallel(n_jobs=n_jobs)(
         delayed(_eval_link_ggc)(
-            targ, src, F, R, em_state_debiased, detS_full, config
+            targ, src, y, F, R, em_state_debiased,
+            P_full, Sigma_full, 
+            log_detS_full, config
         )
         for targ, src in links_to_check
     )

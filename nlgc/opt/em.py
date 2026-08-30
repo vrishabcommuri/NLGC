@@ -22,6 +22,7 @@ class EMState:
     log_likelihood: Union[Array, None] = None # likelihood trajectory
     P0: Union[Array, None] = None
     N0: Union[Array, None] = None
+    Q_prior_scales: Union[Array, None] = None
 
     # companion upper portion; this is marked as meta information
     # so jax can use it at compile time
@@ -36,6 +37,8 @@ def _triage_em_state(em_state):
     assert em_state.N0 is not None and len(em_state.N0.shape) == 2
     assert em_state.N_sources_upper is not None
     assert em_state.log_likelihood is not None
+    assert em_state.Q_prior_scales is not None and \
+           len(em_state.Q_prior_scales.shape) == 2
 
 
 def _copycast_em_state_numpy(em_state):
@@ -47,6 +50,7 @@ def _copycast_em_state_numpy(em_state):
             P0 = np.array(em_state.P0),
             N0 = np.array(em_state.N0),
             log_likelihood = np.array(em_state.log_likelihood),
+            Q_prior_scales = np.array(em_state.Q_prior_scales),
     )
 
 
@@ -59,6 +63,7 @@ def _copycast_em_state_jax(em_state):
             P0 = jnp.array(em_state.P0),
             N0 = jnp.array(em_state.N0),
             log_likelihood = jnp.array(em_state.log_likelihood),
+            Q_prior_scales = jnp.array(em_state.Q_prior_scales),
     )
 
 

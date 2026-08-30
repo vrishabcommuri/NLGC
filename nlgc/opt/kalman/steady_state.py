@@ -6,7 +6,7 @@ jax.config.update("jax_enable_x64", True)
 
 DEBUG = False
 
-def solve_ss_covariance_newton_raphson(a, f, q, r, s_init, maxiter=50, 
+def solve_ss_covariance_newton_raphson(a, f, q, r, s_init, maxiter=20, 
                                         tol=1e-7, maxerror=0.02, verbose=True):
     # see Benner https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=808626
     # for the algorithm 
@@ -25,6 +25,9 @@ def solve_ss_covariance_newton_raphson(a, f, q, r, s_init, maxiter=50,
     x_k = s_init
     errors = []
     for k in range(maxiter):
+        if DEBUG:
+            print(f"nr iter: {k}/{maxiter}")
+
         # (R + B^T X_k B)^{-1} B^T X_k A
         # rkinv = linalg.inv(r + f.T @ x_k @ f)
         # clgain_k = rkinv @ f.T @ x_k @ a

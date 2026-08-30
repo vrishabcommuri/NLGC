@@ -184,7 +184,7 @@ def gc_extraction(y, F, R, ROIs, em_state, config):
             dev_raw, bias_r, bias_f, nonconv_flag = batched_test_links(
                                                     links_to_check, y, F, R, 
                                                     lambda_, em_state, config)
-    elif config.gctest.gc_test_method == 'geweke time-domain':
+    elif config.gctest.gc_test_method == 'wald':
         dev_raw, bias_r, bias_f, nonconv_flag = multiprocess_test_links_ggc(
                                                     links_to_check, y, F, R, 
                                                     lambda_, em_state, config)

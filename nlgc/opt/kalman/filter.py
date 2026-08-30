@@ -51,6 +51,141 @@ def _copycast_rtssmoother_result_numpy(smoother_result):
     )
 
 
+@jax.jit
+def forward_filter_jax_autodiff_comply(y, F, R, em_state):
+    """
+    The main purpose for this function existing is to enable jax autodiff for
+    the computation of the log likelihood hessian. For that, all subroutines
+    must be jax-compatible, which is not true for the main filters as those rely
+    on jax pure callbacks to robust scipy solvers. 
+
+    Results from this filter should be checked against the robust jax forward
+    filter to ensure correctness.
+     
+    Lightweight kalman filter that uses jax-safe routines and updates state
+    covariances sequentially using a finite horizon formulation. 
+    """
+    #---------------------------------------------------------------------------
+    # setup
+    #---------------------------------------------------------------------------
+
+    assert y.shape[1] == F.shape[0]
+    N_sensors, N_sources = F.shape
+    A = em_state.A
+    Q = em_state.Q
+    P0 = em_state.P0
+    N0 = em_state.N0
+
+    # companion jitter for inversion stability
+    jitter = 1e-8
+    Q += jnp.eye(Q.shape[0]) * jitter
+
+    #---------------------------------------------------------------------------
+    # filtering setup
+    #---------------s------------------------------------------------------------
+    
+    negative_log_likelihood = 0.0
+    eye_sensors = jnp.eye(N_sensors)
+    eye_sources = jnp.eye(N_sources)
+
+    #---------------------------------------------------------------------------
+    # forward filtering
+    #---------------------------------------------------------------------------
+
+    def filter_step(carry, y_t):
+        filtered_prev, P_pred, negative_log_likelihood = carry
+
+        # predict
+        predicted = A @ filtered_prev
+
+        # covariance updates
+        FP_pred = F @ P_pred
+        innovation_cov = FP_pred @ F.T + R
+
+        # symmetrize and add jitter for stable solves
+        innovation_cov = 0.5 * (innovation_cov + innovation_cov.T)
+        innovation_cov += jitter * eye_sensors
+
+        # use a direct linear solve instead of Cholesky/cho_solve
+        # solve S X = [F P, I] in one operation.
+        rhs = jnp.concatenate((FP_pred, eye_sensors), axis=1)
+        solution = jnp.linalg.solve(innovation_cov, rhs)
+
+        # S := F P F^T + R
+        # solve S X = F P
+        # -> X^T = P F^T S^{-1}
+        kalman_gain = solution[:, :N_sources].T
+
+        # S^{-1}
+        innovation_precision = solution[:, N_sources:]
+
+        # compute log determinant without Cholesky
+        sign, logdet_innovation_cov = jnp.linalg.slogdet(innovation_cov)
+
+        # update covariance using Joseph form
+        IKF = eye_sources - kalman_gain @ F
+        P_filt = (
+            IKF @ P_pred @ IKF.T +
+            kalman_gain @ R @ kalman_gain.T
+        )
+
+        # symmetrize the filtered covariance
+        P_filt = 0.5 * (P_filt + P_filt.T)
+
+        # update
+        innovation = y_t - F @ predicted
+        filtered = predicted + kalman_gain @ innovation
+
+        negative_log_likelihood += 0.5 * \
+                          innovation.T @ innovation_precision @ innovation + \
+                          0.5 * logdet_innovation_cov
+
+        # predict covariance for next step
+        P_pred_next = A @ P_filt @ A.T + Q
+
+        # symmetrize the predicted covariance
+        P_pred_next = 0.5 * (P_pred_next + P_pred_next.T)
+
+        carry = (filtered, P_pred_next, negative_log_likelihood)
+        outputs = (predicted, filtered, P_pred, P_filt, innovation_precision, kalman_gain)
+
+        return carry, outputs
+
+    filtered_state_time0 = jnp.zeros(N_sources)
+
+    filter_step_remat = jax.checkpoint(filter_step)
+
+    (_, P_pred_final, negative_log_likelihood), (
+        predicted_state,
+        filtered_state,
+        P_pred,
+        P_filt,
+        innovation_precision,
+        kalman_gain
+    ) = (
+        jax.lax.scan(
+            filter_step_remat,
+            init=(filtered_state_time0, P0, negative_log_likelihood),
+            xs=y,
+        )
+    )
+
+    em_state = dataclasses.replace(em_state, P0=P_pred_final, N0=N0)
+        
+    filter_result = FilterResult(
+        filtered_state = filtered_state,
+        predicted_state = predicted_state,
+        filtered_cov = P_filt,
+        predicted_cov = P_pred,
+        predicted_cov_directional_derivative = N0,
+        innovation_precision = innovation_precision,
+        kalman_gain = kalman_gain,
+        negative_log_likelihood = negative_log_likelihood
+    )
+        
+    return em_state, filter_result
+
+
 def forward_filter_preamble(A, F, Q, R, P0):
     N_sensors, _ = F.shape
     (P_pred, N_pred) = solve_ss_covariance(A, F, Q, R, P0)

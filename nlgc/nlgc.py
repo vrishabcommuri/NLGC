@@ -117,7 +117,8 @@ def nlgc_map(name, evoked, forward, noise_cov, src_target, patch_idx,
 
     # keyword args: the positional form put the whole ModelConfig into
     # prepare_eigenmodes' `n_eigenmodes: int` slot
-    weights, G, label_vertidx, label_names, gain_info, whitener = \
+    weights, G, label_vertidx, label_names, gain_info, whitener, \
+        singular_values = \
             prepare_eigenmodes(evoked.info, forward, noise_cov, src_target,
                                n_eigenmodes=n_eigenmodes,
                                n_orients=n_orients,
@@ -128,10 +129,10 @@ def nlgc_map(name, evoked, forward, noise_cov, src_target, patch_idx,
 
     # get the data
     sel = [evoked.ch_names.index(name) for name in gain_info['ch_names']]
-    M = evoked.data[sel]
+    M_raw = evoked.data[sel]
 
     # whiten the data
-    M = np.dot(whitener, M)
+    M = np.dot(whitener, M_raw)
     r = 1.0
 
     if len(patch_idx) == 0:
@@ -155,10 +156,21 @@ def nlgc_map(name, evoked, forward, noise_cov, src_target, patch_idx,
             print(f"nlgc_map max iter = {config.optimizer.max_iter}")
 
         y = M[:, this_segment * tt: (this_segment + 1) * tt]
+
         F = G
 
+        if config.debug.plotlevel > 0:
+            from nlgc.test.viz import (plot_leadfield_diagnostics, 
+                                       plot_whitener_diagnostics)
+            print("plotting leadfield diagnostics")
+            K = config.latent.n_eigenmodes * config.latent.n_orients
+            plot_leadfield_diagnostics(G, K)
+            print("plotting whitener diagnostics")
+            plot_whitener_diagnostics(y, whitener)
+            
         F_companion, R_companion, em_state = initialize_em_state(
-            y=y, F=F, r=r, config=config, evoked=evoked, forward=forward,
+            y=y, F=F, r=r, singular_values=singular_values, 
+            config=config, evoked=evoked, forward=forward,
             noise_cov=noise_cov, weights=weights)
 
         d_raw_, bias_r_, bias_f_, model_f, conv_flag_ = \

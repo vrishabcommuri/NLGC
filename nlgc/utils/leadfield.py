@@ -1,100 +1,164 @@
 from scipy.spatial import cKDTree
-from mne import (Forward, Label)
 from mne.forward import is_fixed_orient
 from mne.inverse_sparse.mxne_inverse import _prepare_gain
-from mne.source_estimate import _prepare_label_extraction as \
-    _prepare_label_extraction_mne
-from mne.source_estimate import (_BaseVolSourceEstimate,
-                                 _BaseVectorSourceEstimate,
-                                 SourceEstimate,
-                                 MixedSourceEstimate, 
-                                 VolSourceEstimate)
 from mne.source_space import SourceSpaces
-from mne.utils import (logger, _check_option, _validate_type)
-from scipy import linalg, sparse
+from scipy import linalg
 import numpy as np
 import copy
 
 
-def prepare_eigenmodes(info, forward, noise_cov, labels, n_eigenmodes=2, 
-                       n_orients = 1, loose=0.0, depth=0.0, pca=True, rank=None,
-                       mode='svd_flip'):
-    if not is_fixed_orient(forward):
-        depth_dict = None
-    else:
-        depth_dict = {'exp': depth, 
-                      'limit_depth_chs': 'whiten', 
-                      'combine_xyz': 'fro', 
-                      'limit': None}
+def _triage_rank(rank):
+    assert rank is not None, "rank must be provided! ICA silently "\
+        "rank-reduces data so rank must be manually computed and passed to NLGC"
+    
+    assert isinstance(rank, int), "rank will be internally marshaled to dict, "\
+        "pass in the integer rank"
+    
+    assert rank > 100, "rank too low, check preprocessing pipeline"
 
-    if not is_fixed_orient(forward) and loose == 0.0:
-        print('Loose orientation must be set to 1.0 to be applied to free-orientation forward solutions, changing it to 1.0. If unsure set loose to auto')
-        loose = 1.0
+
+def _prep_surface_ss_eigs(info, forward, noise_cov, labels, n_eigenmodes, 
+                        n_orients, prepargs):
+    print('fixed orientation')
+    forward, gain, gain_info, whitener, source_weighting, mask = \
+        _prepare_gain(forward, info, noise_cov, **prepargs)
+    
+    eff_eigenmodes = n_orients * n_eigenmodes
+    if n_orients != 1:
+        assert n_eigenmodes == 1
+        print("\nGot fixed orientation source space but with"
+                f" n_orients = {n_orients}! "
+                "Treating orientations as temporally coupled eigenmodes "
+                "rather than independent eigenmodes (default).\n")
+        
+    weights, G, label_vertidx, src_flip, singular_values = \
+        _reduce_lead_field_surface(forward['src'], labels, eff_eigenmodes, 
+                                   data=gain.T)
+    
+    label_names = []
+    
+    for i, label in enumerate(labels):
+        label_names.extend(map(lambda x: f'{i}-{x}', label['vertno']))
+   
+    return G, label_names, label_vertidx, weights, gain_info, whitener, \
+        src_flip, singular_values
+
+
+def _prep_vol_ss_eigs(info, forward, noise_cov, labels, n_eigenmodes, 
+                        n_orients, prepargs):
+    print("volume")
+    prepargs['loose'] = 1.0 # must be 1 for volume
+    eff_eigenmodes = n_eigenmodes * n_orients
 
     forward, gain, gain_info, whitener, source_weighting, mask = \
-        _prepare_gain(forward, info, noise_cov, pca, depth_dict, loose, rank)
-    # whiten the data
-    logger.info('Whitening data matrix.')
-    print('check orientation')
-    if not is_fixed_orient(forward):
-        # if n_orients <= 1:
-        #     raise ValueError('Number of orientations is less than or equal to 1 for not fixed orientation forward. Please use accurate number of orientations')
-        
-        print('The lead field is not fixed-orientation using mixed source space method')
-        
-        if isinstance(labels, SourceSpaces):
-            weights, G, label_vertidx = \
-                _reduce_lead_field_vol(forward, labels, n_eigenmodes, 
-                                       n_orients, data=gain.T)
-            label_names = []
-            for i, label in enumerate(labels):
-                label_names.extend(map(lambda x: f'{i}-{x}', label['vertno']))
-        else:
-            raise ValueError('Not supported {:s}: labels are expected to be' \
-                             ' mne.SourceSpace'.format(labels))
-    else:
-        eff_eigenmodes = n_orients * n_eigenmodes
-        if n_orients != 1:
-            assert n_eigenmodes == 1
-            print("\nGot fixed orientation source space but with"
-                  f" n_orients = {n_orients}! "
-                  "Treating orientations as temporally coupled eigenmodes "
-                  "rather than independent eigenmodes (default).\n")
+        _prepare_gain(forward, info, noise_cov, **prepargs)
+    
+    weights, G, label_vertidx, singular_values = \
+        _reduce_lead_field_vol(forward['src'], labels, eff_eigenmodes, 
+                               data=gain.T)
+    label_names = []
+    for i, label in enumerate(labels):
+        label_names.extend(map(lambda x: f'{i}-{x}', label['vertno']))
+
+    return G, label_names, label_vertidx, weights, gain_info, whitener, None, \
+           singular_values 
+
+
+def _prep_mixed_ss_eigs(info, forwards, noise_cov, labels, n_eigenmodes, 
+                        n_orients, prepargs):
+    print("mixed source space (loose required but only applied to surface)")
+    G = []
+    ss = None
+    eff_eigenmodes = n_eigenmodes * n_orients
+
+    for fwd_idx, fwd in enumerate(forwards):
+        if fwd_idx == 0:
+            # this will error later too upon ss concatenation if there are some
+            # shenanigans here
+            assert fwd['src'][0]['type'] == 'surf', \
+                'mixed source space forwards must have surface forward(s) first'
             
-        print('fixed orientation')
-        if isinstance(labels, Forward):
-            weights, G, label_vertidx, src_flip = \
-                _reduce_lead_field(forward, labels, eff_eigenmodes, data=gain.T)
-            label_names = []
-            for i, label in enumerate(labels['src']):
-                label_names.extend(map(lambda x: f'{i}-{x}', label['vertno']))
-        elif isinstance(labels, SourceSpaces):
-            weights, G, label_vertidx, src_flip = \
-                _reduce_lead_field(forward, labels, eff_eigenmodes, data=gain.T)
-            label_names = []
-            for i, label in enumerate(labels):
-                label_names.extend(map(lambda x: f'{i}-{x}', label['vertno']))
-        elif isinstance(labels, list):
-            if isinstance(labels[0], Label):
-                weights = None # not implemented
-                G, label_vertidx, src_flip = \
-                    _extract_label_eigenmodes(forward, labels, gain.T, mode, 
-                                              eff_eigenmodes, allow_empty=True)
-                
-                label_names = [label.name for label in labels]
-            else:
-                raise ValueError('Not supported {:s}: elements of labels are expected to be mne.Labels, '
-                                'if a list is provided.'.format(type(labels[0])))
+        prepargs = copy.deepcopy(prepargs)
+        
+        if not is_fixed_orient(fwd):
+            prepargs['loose'] = 1.0 # must be 1 for volume
         else:
-            raise ValueError('Not supported {:s}: labels are expected to be either an mne.SourceSpace or'
-                            'mne.Forward object or list of mne.Labels.'.format(labels))
+            assert prepargs['loose'] > 0.0
+
+        forward, gain, gain_info, whitener, source_weighting, mask = \
+            _prepare_gain(fwd, info, noise_cov, **prepargs)
+        
+        print(f"{gain.shape=}")
+        G.append(gain)
+
+        if ss is None:
+            ss = fwd['src']
+        else:
+            ss += fwd['src']
+    
+    # (sensors, mixed sources)
+    G = np.concatenate(G, axis=1)
+    
+    weights, G, label_vertidx, singular_values = \
+        _reduce_lead_field_vol(ss, labels, eff_eigenmodes, 
+                               data=G.T)
+    label_names = []
+    for i, label in enumerate(labels):
+        label_names.extend(map(lambda x: f'{i}-{x}', label['vertno']))
+
+    return G, label_names, label_vertidx, weights, gain_info, whitener, None, \
+           singular_values
+
+
+def prepare_eigenmodes(info, forward, noise_cov, labels, rank, n_eigenmodes=2, 
+                       n_orients = 1, loose=0.0, depth=0.0, pca=True,
+                       mode='svd_flip'):
+    
+    _triage_rank(rank)
+    rank = {'mag': rank}
+
+    assert isinstance(labels, SourceSpaces), "labels must be mne source space"
+
+    depth_dict = {'exp': depth, 
+                  'limit_depth_chs': 'whiten', 
+                  'combine_xyz': 'fro', 
+                  'limit': None}
+        
+    prepargs = {
+        'pca': pca,
+        'depth': depth_dict,
+        'loose': loose,
+        'rank': rank
+    }
+        
+    if isinstance(forward, list):
+        print('mixed source space')
+        G, label_names, label_vertidx, weights, gain_info, whitener, src_flip, \
+            singular_values = \
+            _prep_mixed_ss_eigs(info, forward, noise_cov, labels, n_eigenmodes, 
+                                n_orients, prepargs)
+
+    elif is_fixed_orient(forward):
+        print('fixed orientation source space')
+        G, label_names, label_vertidx, weights, gain_info, whitener, src_flip, \
+            singular_values = \
+            _prep_surface_ss_eigs(info, forward, noise_cov, labels, 
+                                  n_eigenmodes, n_orients, prepargs)
+    else:
+        print('volume source space')
+        G, label_names, label_vertidx, weights, gain_info, whitener, src_flip, \
+            singular_values = \
+            _prep_vol_ss_eigs(info, forward, noise_cov, labels, n_eigenmodes, 
+                              n_orients, prepargs)
         
     # test if there are empty columns
     sel = np.any(G, axis=0)
     G = G[:, sel].copy()
     label_vertidx = [i for select, i in zip(sel, label_vertidx) if select]
-    if is_fixed_orient(forward):
+    
+    if not isinstance(forward, list) and is_fixed_orient(forward):
         src_flip = [i for select, i in zip(sel, src_flip) if select]
+
     discarded_labels = []
     j = 0
     eff_eigenmodes = n_eigenmodes * n_orients
@@ -105,36 +169,32 @@ def prepare_eigenmodes(info, forward, noise_cov, labels, n_eigenmodes=2,
             j += 1
     assert j == len(discarded_labels)
     if j > 0:
-        logger.info('No sources were found in following {:d} ROIs:\n'\
+        print('No sources were found in following {:d} ROIs:\n'\
                     .format(len(discarded_labels)) + \
                     '\n'.join(map(lambda x: str(x.name), discarded_labels)))
 
-    return weights, G, label_vertidx, label_names, gain_info, whitener
+    return weights, G, label_vertidx, label_names, gain_info, whitener, \
+           singular_values
 
 
-def _reduce_lead_field(forward, src, n_eigenmodes, data=None):
-    import mne
-    if data is None:
-        logger.info('Using the raw forward solution')
-        data = np.swapaxes(forward['sol']['data'], 0, 1)  # (n_sources, n_channels)
-    data = data.copy()
-    print(f'Data shape is {data.shape}')
-    if isinstance(src, mne.Forward):
-        src = src['src']
-
+def _reduce_lead_field_surface(fwd_src, src, n_eigenmodes, data=None):    
     grouped_vertidx_no_offset, grouped_vertidx, n_groups, n_verts = \
-        _prepare_leadfield_reduction(src, forward['src'])
+        _prepare_leadfield_reduction(src, fwd_src)
+    
     group_eigenmodes = np.zeros((sum(n_groups) * n_eigenmodes,) + \
                                 data.shape[1:], dtype=data.dtype)
+    singular_values = np.zeros((sum(n_groups), n_eigenmodes))
     
     lhweights = []
     rhweights = []
     
     for i, (this_grouped_vertidx, this_grouped_vertidx_no_offset) in \
                 enumerate(zip(grouped_vertidx, grouped_vertidx_no_offset)):
-        eig_src_weights, this_group_eigenmodes, percentage_explained = \
-            _truncatedsvd(data[this_grouped_vertidx], n_eigenmodes, 
-                          return_pecentage_explained=True)
+        
+        eig_src_weights, svals, this_group_eigenmodes, percentage_explained = \
+            _truncatedsvd(data[this_grouped_vertidx], n_eigenmodes)
+        
+        singular_values[i] = svals
         
         print(
             f"patch {i}\n"
@@ -145,121 +205,75 @@ def _reduce_lead_field(forward, src, n_eigenmodes, data=None):
         
         group_eigenmodes[i * n_eigenmodes:(i + 1) * n_eigenmodes] = \
             this_group_eigenmodes
+        
         if i < n_groups[0]:
             lhweights.append([eig_src_weights, this_grouped_vertidx_no_offset])
         else:
             rhweights.append([eig_src_weights, this_grouped_vertidx_no_offset])
-        print(this_group_eigenmodes.shape)
+
     weights = [lhweights, rhweights]
     src_flips = [None] * sum(n_groups)
-    return weights, group_eigenmodes.T, grouped_vertidx, src_flips
+
+    # all eigenmodes have fine source contribution
+    assert np.all(singular_values != 0)
+
+    return weights, group_eigenmodes.T, grouped_vertidx, src_flips, \
+           singular_values
 
 
-def _reduce_lead_field_vol(forward, src, n_eigenmodes, n_orients, data=None):
-    import mne
-    if data is None:
-        print('data is None')
-        logger.info('Using the raw forward solution')
-        data = np.swapaxes(forward['sol']['data'], 0, 1) 
-    print(f'Data shape is {data.shape}')
-    if isinstance(src, mne.Forward):
-        src = src['src']
-
-    groups, coarse_rr = _prepare_leadfield_reduction_vol(src, forward['src'])
+def _reduce_lead_field_vol(fwd_ss, src, eff_eigenmodes, data):
+    groups, coarse_rr = _prepare_leadfield_reduction_vol(src, fwd_ss)
  
-    group_eigenmodes = np.zeros((len(groups) * n_eigenmodes * n_orients, 
+    group_eigenmodes = np.zeros((len(groups) * eff_eigenmodes, 
                                  data.shape[-1]), dtype=data.dtype)
+    singular_values = np.zeros((len(groups), eff_eigenmodes))
+
     
     print(f'Reduced leadfield shape is {group_eigenmodes.shape}')
-    
+    print(f"{data.shape=}")
     weights = []
     
     for coarse_idx, members in groups.items():
         idxs = np.empty(0, dtype=int)
 
-        # forward source space is a list of sub-sourcespaces, typically just 1
-        # monolithic, but we loop over indices just in case
-        for i in range(len(forward['src'])):
+        # forward source space is a list of sub-sourcespaces, one monolithic one
+        # for vol source spaces, but we must loop over indices for mixed case
+        for i in range(len(fwd_ss)):
             if len(members[i]) > 0:
-                idxs = np.append(idxs, np.array(members[i]) + \
-                    int(np.sum([forward['src'][j]['nuse'] # subspace no. offset
-                                for j in range(i)])))
+                offset = int(np.sum([fwd_ss[j]['nuse'] for j in range(i)]))
+                idxs = np.append(idxs, np.array(members[i]) + offset) 
             else:
                 continue
-
+        
+        # valid since we require loose > 0 for mixed source space
         ras_idxs = np.concatenate([3 * idxs[:, None] + np.arange(3)], 
                                   axis=1).ravel()
+        print(f"{ras_idxs.shape=}")
+        
         subvoxels = data[ras_idxs]
 
-        eig_src_weights, this_group_eigenmodes, percentage_explained = \
-            _truncatedsvd(subvoxels, n_eigenmodes * n_orients, 
-                              return_pecentage_explained=True)
+        eig_src_weights, svals, this_group_eigenmodes, percentage_explained = \
+            _truncatedsvd(subvoxels, eff_eigenmodes)
         
-        group_eigenmodes[coarse_idx * n_eigenmodes * n_orients:(coarse_idx + 1)\
-                          * n_eigenmodes * n_orients] = this_group_eigenmodes
+        singular_values[coarse_idx] = svals
+        
+        group_eigenmodes[coarse_idx * eff_eigenmodes:(coarse_idx + 1)\
+                          * eff_eigenmodes] = this_group_eigenmodes
         
         print(
             f"patch {coarse_idx}: vertices {subvoxels.shape[0]} -> "
-            f"{n_eigenmodes} leadfield reduction explained " 
+            f"{eff_eigenmodes} leadfield reduction explained " 
             f"{percentage_explained*100:.3f}% variance"
         )
         
         weights.append(eig_src_weights)
 
-    return weights, group_eigenmodes.T, groups
+    print(singular_values)
 
+    # all eigenmodes have fine source contribution
+    assert np.all(singular_values != 0)
 
-def _prepare_label_extraction(labels, src):
-    vertno = [s['vertno'] for s in src]
-    label_vertidx = []
-    for label in labels:
-        if label.hemi == 'lh':
-            this_vertices = np.intersect1d(vertno[0], label.vertices)
-            vertidx = np.searchsorted(vertno[0], this_vertices)
-        elif label.hemi == 'rh':
-            this_vertices = np.intersect1d(vertno[1], label.vertices)
-            vertidx = len(vertno[0]) + np.searchsorted(vertno[1], this_vertices)
-        if len(vertidx) == 0:
-            vertidx = None
-        label_vertidx.append(vertidx)
-    return label_vertidx
-
-
-def assign_labels(labels, src_target, src_origin, thresh=0):
-    """Assign the patch indices of the corresponding labels from origin into 
-    target source space
-
-    This function returns the patch indices of the (ROI) labels in the target 
-    source space (e.g. 'ico-1') from the origin source space (e.g. 'ico-4')
-
-    Parameters
-    ----------
-    labels:  mne.Labels | mne.Label
-        labels in standard MNE-python format
-    src_target: mne.SourceSpaces
-        target source space, e.g. ico-4
-    src_origin: mne.SourceSpaces
-        origin source space, e.g. ico-4
-
-    Returns
-    -------
-    label_vertidx: list
-        vertex(patch) index
-    """
-    label_vertidx_origin = _prepare_label_extraction(labels, src_origin)
-    _, group_vertidx, _, _ = _prepare_leadfield_reduction(src_target, 
-                                                          src_origin)
-    label_vertidx = []
-    for this_label_vertidx_origin in label_vertidx_origin:
-        this_label_vertidx = []
-        for i, this_group_vertidx in enumerate(group_vertidx):
-            this_vertices = np.intersect1d(this_group_vertidx, 
-                                           this_label_vertidx_origin)
-            if len(this_vertices) > thresh:
-                this_label_vertidx.append(i)
-        this_label_vertidx = np.asanyarray(this_label_vertidx)
-        label_vertidx.append(this_label_vertidx)
-    return label_vertidx
+    return weights, group_eigenmodes.T, groups, singular_values
 
 
 def _prepare_leadfield_reduction(src_target, src_origin):
@@ -297,7 +311,11 @@ def _prepare_leadfield_reduction(src_target, src_origin):
 
 def _prepare_leadfield_reduction_vol(vol_target, src_origin):
     # fine and coarse coordinates in RAS
-    coarse_rr = vol_target[0]['rr'][vol_target[0]['inuse'] > 0]
+    # in case we use multiple spaces/labels
+    coarse_rr = []
+    for i in range(len(vol_target)):
+        coarse_rr.extend(vol_target[i]['rr'][vol_target[i]['inuse'] > 0])
+
     tree = cKDTree(coarse_rr)
 
     groups = {i: {j : [] for j in range(len(src_origin))} 
@@ -315,89 +333,9 @@ def _prepare_leadfield_reduction_vol(vol_target, src_origin):
             groups[coarse_idx][i].append(fine_idx)
 
     return groups, coarse_rr
-    
 
-def _extract_label_eigenmodes(fwd, labels, data=None, mode='mean', 
-                              n_eigenmodes=2, allow_empty=False, trans=None, 
-                              mri_resolution=True):
-    "Zero columns corresponds to empty labels"
-    src = fwd['src']
-    _validate_type(src, SourceSpaces)
-    _check_option('mode', mode, ['svd', 'svd_flip'] + ['auto'])
-    func = _svd_funcs[mode]
 
-    if len(src) > 2:
-        if src[0]['type'] != 'surf' or src[1]['type'] != 'surf':
-            raise ValueError('The first 2 source spaces have to be surf type')
-        if any(np.any(s['type'] != 'vol') for s in src[2:]):
-            raise ValueError('source spaces have to be of vol type')
-
-        n_aparc = len(labels)
-        n_aseg = len(src[2:])
-        n_labels = n_aparc + n_aseg
-    else:
-        n_labels = len(labels)
-
-    # create a dummy stc
-    kind = src.kind
-    vertno = [s['vertno'] for s in src]
-    nvert = np.array([len(v) for v in vertno])
-    if kind == 'surface':
-        stc = SourceEstimate(np.empty(nvert.sum()), vertno, 0.0, 0.0, 'dummy', )
-    elif kind == 'mixed':
-        stc = MixedSourceEstimate(np.empty(nvert.sum()), vertno, 0.0, 0.0, 'dummy', )
-    else:
-        stc = VolSourceEstimate(np.empty(nvert.sum()), vertno, 0.0, 0.0, 'dummy', )
-    stcs = [stc]
-
-    vertno = None
-    for si, stc in enumerate(stcs):
-        if vertno is None:
-            vertno = copy.deepcopy(stc.vertices)  # avoid keeping a ref
-            nvert = np.array([len(v) for v in vertno])
-            label_vertidx, src_flip = \
-                _prepare_label_extraction_mne(stc, labels, src, 
-                                              mode.replace('svd', 'mean'),
-                                              allow_empty)
-        if isinstance(stc, (_BaseVolSourceEstimate,
-                            _BaseVectorSourceEstimate)):
-            _check_option(
-                'mode', mode, ('svd',),
-                'when using a volume or mixed source space')
-            mode = 'svd' if mode == 'auto' else mode
-        else:
-            mode = 'svd_flip' if mode == 'auto' else mode
-
-        logger.info('Extracting time courses for %d labels (mode: %s)'
-                    % (n_labels, mode))
-
-        if data is None:
-            logger.info('Using the raw forward solution')
-            data = np.swapaxes(fwd['sol']['data'], 0, 1)  # (n_sources, n_channels)
-        data = data.copy()
-
-        # do the extraction
-        label_eigenmodes = np.zeros((n_labels * n_eigenmodes,) + data.shape[1:], 
-                                    dtype=data.dtype)
-        for i, (vertidx, flip, label) in enumerate(zip(label_vertidx, src_flip, 
-                                                       labels)):
-            if vertidx is not None:
-                if isinstance(vertidx, sparse.csr_matrix):
-                    assert mri_resolution
-                    assert vertidx.shape[1] == data.shape[0]
-                    this_data = np.reshape(data, (data.shape[0], -1))
-                    this_data = vertidx * this_data
-                    this_data.shape = \
-                        (this_data.shape[0],) + stc.data.shape[1:]
-                else:
-                    this_data = data[vertidx]
-                label_eigenmodes[i * n_eigenmodes:(i + 1) * n_eigenmodes] = \
-                    func(flip, this_data, n_eigenmodes)
-
-        return label_eigenmodes.T, label_vertidx, src_flip
-    
-
-def _truncatedsvd(a, n_components=2, return_pecentage_explained=False):
+def _truncatedsvd(a, n_components=2):
     if n_components > min(*a.shape):
         raise ValueError('n_components={:d} should be smaller than '
                          'min({:d}, {:d})'.format(n_components, *a.shape))
@@ -405,14 +343,10 @@ def _truncatedsvd(a, n_components=2, return_pecentage_explained=False):
                           overwrite_a=True, check_finite=True,
                           lapack_driver='gesdd')    
 
-    if return_pecentage_explained:
-        return u, vh[:n_components] * s[:n_components][:, None], \
-               s[:n_components].sum() / s.sum()
-    return u, vh[:n_components] * s[:n_components][:, None]
+    percentage_explained = s[:n_components].sum() / s.sum()
+    sv = s[:n_components]
+    eigs = vh[:n_components]
 
-
-_svd_funcs = {
-    'svd_flip': lambda flip, data, n_components: \
-        _truncatedsvd(flip * data, n_components),
-    'svd': lambda flip, data, n_components: _truncatedsvd(data, n_components)
-}
+    # no scaling by singular values
+    return u, sv, eigs, percentage_explained
+               
