@@ -229,8 +229,7 @@ def _reduce_lead_field_vol(fwd_ss, src, eff_eigenmodes, data):
     singular_values = np.zeros((len(groups), eff_eigenmodes))
 
     
-    print(f'Reduced leadfield shape is {group_eigenmodes.shape}')
-    print(f"{data.shape=}")
+    print(f'Reduced leadfield shape is {group_eigenmodes.T.shape}')
     weights = []
     
     for coarse_idx, members in groups.items():
@@ -248,7 +247,6 @@ def _reduce_lead_field_vol(fwd_ss, src, eff_eigenmodes, data):
         # valid since we require loose > 0 for mixed source space
         ras_idxs = np.concatenate([3 * idxs[:, None] + np.arange(3)], 
                                   axis=1).ravel()
-        print(f"{ras_idxs.shape=}")
         
         subvoxels = data[ras_idxs]
 
@@ -343,7 +341,7 @@ def _truncatedsvd(a, n_components=2):
                           overwrite_a=True, check_finite=True,
                           lapack_driver='gesdd')    
 
-    percentage_explained = s[:n_components].sum() / s.sum()
+    percentage_explained = (s[:n_components]**2).sum() / (s**2).sum()
     sv = s[:n_components]
     eigs = vh[:n_components]
 

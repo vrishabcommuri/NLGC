@@ -20,7 +20,6 @@ def proximal_param_update(em_state, smoother_result, config, lambda_):
     A_prev = em_state.A[:m]
     Q_upper = em_state.Q[:m, :m]
     A_mask = em_state.A_mask[:m]
-
     
     dtype = jnp.result_type(A_prev)
     out_type = jax.ShapeDtypeStruct((m, m*p), dtype)

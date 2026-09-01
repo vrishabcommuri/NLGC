@@ -117,7 +117,7 @@ class ModelSparsityConfig:
     use_wald_screen: bool = True
     # Alpha for wald screen
     wald_screen_alpha: float = 0.05
-    use_empirical_null: bool = True
+    use_empirical_null: bool = False
 
 @dataclass(frozen=True)
 class ModelForwardConfig:
@@ -140,7 +140,7 @@ class ModelOptimizerConfig:
 class ModelValidationConfig:
     cv: int = 5
     use_es: bool = False
-    cv_type: str = "GCV"
+    cv_type: str = "DisturbanceCV"
 
 @dataclass(frozen=True)
 class ModelNumericalConfig:
@@ -237,7 +237,7 @@ class ModelConfig:
             
             validation = ModelValidationConfig(
                 cv = kwargs.pop("cv", 5),
-                cv_type = kwargs.pop("cv_type", "GCV"),
+                cv_type = kwargs.pop("cv_type", "DisturbanceCV"),
                 use_es = kwargs.pop("use_es", True),
             ),
             

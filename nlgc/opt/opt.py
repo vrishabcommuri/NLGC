@@ -5,8 +5,9 @@ from joblib import Parallel, delayed
 from sklearn import preprocessing
 from sklearn.model_selection import TimeSeriesSplit
 from multiprocessing import cpu_count
-from nlgc.opt.em import solve_params, _copycast_em_state_numpy
-from nlgc.opt.kalman.filter import forward_filter_blas, measurement_smoother_jax
+from nlgc.opt.em import solve_params
+from nlgc.opt.kalman.filter import (forward_filter_jax, rts_smoother_jax, 
+                                    measurement_smoother_jax)
 import copy
 from kneed import KneeLocator
 
@@ -162,7 +163,7 @@ class NeuraLVARCV(NeuraLVAR):
             n_eigenmodes = config.latent.n_eigenmodes,
             n_orients = config.latent.n_orients,
             cv = config.validation.cv,
-            n_jobs = cpu_count(),
+            n_jobs = config.parallel.n_workers,
             copy = True,
             standardize = False,
             normalize = False,
@@ -206,23 +207,15 @@ class NeuraLVARCV(NeuraLVAR):
             fit_state, _ = self._fit(y_train, F, R, curr_lambda,
                                      copy.deepcopy(em_state))
 
-            # solve_params runs the jax pipeline and hands back an em_state
-            # whose fields are jax arrays. forward_filter_blas below reaches for
-            # .flags to check F-contiguity, which jax arrays do not have, so
-            # cast back to numpy at the boundary.
-            fit_state = _copycast_em_state_numpy(fit_state)
-
             # test set prediction. forward_filter_blas returns
             # (em_state, filter_result) -- binding the whole tuple made the
             # attribute lookups below fail.
-            _, filter_result_test = forward_filter_blas(y_test, F, R,
-                                                        em_state=fit_state,
-                                                        use_lapack=True)
+            _, filter_result_test = forward_filter_jax(y_test, F, R,
+                                                        em_state=fit_state)
             
             # full-data prediction for ES
-            _, filter_result_full = forward_filter_blas(y, F, R,
-                                                        em_state=fit_state,
-                                                        use_lapack=True)
+            _, filter_result_full = forward_filter_jax(y, F, R,
+                                                        em_state=fit_state)
 
             # full data prediction for GCV
             _, smoother_result = measurement_smoother_jax(y, F, R, 
@@ -240,12 +233,16 @@ class NeuraLVARCV(NeuraLVAR):
             
             # GCV metric
             cv[1, split_idx, lam_idx] = self.GCV(D, N, df)
+            
+            # raw disturbances (negative fit criterion)
+            cv[2, split_idx, lam_idx] = smoother_result.model_fit
+
             pred[split_idx, lam_idx][:] = filter_result_full.filtered_state 
 
         for shm in (shm_y, shm_f, shm_r, shm_c, shm_pred):
             shm.close()
-        return None
     
+        return em_state
 
     def fit(self, y, F, R, em_state):
         """
@@ -261,7 +258,7 @@ class NeuraLVARCV(NeuraLVAR):
 
         cvsplits = [split for split in kf.split(y)]
 
-        if self.config.validation.cv_type == 'GCV':
+        if self.config.validation.cv_type in ['GCV', 'DisturbanceCV']:
             # use split structure for normal cv, but with one 'dummy' split
             # including all of the data
             self.cv = 1
@@ -271,7 +268,7 @@ class NeuraLVARCV(NeuraLVAR):
         lambda_range = sorted(list(self.config.sparsity.lambda_range))
         
         # (cvmetric, split, lambda) -- cv info for each split
-        cv_mat = np.zeros((2, len(cvsplits), len(lambda_range)), dtype=y.dtype)
+        cv_mat = np.zeros((3, len(cvsplits), len(lambda_range)), dtype=y.dtype)
         
         # (split, lambda, time, sensor) -- model prediction for each split
         pred_mat = np.zeros((len(cvsplits), 
@@ -296,7 +293,7 @@ class NeuraLVARCV(NeuraLVAR):
             print(f"Starting cross-validation with N_jobs:{self.n_jobs}, "
                   f"mode:{mode}, splits:{n_splits}")
     
-        Parallel(n_jobs=self.n_jobs, verbose=10)(
+        lastsplit_em_states = Parallel(n_jobs=self.n_jobs, verbose=10)(
             delayed(self._cvfit)((lam_idx, lam_), *initargs) 
                 for lam_idx, lam_ in enumerate(lambda_range)
         )
@@ -329,21 +326,39 @@ class NeuraLVARCV(NeuraLVAR):
                 print(f"Estimation Stability error: {ex} fallback to ML lambda")
                 best_lambda = lambda_range[index]
             print(f'\n\nbest_regularizing parameter: {best_lambda} using es\n')
+
+            em_state, smoother_result = self._fit(y, F, R, best_lambda, 
+                                                  em_state)
         else:
             # lambda list
             x_gcv = lambda_range
 
-            # GCV values
-            y_gcv = self.mse_path[1, 0, :] 
+            if self.config.validation.cv_type == 'GCV':
+                # GCV values
+                y_gcv = self.mse_path[1, 0, :] 
+            elif self.config.validation.cv_type == 'DisturbanceCV':
+                # raw disturbance smoother values
+                y_gcv = self.mse_path[2, 0, :] 
+            else:
+                raise Exception(f"cv type {self.config.validation.cv_type} "
+                                 "not supported.")
 
             # find knee in L-shaped curve
             best_lambda = KneeLocator(x_gcv, y_gcv, 
                                       direction='decreasing',
                                       curve='convex').knee
             
+            print(f"\nmeasurement disturbance smoother CVs: {x_gcv}, {y_gcv}\n")
+            
             print(f'\n\nbest_regularizing parameter: {best_lambda} using GCV\n')
 
-        em_state, smoother_result = self._fit(y, F, R, best_lambda, em_state)
+            best_lambda_idx = np.where(x_gcv == best_lambda)[0][0]
+
+            # already computed using full data (lastsplit is full data dummy
+            # split)
+            em_state = lastsplit_em_states[best_lambda_idx]
+            em_state, smoother_result = rts_smoother_jax(y, F, R, em_state)
+
         m = em_state.N_sources_upper
         self._parameters = (
             self._unravel_a(em_state.A[:m]), 
@@ -352,6 +367,7 @@ class NeuraLVARCV(NeuraLVAR):
             R, 
             smoother_result.smoothed_state
         )
+
         self.ll = -smoother_result.negative_log_likelihood
         self.lambda_ = best_lambda
 
