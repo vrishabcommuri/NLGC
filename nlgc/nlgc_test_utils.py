@@ -1,14 +1,15 @@
 import numpy as np
 import scipy
 from scipy import linalg
-from scipy.stats import chi2
 import os
 import time
 from .nlgc_utils import gc_extraction, NLGC
+from .io import save_model, _forward_path
 from .opt import NeuraLVAR
 from .utils.leadfield import prepare_eigenmodes
+from .utils.runlog import tee_output
 from .utils.transforms import surface_ico4_to_surface_eigs
-from .config import ModelConfig
+from .config import ModelConfig, to_legacy_kwargs
 from .utils.initialize import initialize_em_state
 from mne.minimum_norm import apply_inverse, make_inverse_operator, InverseOperator
 from mne.source_space import SourceSpaces
@@ -21,12 +22,16 @@ warnings.filterwarnings('ignore')
 from .ggc.multiprocess_ggc import GGC, ggc_map
 import matplotlib.pyplot as plt
 import mne
-from matplotlib.backends.backend_pdf import PdfPages
 
 import pickle
 import json
+from matplotlib.backends.backend_pdf import PdfPages
 import os
+import re
 import zipfile
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Union
 from matplotlib import patches
 from matplotlib.pyplot import axvline, axhline
 from collections import defaultdict
@@ -183,78 +188,271 @@ def _json_default(obj):
     return str(obj)
 
 
-def _plot_deviance_pages(pdf, model, alpha=0.1):
+# PDF pages are vector, so 75in costs nothing; rasterised that would be
+# ~7500px per figure. Values listed, not derived -- see the geometry test.
+_PDF_STYLE = {'fig_size': (75, 75), 'title': 80, 'label': 60, 'tick': 40,
+              'legend': 50, 'line_width': 8, 'dpi': None}
+_MD_STYLE = {'fig_size': (12, 12), 'title': 16, 'label': 12, 'tick': 8,
+             'legend': 10, 'line_width': 1.6, 'dpi': 150}
+
+# Obsidian's default attachment folder name
+_ATTACHMENTS = 'attachments'
+
+# Fixed px, not a percentage: only ![[wikilink]] embeds get click-to-zoom and
+# their width must be an integer. Raise it if your reading pane is wide.
+_PAIR_WIDTH = 380
+
+
+@dataclass
+class Figure:
+    """One figure in the note. `group` pairs it into a side-by-side table."""
+    title: str
+    path: str
+    group: Union[str, None] = None
+    column: Union[str, None] = None
+    collapsed: bool = False
+
+
+@dataclass
+class ReportState:
+    """Where save_info is putting its figures; format picked by save_info."""
+    directory: str
+    style: dict
+    obsidian: bool  # False -> multi-page PDF
+    param_dict: dict
+    pdf: Union[PdfPages, None] = None  # PDF format only
+    sections: list = field(default_factory=list)  # markdown format only
+
+
+def _slugify(title):
+    """Figure title -> filename stem. Falls back if the title is all symbols."""
+    return re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-') or 'figure'
+
+
+def _open_report(directory, param_dict, obsidian):
+    """Start a report. Pair with _close_report, which writes it out."""
+    report = ReportState(
+        directory=directory,
+        style=_MD_STYLE if obsidian else _PDF_STYLE,
+        obsidian=obsidian,
+        param_dict=param_dict or {},
+    )
+    if obsidian:
+        os.makedirs(os.path.join(directory, _ATTACHMENTS), exist_ok=True)
+    else:
+        report.pdf = PdfPages(os.path.join(directory,
+                                           'model-comparison.pdf'))
+    return report
+
+
+def _report_savefig(report, figure=None, group=None, column=None,
+                    collapsed=False):
+    """Add the figure, or the current one as PdfPages.savefig does.
+
+    Heading and file name come off the axes title; colorbar pages add a second
+    axes, hence the scan. group/column shape the note only.
+    """
+    if not report.obsidian:
+        if figure is None:
+            report.pdf.savefig()
+        else:
+            report.pdf.savefig(figure)
+        return
+
+    fig = plt.gcf() if figure is None else figure
+    title = ''
+    for ax in fig.axes:
+        if ax.get_title():
+            title = ax.get_title()
+            break
+    if not title:
+        title = f'Figure {len(report.sections) + 1}'
+
+    # zero-padded so file order matches figure order
+    name = f'{len(report.sections) + 1:02d}-{_slugify(title)}.png'
+    fig.savefig(os.path.join(report.directory, _ATTACHMENTS, name),
+                dpi=report.style['dpi'], bbox_inches='tight')
+    report.sections.append(Figure(title, f'{_ATTACHMENTS}/{name}',
+                                  group, column, collapsed))
+
+
+def _close_report(report):
+    """Finish the report. save_info calls this from a finally block, so a
+    figure that raises still leaves everything rendered before it."""
+    if report.obsidian:
+        _write_note(report)
+    else:
+        info = report.pdf.infodict()
+        info['Title'] = 'Model Analyatics PDF'
+        info['Author'] = 'Kavin Loganathan'
+        report.pdf.close()
+
+
+def _report_frontmatter(report):
+    """YAML header so a vault can filter and sort runs; None fields skipped."""
+    p = report.param_dict
+    data_gen = p.get('data_gen') or {}
+    fields_ = [
+        ('run', os.path.basename(os.path.normpath(report.directory))),
+        ('created', datetime.now().strftime('%Y-%m-%d')),
+        ('order', p.get('order')),
+        ('n_eigenmodes', p.get('n_eigenmodes')),
+        ('n_orients', p.get('n_orients')),
+        ('n_segments', p.get('n_segments')),
+        ('t', p.get('t')),
+        ('best_lambda', p.get('best_lambda')),
+        ('src_space', p.get('src_space')),
+        ('seed', data_gen.get('seed')),
+        ('band', data_gen.get('band')),
+    ]
+    lines = ['---', 'tags: [nlgc, model-comparison]']
+    for key, value in fields_:
+        if value is not None:
+            lines.append(f'{key}: {_json_default_scalar(value)}')
+    lines.append('---')
+    return lines
+
+
+def _report_summary_table(report):
+    """Run shape at a glance, in a callout. Empty rows are dropped."""
+    p = report.param_dict
+    leadfield = p.get('leadfield') or {}
+    rows = [
+        ('Sources', leadfield.get('n_sources')),
+        ('Sensors', leadfield.get('n_sensors')),
+        ('Patches', leadfield.get('n_patches')),
+        ('Samples', p.get('t')),
+        ('Segments', p.get('n_segments')),
+        ('Best lambda', p.get('best_lambda')),
+        ('Fit time', None if p.get('nlgc_map_time') is None
+                     else f"{p['nlgc_map_time']:.1f} s"),
+    ]
+    rows = [(k, v) for k, v in rows if v is not None]
+    if not rows:
+        return []
+    out = ['> [!info] Run summary', '> | | |', '> |---|---|']
+    out += [f'> | {k} | {v} |' for k, v in rows]
+    return out + ['']
+
+
+def _embed(figure):
+    """Obsidian embed sized for a table cell.
+
+    The width separator is an escaped pipe: a bare | would end the cell.
+    """
+    return f'![[{figure.path}\\|{_PAIR_WIDTH}]]'
+
+
+def _figure_blocks(sections):
+    """Group consecutive figures sharing a `group` into one block each."""
+    blocks = []
+    for figure in sections:
+        if (figure.group is not None and blocks
+                and blocks[-1][0] == figure.group):
+            blocks[-1][1].append(figure)
+        else:
+            blocks.append((figure.group, [figure]))
+    return blocks
+
+
+def _render_block(group, figures):
+    """One heading plus either a side-by-side table or a single embed."""
+    heading = group or figures[0].title
+    if len(figures) == 1 and figures[0].group is None:
+        body = [f'![[{figures[0].path}]]', '']
+    else:
+        headers = [f.column or f.title for f in figures]
+        body = ['| ' + ' | '.join(headers) + ' |',
+                '|' + '---|' * len(figures),
+                '| ' + ' | '.join(_embed(f) for f in figures) + ' |', '']
+
+    if figures[0].collapsed:
+        # `-` folds the callout; every body line needs the quote marker
+        return [f'> [!note]- {heading}'] + [f'> {line}' if line else '>'
+                                            for line in body] + ['']
+    return [f'## {heading}', ''] + body
+
+
+def _parameter_tables(param_dict):
+    """Every run parameter as tables, so the note stands alone.
+
+    param_dict is grouped one level deep; None means unset and is skipped.
+    """
+    if not param_dict:
+        return []
+
+    scalars = [(k, v) for k, v in param_dict.items()
+               if not isinstance(v, dict) and v is not None]
+    groups = [(k, v) for k, v in param_dict.items() if isinstance(v, dict)]
+
+    lines = []
+    for label, rows in [('Run', scalars)] + [(k.replace('_', ' ').capitalize(),
+                                              list(v.items()))
+                                             for k, v in groups]:
+        rows = [(k, v) for k, v in rows if v is not None]
+        if not rows:
+            continue
+        lines += [f'**{label}**', '', '| | |', '|---|---|']
+        lines += [f'| {k} | {_json_default_scalar(v)} |' for k, v in rows]
+        lines += ['']
+
+    # `-` folds it; parameters are reference material
+    return ['> [!info]- Parameters'] + [f'> {line}' if line else '>'
+                                        for line in lines] + ['']
+
+
+def _write_note(report):
+    """Write model-comparison.md, embedding each figure by wiki-link."""
+    run = os.path.basename(os.path.normpath(report.directory))
+    lines = _report_frontmatter(report)
+    lines += ['', f'# Model comparison — {run}', '']
+    lines += _report_summary_table(report)
+    for group, figures in _figure_blocks(report.sections):
+        lines += _render_block(group, figures)
+    lines += _parameter_tables(report.param_dict)
+    lines += ['%% generated by nlgc save_info %%', '']
+    with open(os.path.join(report.directory, 'model-comparison.md'), 'w') as f:
+        f.write('\n'.join(lines))
+
+
+def _json_default_scalar(value):
+    """Frontmatter-safe scalar. Reuses _json_default's numpy unwrapping."""
+    if isinstance(value, (np.generic, np.ndarray)):
+        value = _json_default(value)
+    return value
+
+
+def _plot_deviance_pages(report, model):
     """Deviance pages for the debug report: the inputs to the J statistics.
 
-    Adds the raw and debiased deviance matrices, then the distribution of the
-    debiased deviances against the thresholds fdr_control actually applies --
-    which is what says whether any link *could* be detected.
+    Adds the raw and debiased deviance matrices -- the quantities
+    get_J_statistics thresholds.
     """
+    style = report.style
+
     # average over segments, the convention avg_debiased_dev already uses
     d_raw = np.asarray(model.d_raw).mean(axis=0)
     d_debiased = np.asarray(model.avg_debiased_dev)
-    bias_r = np.asarray(model.bias_r).mean(axis=0)
 
-    for arr, title in ((d_raw, 'Raw (Biased) Deviances'),
-                       (d_debiased, 'Debiased Deviances')):
-        fig = plt.figure(figsize=(75, 75))
+    for arr, title, column in ((d_raw, 'Raw (Biased) Deviances', 'Raw (biased)'),
+                               (d_debiased, 'Debiased Deviances', 'Debiased')):
+        fig = plt.figure(figsize=style['fig_size'])
         # deviances are non-negative, so a sequential map uses its whole range
         # where the 'seismic' of the A-coefficient pages would waste half
         plt.imshow(arr, cmap='viridis')
-        # magnitudes matter here -- they get compared against a threshold below.
-        # fraction/pad keep the bar the same height as the square image instead
-        # of stretching it over the whole canvas
+        # magnitudes matter here, so the bar is worth the space. fraction/pad
+        # keep it the same height as the square image instead of stretching it
+        # over the whole canvas
         cbar = plt.colorbar(fraction=0.046, pad=0.04)
-        cbar.ax.tick_params(labelsize=40)
-        plt.title(title, fontsize=80)
-        pdf.savefig(fig)
+        cbar.ax.tick_params(labelsize=style['tick'])
+        plt.title(title, fontsize=style['title'])
+        _report_savefig(report, fig, group='Deviance diagnostics',
+                        column=column)
         plt.close()
-
-    n_sources = d_debiased.shape[0]
-    off_diag = ~np.eye(n_sources, dtype=bool)
-    # bias_r != 0 marks the links that actually got a reduced-model fit -- the
-    # same mask debias_deviances uses. Screened-out links stay at exactly 0 and
-    # would otherwise swamp the histogram.
-    tested = (bias_r != 0) & off_diag
-    vals = d_debiased[tested]
-
-    # dof as get_J_statistics computes it
-    k = model.p * (model.n_orients * model.n_eigenmodes) ** 2
-    n_tests = n_sources * (n_sources - 1)
-    # fdr_control's step-up threshold is i*alpha/(N log N) for 1-indexed rank i.
-    # i = N is the most permissive rank, so a deviance below this cannot be
-    # declared significant at ANY rank -- a hard necessary condition.
-    crit_fdr = chi2.isf(alpha / np.log(n_tests), k)
-    crit_nominal = chi2.isf(alpha, k)
-
-    fig = plt.figure(figsize=(75, 75))
-    ax = plt.subplot(1, 1, 1)
-    if vals.size:
-        ax.hist(vals, bins=min(50, max(10, vals.size)), color='steelblue')
-        n_pass = int((vals >= crit_fdr).sum())
-    else:
-        n_pass = 0
-        ax.text(0.5, 0.5, 'no links were tested', fontsize=80, ha='center',
-                transform=ax.transAxes)
-
-    ax.axvline(crit_nominal, color='darkorange', lw=8,
-               label=f'nominal chi2.isf({alpha}, {k}) = {crit_nominal:.2f}')
-    ax.axvline(crit_fdr, color='crimson', lw=8,
-               label=f'most permissive FDR cutoff = {crit_fdr:.2f}')
-
-    ax.set_xlabel('debiased deviance', fontsize=60)
-    ax.set_ylabel('tested links', fontsize=60)
-    ax.tick_params(labelsize=40)
-    ax.legend(fontsize=50)
-    ax.set_title(
-        f'Deviance vs FDR Threshold  (dof k={k}, {int(tested.sum())} of '
-        f'{n_tests} links tested, {n_pass} above cutoff)', fontsize=80)
-    pdf.savefig(fig)
-    plt.close()
 
 
 # Save information in
-def save_info(dir, a, JG, model, order, param_dict, ggc_model = None, J_GGC = None, ggc_model_extras = None,  zip_pkl = True, debug_report = False):
+def save_info(dir, a, JG, model, order, param_dict, ggc_model = None, J_GGC = None, ggc_model_extras = None,  zip_pkl = True, debug_report = False, obsidian_report = False):
 
     conv = int(np.floor((5/350)*a.shape[1]) + 1)
     if not os.path.exists(dir):
@@ -263,49 +461,54 @@ def save_info(dir, a, JG, model, order, param_dict, ggc_model = None, J_GGC = No
     else:
         print(f"Directory '{dir}' already exists.")
 
-    with PdfPages(dir + 'model-comparison.pdf') as pdf:
-        plt.figure(figsize=(75, 75))
+    # obsidian_report picks the format; the figure code below is shared and
+    # reads its sizes out of report.style, so both formats stay in step.
+    report = _open_report(dir, param_dict, obsidian_report)
+    style = report.style
+    try:
+        plt.figure(figsize=style['fig_size'])
         arr = np.concatenate(a[:], axis = 1)
         plt.imshow(scipy.signal.convolve2d(arr, np.ones((conv,conv))), cmap = 'seismic', vmin=-1, vmax=1)
-        plt.title('A Coefficients Concatenated', fontsize = 80)
-        pdf.savefig()  # saves the current figure into a pdf page
+        plt.title('A Coefficients Concatenated', fontsize=style['title'])
+        _report_savefig(report, group='VAR coefficients',
+                        column='Ground truth')  # writes the *current* figure -- no argument
         plt.close()
 
         # if LaTeX is not installed or error caught, change to `False`
-        plt.figure(figsize=(75, 75))
+        plt.figure(figsize=style['fig_size'])
         model_params = model._model_f[0]._parameters[0]
         arr_model = np.concatenate(model_params[:], axis = 1)
         plt.imshow(scipy.signal.convolve2d(arr_model, np.ones((conv,conv))), cmap = 'seismic', vmin=-1, vmax=1)
-        plt.title('Derived Model Parameters Concatenated', fontsize = 80)
-        # pdf.attach_note("plot of sin(x)")  # attach metadata (as pdf note) to page
-        pdf.savefig()
+        plt.title('Derived Model Parameters Concatenated', fontsize=style['title'])
+        _report_savefig(report, group='VAR coefficients',
+                        column='Derived')
         plt.close()
 
         
-        fig = plt.figure(figsize=(75, 75))
+        fig = plt.figure(figsize=style['fig_size'])
         plt.imshow(JG)
-        plt.title('Ground Truth J Statistics', fontsize = 80)
-        pdf.savefig(fig)  
+        plt.title('Ground Truth J Statistics', fontsize=style['title'])
+        _report_savefig(report, fig, group='J statistics',
+                        column='Ground truth')  
         plt.close()
         
-        fig = plt.figure(figsize=(75, 75))
+        fig = plt.figure(figsize=style['fig_size'])
         plt.imshow(model.get_J_statistics())
-        plt.title('Derived J Statistics', fontsize = 80)
-        pdf.savefig(fig)
+        plt.title('Derived J Statistics', fontsize=style['title'])
+        _report_savefig(report, fig, group='J statistics',
+                        column='Derived')
         plt.close()
 
         if debug_report:
             # the deviances those J statistics were derived from
-            _plot_deviance_pages(
-                pdf, model,
-                alpha=param_dict.get('screening', {}).get('alpha', 0.1))
+            _plot_deviance_pages(report, model)
 
 
         # if ggc_model != None:
-        #     fig = plt.figure(figsize=(75, 75))
+        #     fig = plt.figure(figsize=style['fig_size'])
         #     plt.imshow(J_GGC)
-        #     plt.title('Ground Truth GGC J Statistics', fontsize = 80)
-        #     pdf.savefig(fig)  
+        #     plt.title('Ground Truth GGC J Statistics', fontsize=style['title'])
+        #     _report_savefig(report, fig)  
         #     plt.close()
 
             
@@ -313,85 +516,100 @@ def save_info(dir, a, JG, model, order, param_dict, ggc_model = None, J_GGC = No
 
         a_abs = np.abs(a[:]*negated_identity)
         a_summed = np.sum(a_abs[:], axis = 0)
-        fig = plt.figure(figsize=(75, 75))
+        fig = plt.figure(figsize=style['fig_size'])
         plt.imshow(scipy.signal.convolve2d(a_summed, np.ones((conv,conv))), cmap = 'seismic', vmin=-1, vmax=1)
-        plt.title('No Diagonal Absolute Summed Lags A Coeffs', fontsize = 80)
-        pdf.savefig(fig)  
+        plt.title('No Diagonal Absolute Summed Lags A Coeffs', fontsize=style['title'])
+        _report_savefig(report, fig, group='Summed lags, no diagonal',
+                        column='Ground truth')  
         plt.close()
 
 
         model_params_abs = np.abs(model_params[:]*negated_identity)
         model_params_summed = np.sum(model_params_abs[:], axis = 0)
-        fig = plt.figure(figsize=(75, 75))
+        fig = plt.figure(figsize=style['fig_size'])
         
         plt.imshow(scipy.signal.convolve2d(model_params_summed, np.ones((conv,conv))), cmap = 'seismic', vmin=-1, vmax=1)
-        plt.title('No Diagonal Absolute Summed Lags Derived Model Params', fontsize = 80)
-        pdf.savefig(fig)  
+        plt.title('No Diagonal Absolute Summed Lags Derived Model Params', fontsize=style['title'])
+        _report_savefig(report, fig, group='Summed lags, no diagonal',
+                        column='Derived')  
         plt.close()
 
 
         zs_t, ps_t, zs, ps = find_poles_and_zeros(a, model, order)
 
-        # sized to match the other pages in this PDF
+        # sized from the report so both formats match their other figures
         fig = zplane(np.array(zs_t), np.array(ps_t), 'Ground Truth Pole Zero Plot',
-                     figsize=(75, 75), title_fontsize=80)
-        pdf.savefig(fig)
+                     figsize=style['fig_size'], title_fontsize=style['title'])
+        _report_savefig(report, fig, group='Pole-zero', column='Ground truth')
         plt.close()
 
         fig = zplane(np.array(zs),np.array(ps), 'Model Parameters Pole Zero Plot',
-                     figsize=(75, 75), title_fontsize=80)
-        pdf.savefig(fig)
+                     figsize=style['fig_size'], title_fontsize=style['title'])
+        _report_savefig(report, fig, group='Pole-zero', column='Derived')
         plt.close()
 
+    finally:
+        # runs even if a figure raised, so a partial report survives
+        _close_report(report)
 
-        # We can also set the file's metadata via the PdfPages object:
-        d = pdf.infodict()
-        d['Title'] = 'Model Analyatics PDF'
-        d['Author'] = 'Kavin Loganathan'
+    A_path = dir + 'G-Coeffs.pkl'
+    JG_path = dir + 'JG.pkl'
 
-        model_path = dir + 'model.pkl'
-        A_path = dir + 'G-Coeffs.pkl'
-        JG_path = dir + 'JG.pkl'
+    # nlgc.io not pickle: pickle ties the archive to the class layout.
+    # save_model returns the path it wrote (it appends .h5).
+    model_path = save_model(model, dir + 'model')
+    # the sidecar only exists when the model carries a forward
+    forward_path = _forward_path(model_path)
+    has_forward = os.path.exists(forward_path)
 
-        
-        with open(model_path, 'wb') as file:
-            pickle.dump(model, file)
-        with open(A_path, 'wb') as file:
-            pickle.dump(a, file)
-        with open(JG_path, 'wb') as file:
-            pickle.dump(JG, file)
+    with open(A_path, 'wb') as file:
+        pickle.dump(a, file)
+    with open(JG_path, 'wb') as file:
+        pickle.dump(JG, file)
 
 
+    if ggc_model != None:
+        ggc_model_path = dir + 'ggc_model.pkl'
+        J_GGC_path = dir + 'J_GGC.pkl'
+        ggc_model_extras_path = dir + 'ggc_model_extras.pkl'
+        with open(ggc_model_path, 'wb') as file:
+            pickle.dump(ggc_model, file)
+        with open(J_GGC_path, 'wb') as file:
+            pickle.dump(J_GGC, file)
+        with open(ggc_model_extras_path, 'wb') as file:
+            pickle.dump(ggc_model_extras, file)
+
+    with zipfile.ZipFile(dir + "data.zip", "w") as zip_file:
+        zip_file.write(model_path, arcname="model.h5")
+        if has_forward:
+            zip_file.write(forward_path,
+                           arcname=os.path.basename(forward_path))
+        zip_file.write(A_path, arcname="G-Coeffs.pkl") 
+        zip_file.write(JG_path, arcname= 'JG.pkl')
         if ggc_model != None:
-            ggc_model_path = dir + 'ggc_model.pkl'
-            J_GGC_path = dir + 'J_GGC.pkl'
-            ggc_model_extras_path = dir + 'ggc_model_extras.pkl'
-            with open(ggc_model_path, 'wb') as file:
-                pickle.dump(ggc_model, file)
-            with open(J_GGC_path, 'wb') as file:
-                pickle.dump(J_GGC, file)
-            with open(ggc_model_extras_path, 'wb') as file:
-                pickle.dump(ggc_model_extras, file)
+            zip_file.write(ggc_model_path, arcname='ggc_model.pkl')
+            zip_file.write(J_GGC_path, arcname='J_GGC.pkl')
+            zip_file.write(ggc_model_extras_path, arcname='ggc_model_extras.pkl')
 
-        with zipfile.ZipFile(dir + "data.zip", "w") as zip_file:
-            zip_file.write(model_path, arcname="model.pkl")
-            zip_file.write(A_path, arcname="G-Coeffs.pkl") 
-            zip_file.write(JG_path, arcname= 'JG.pkl')
-            if ggc_model != None:
-                zip_file.write(ggc_model_path, arcname='ggc_model.pkl')
-                zip_file.write(J_GGC_path, arcname='J_GGC.pkl')
-                zip_file.write(ggc_model_extras_path, arcname='ggc_model_extras.pkl')
+    os.remove(model_path)
+    if has_forward:
+        os.remove(forward_path)
+    os.remove(A_path)
+    os.remove(JG_path)
+    if ggc_model != None:
+        os.remove(ggc_model_path)
+        os.remove(J_GGC_path)
+        os.remove(ggc_model_extras_path)
 
-        os.remove(model_path)
-        os.remove(A_path)
-        os.remove(JG_path)
-        if ggc_model != None:
-            os.remove(ggc_model_path)
-            os.remove(J_GGC_path)
-            os.remove(ggc_model_extras_path)
+    with open(dir + "params.json", "w") as f:
+        json.dump(param_dict, f, indent=4, default=_json_default)
 
-        with open(dir + "params.json", "w") as f:
-            json.dump(param_dict, f, indent=4, default=_json_default)
+    # what the model was fitted with; params.json is what it was invoked with
+    config = model._model_f[0].config if model._model_f else None
+    if config is not None:
+        with open(dir + "config.json", "w") as f:
+            json.dump(to_legacy_kwargs(config), f, indent=4,
+                      default=_json_default)
         
 
 
@@ -487,10 +705,12 @@ def lead_field_generation(root, subject_id, src_space, n_eigenmodes, n_orients, 
         fwd_origin = mne.make_forward_solution(info = info, trans = trans_file, src = src_origin, bem = bem_folder + subject_id + "-inner_skull-bem-sol.fif", ignore_ref = True)
         fwd_target = mne.make_forward_solution(info = info, trans = trans_file, src = src_target, bem = bem_folder + subject_id + "-inner_skull-bem-sol.fif", ignore_ref = True)
     # fwd_origin_data = fwd_origin['sol']
-    weights, G, label_vertidx, label_names, gain_info, whitener = prepare_eigenmodes(info, fwd_origin, noise_cov, fwd_target, n_eigenmodes=n_eigenmodes, n_orients = n_orients, loose=loose, depth=depth, pca=pca, rank=rank,
-    mode='svd_flip')
+    if rank == None:
+        rank_fwd_origin = np.linalg.matrix_rank(fwd_origin['sol']['data'])
+    print(type(rank_fwd_origin))
+    weights, G, label_vertidx, label_names, gain_info, whitener, singular_values = prepare_eigenmodes(info = info, forward = fwd_origin, noise_cov = noise_cov, labels = fwd_target['src'], rank = 155, n_eigenmodes=n_eigenmodes, n_orients = n_orients, loose=loose, depth=depth, pca=pca, mode='svd_flip')
     print(f'G shape: {G.shape}')
-    return G, info, noise_cov, fwd_origin, weights
+    return G, info, noise_cov, fwd_origin, weights, rank, singular_values
 
 
 
@@ -989,7 +1209,7 @@ verbose: bool
 '''
 def nlgc_map_opt(M, G, r, order, self_history=None, var_thr=1.0, n_segments=1, lambda_range=None, max_iter=500,
                  max_cyclic_iter=3, tol=1e-5, sparsity_factor=0.0, cv=5, n_eigenmodes = 2, n_orients = 1, xs_init = None, a_init = None, use_es = False, patch_idx = None, verbose = False,
-                 parallel_mode = 'serial', n_devices = 1, n_workers = 1, n_warmup_iter = 25,
+                 parallel_mode = 'serial', n_devices = 1, n_workers = 1, n_warmup_iter = 25, rank = None, singular_values = None,
                  use_wald_screen = True, wald_screen_alpha = 0.05,
                  use_empirical_null = True):
     n_sensors, nnx = G.shape
@@ -1011,7 +1231,8 @@ def nlgc_map_opt(M, G, r, order, self_history=None, var_thr=1.0, n_segments=1, l
         wald_screen_alpha=wald_screen_alpha,
         use_empirical_null=use_empirical_null,
         patch_idx=tuple(patch_idx) if patch_idx is not None else (),
-        verbose=verbose))
+        verbose=verbose,
+        rank = rank, singular_values = singular_values))
 
     d_raw = np.zeros((n_segments, len_patch_idx, len_patch_idx))
     bias_r = np.zeros((n_segments, len_patch_idx, len_patch_idx))
@@ -1033,7 +1254,7 @@ def nlgc_map_opt(M, G, r, order, self_history=None, var_thr=1.0, n_segments=1, l
         # It expects sensor-major y -- data_driven_Q_init does U.T @ y with U
         # shaped (n_sensors, n_sensors).
         F_companion, R_companion, em_state = initialize_em_state(
-            y=y_seg, F=G, r=r, config=config)
+            y=y_seg, F=G, r=r, singular_values= singular_values, config=config)
 
         if xs_init is not None:
             # EMState has no `smoothed_state` field (nlgc/opt/em.py) -- assigning
@@ -1134,8 +1355,22 @@ verbose: bool
         Default: False, Run GC extraction with verbose mode or not
 save_dir: string
         Default: None, Pass in directory for saving analytics and model/data
+obsidian_report: bool
+        Default: False, report format for the figures. False writes the
+        multi-page model-comparison.pdf; True writes an Obsidian note
+        (model-comparison.md) plus an attachments/ folder of PNGs, sized
+        for a vault rather than for print.
 '''
-def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, band = "wide", fs = 50, natures = 'all', target_spec_rad = .45,
+def run_GT_sim(*args, save_dir=None, **kwargs):
+    """Run a ground-truth simulation, teeing console output to run.log.
+
+    Thin wrapper; every argument is documented on _run_GT_sim below.
+    """
+    with tee_output(save_dir):
+        return _run_GT_sim(*args, save_dir=save_dir, **kwargs)
+
+
+def _run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, band = "wide", fs = 50, natures = 'all', target_spec_rad = .45,
         root = None, subject_id = None, session_name = None, trans = None, order = 2, t = 500, n_eigenmodes = 1, n_orients = 1,
         n_segments = 1, loose = 0.0, depth = 0.0, pca = True, rank = None, lambda_range = None,
         max_iter = 500, max_cyclic_iter = 3, tol = 1e-5, sparsity_factor = 0.0, cv = 5 ,var_thr = 1.0, alpha = .1, 
@@ -1145,6 +1380,7 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
         use_wald_screen = True, wald_screen_alpha = 0.05,
         use_empirical_null = True,
         vol_pos_origin = 10.0, vol_pos_target = 30.0, debug_report = False,
+        obsidian_report = False,
         n_sensors = None, n_sources = None):
 
     if src_space not in ['surf', 'vol', 'mixed']:
@@ -1164,12 +1400,12 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
         evoked = mne.read_evokeds(passed_evoked['evoked'])
         src_target = mne.read_source_spaces(passed_evoked['src_target'])
         info = evoked[0].info
-        weights, G, label_vertidx, label_names, gain_info, whitener = prepare_eigenmodes(info, fwd, noise_cov, src_target, 
+        weights, G, grouped_vertidx, src_flips, rank, singular_values = prepare_eigenmodes(info, fwd, noise_cov, src_target, 
                                                                             n_eigenmodes=n_eigenmodes, n_orients = n_orients, loose=loose, depth=depth, pca=pca, rank=rank, mode='svd_flip')
     elif (lead_field_gen):
         # keyword args: the positional form silently shifted n_orients<-loose and
         # dropped `trans`, so the real trans file was never used
-        G, info, noise_cov, fwd, weights = lead_field_generation(
+        G, info, noise_cov, fwd, weights, rank, singular_values = lead_field_generation(
             root=root, subject_id=subject_id, src_space=src_space,
             n_eigenmodes=n_eigenmodes, n_orients=n_orients, loose=loose,
             depth=depth, pca=pca, rank=rank, trans=trans,
@@ -1239,7 +1475,7 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
         # stc_init = x + noise
         # print(stc_init)
     if diff_lf:
-        f, info, noise_cov, fwd, weights = lead_field_generation(
+        f, info, noise_cov, fwd, weights, rank, singular_values = lead_field_generation(
             root=root, subject_id=subject_id, src_space=src_space,
             n_eigenmodes=n_eigenmodes, n_orients=n_orients, loose=loose,
             depth=depth, pca=pca, rank=rank, trans=trans,
@@ -1252,7 +1488,7 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
                                     sparsity_factor=sparsity_factor, n_eigenmodes = n_eigenmodes, n_orients = n_orients, xs_init = stc_init, a_init = a_init, use_es = use_es, patch_idx = patch_idx, verbose = verbose,
                                     parallel_mode = parallel_mode, n_devices = n_devices, n_workers = n_workers,
                                     n_warmup_iter = n_warmup_iter, use_wald_screen = use_wald_screen,
-                                    wald_screen_alpha = wald_screen_alpha,
+                                    wald_screen_alpha = wald_screen_alpha, rank = rank, singular_values = singular_values,
                                     use_empirical_null = use_empirical_null)
     else:
         temp_obj = ggc_kwargs['model']
@@ -1370,6 +1606,7 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
             'ggc_params':ggc_dict,
             'verbose': verbose,
             'debug_report': debug_report,
+            'obsidian_report': obsidian_report,
             'nlgc_map_time': total_time,
         }
         if run_ggc:
@@ -1380,9 +1617,9 @@ def run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, 
                 'ggc_mt': ggc_mt,
             }
         if run_ggc:
-            save_info(dir = save_dir,a = a, JG = JG, model = temp_obj, order = order, param_dict = param_dict, ggc_model = ggc_obj, J_GGC = J_GGC, ggc_model_extras = ggc_model_extras, debug_report = debug_report)
+            save_info(dir = save_dir,a = a, JG = JG, model = temp_obj, order = order, param_dict = param_dict, ggc_model = ggc_obj, J_GGC = J_GGC, ggc_model_extras = ggc_model_extras, debug_report = debug_report, obsidian_report = obsidian_report)
         else:
-            save_info(dir = save_dir,a = a, JG = JG, model = temp_obj, order = order, param_dict = param_dict, debug_report = debug_report)
+            save_info(dir = save_dir,a = a, JG = JG, model = temp_obj, order = order, param_dict = param_dict, debug_report = debug_report, obsidian_report = obsidian_report)
 
 
 

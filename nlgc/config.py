@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from multiprocessing import cpu_count
 from typing import Union, TypeAlias
 import subprocess
@@ -192,6 +192,8 @@ class ModelConfig:
         else:
             raise ValueError(f"Unknown parallel_mode: {parallel_mode}")
         
+        verbose = kwargs.pop("verbose", False)
+
         return cls(
             parallel = parallel,
 
@@ -213,6 +215,8 @@ class ModelConfig:
                                 kwargs.pop("lambda_range", None)),
                 negligible_candidate_link_energy_thr = \
                     kwargs.pop("negligible_candidate_link_energy_thr", 1.0),
+                lambda1 = kwargs.pop("lambda1", None),
+                lambda2 = kwargs.pop("lambda2", None),
                 use_wald_screen = kwargs.pop("use_wald_screen", True),
                 wald_screen_alpha = kwargs.pop("wald_screen_alpha", 0.05),
                 use_empirical_null = kwargs.pop("use_empirical_null", False),
@@ -223,7 +227,8 @@ class ModelConfig:
                 depth = kwargs.pop("depth", 0.0),
                 rank = kwargs.pop("rank", None),
                 pca = kwargs.pop("pca", True),
-                patch_idx = kwargs.pop("patch_idx", ()),
+                # jax static arg: every field must stay hashable
+                patch_idx = tuple(kwargs.pop("patch_idx", ())),
             ),
 
             optimizer = ModelOptimizerConfig(
@@ -243,7 +248,7 @@ class ModelConfig:
             
             numerical = ModelNumericalConfig(
                 use_lapack = kwargs.pop("use_lapack", True),
-                verbose = kwargs.pop("verbose", False),
+                verbose = verbose,
             ),
 
             gctest = ModelGCTestConfig(
@@ -252,7 +257,41 @@ class ModelConfig:
             ),
 
             debug = ModelDebugConfig(
-                verbose = kwargs.pop("verbose", False),
+                verbose = kwargs.pop("debug_verbose", False),  # collides
                 plotlevel = kwargs.pop("plotlevel", 0),
             ),
         )
+
+
+# must track the ModelParallelConfig union
+_PARALLEL_MODES = {
+    ModelSerialConfig: "serial",
+    ModelVmapConfig: "vmap",
+    ModelShardConfig: "shard",
+    ModelMultiprocessConfig: "multiprocess",
+}
+
+
+def to_legacy_kwargs(config):
+    """Flatten a ModelConfig into from_legacy_kwargs' kwargs.
+
+    Writes every field: several from_legacy_kwargs defaults disagree with the
+    dataclass ones, so an omitted key would come back changed.
+    """
+    parallel = config.parallel
+    mode = _PARALLEL_MODES.get(type(parallel))
+    if mode is None:
+        raise ValueError(f"Unrecognized parallel config: {type(parallel)}")
+
+    kwargs = {"parallel_mode": mode}
+    for section in (config.latent, config.sparsity, config.forward,
+                    config.optimizer, config.validation, config.numerical,
+                    config.gctest, parallel):
+        for f in fields(section):
+            value = getattr(section, f.name)
+            kwargs[f.name] = list(value) if isinstance(value, tuple) else value
+
+    # would collide with numerical.verbose
+    kwargs["debug_verbose"] = config.debug.verbose
+    kwargs["plotlevel"] = config.debug.plotlevel
+    return kwargs

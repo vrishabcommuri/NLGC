@@ -3,13 +3,22 @@ from mne.io.constants import FIFF
 from mne.minimum_norm.inverse import _check_reference
 from nlgc.utils.leadfield import prepare_eigenmodes
 from nlgc.nlgc_utils import gc_extraction, NLGC
+from nlgc.utils.runlog import tee_output
 from nlgc.config import ModelConfig
 from nlgc.utils.initialize import initialize_em_state
 import time
 from nlgc.utils.param_vis import generate_report
 
-def nlgc_map(name, evoked, forward, noise_cov, src_target, patch_idx, 
+def nlgc_map(name, evoked, forward, noise_cov, src_target, patch_idx,
              config=None, save_dir = None, **kwargs):
+    """Fit an NLGC map, teeing this run's console output to save_dir/run.log."""
+    with tee_output(save_dir):
+        return _nlgc_map(name, evoked, forward, noise_cov, src_target,
+                         patch_idx, config=config, save_dir=save_dir, **kwargs)
+
+
+def _nlgc_map(name, evoked, forward, noise_cov, src_target, patch_idx,
+              config=None, save_dir = None, **kwargs):
     """NLGC connectivity map estimation
 
     This function estimates the causal connectivity map across sources given the

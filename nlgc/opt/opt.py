@@ -8,6 +8,7 @@ from multiprocessing import cpu_count
 from nlgc.opt.em import solve_params
 from nlgc.opt.kalman.filter import (forward_filter_jax, rts_smoother_jax, 
                                     measurement_smoother_jax)
+from nlgc.config import ModelConfig, to_legacy_kwargs
 import copy
 from kneed import KneeLocator
 
@@ -121,6 +122,84 @@ class NeuraLVAR:
         return (mul * df - 2*self.ll) / t
 
 
+    # names the on-disk keys; the single definition of the tuple's order
+    _PARAMETER_NAMES = ('A', 'F', 'Q', 'R', 'smoothed_state')
+
+    def to_dict(self):
+        """Plain-data state; lands under NLGC.to_dict's 'models' key.
+
+        Breaking changes here need a FORMAT_VERSION bump. _preprocessing is
+        dropped (always None via from_config); asarray because these may be jax.
+        """
+        d = {
+            'class': type(self).__name__,
+            'order': self._order,
+            'self_history': self._self_history,
+            'n_eigenmodes': self._n_eigenmodes,
+            'n_orients': self._n_orients,
+            'copy': self._copy,
+            'use_lapack': self._use_lapack,
+            'lambda_': self.lambda_,
+            'll': self.ll,
+            'config': None if self.config is None
+                      else to_legacy_kwargs(self.config),
+        }
+        if self._parameters is not None:
+            for name, value in zip(self._PARAMETER_NAMES, self._parameters):
+                d[name] = None if value is None else np.asarray(value)
+        return d
+
+    @classmethod
+    def from_dict(cls, d):
+        """Rebuild from to_dict output, dispatching on the 'class' key."""
+        class_name = d.get('class', cls.__name__)
+        target = {'NeuraLVAR': NeuraLVAR, 'NeuraLVARCV': NeuraLVARCV}.get(
+            class_name)
+        if target is None:
+            raise ValueError(f"Unrecognized model class: {class_name!r}")
+        if target is not cls:
+            return target.from_dict(d)
+        return cls._build_from_dict(d)
+
+    @classmethod
+    def _build_from_dict(cls, d):
+        obj = cls(
+            order=d['order'],
+            self_history=d.get('self_history'),
+            n_eigenmodes=d.get('n_eigenmodes'),
+            n_orients=d.get('n_orients'),
+            copy=d.get('copy', True),
+            use_lapack=d.get('use_lapack', True),
+            config=cls._config_from_dict(d),
+        )
+        obj._restore_common(d)
+        return obj
+
+    @staticmethod
+    def _config_from_dict(d):
+        cfg = d.get('config')
+        if cfg is None:
+            return None
+        # dict(): from_legacy_kwargs consumes what it is given
+        return ModelConfig.from_legacy_kwargs(dict(cfg))
+
+    def _restore_common(self, d):
+        self.lambda_ = d.get('lambda_')
+        self.ll = d.get('ll')
+
+        # to_dict writes all five or none, so a partial dict means a bad file
+        missing = [name for name in self._PARAMETER_NAMES
+                   if d.get(name) is None]
+        if not missing:
+            self._parameters = tuple(d[name]
+                                     for name in self._PARAMETER_NAMES)
+        elif len(missing) < len(self._PARAMETER_NAMES):
+            raise ValueError(
+                f"Incomplete model parameters: missing {sorted(missing)}. "
+                f"Expected all of {list(self._PARAMETER_NAMES)} or none of "
+                f"them (an unfitted model); the file is likely truncated.")
+        # else: unfitted model, _parameters stays None
+
     @staticmethod
     def _ravel_a(a):
         p, m, m_ = a.shape
@@ -171,7 +250,49 @@ class NeuraLVARCV(NeuraLVAR):
             config=config,
         )
 
-    def _cvfit(self, lambda_t, info_y, info_f, info_r, info_cv, info_pred, 
+    def to_dict(self):
+        d = NeuraLVAR.to_dict(self)
+        d.update({
+            'cv': self.cv,
+            'n_jobs': self.n_jobs,
+            'cv_lambdas': None if self.cv_lambdas is None
+                          else np.asarray(self.cv_lambdas),
+            'mse_path': None if self.mse_path is None
+                         else np.asarray(self.mse_path),
+            'es_path': None if self.es_path is None
+                        else np.asarray(self.es_path),
+            # aic/bic are only assigned in fit(), so they may be absent
+            'aic': getattr(self, 'aic', None),
+            'bic': getattr(self, 'bic', None),
+        })
+        return d
+
+    @classmethod
+    def _build_from_dict(cls, d):
+        obj = cls(
+            order=d['order'],
+            self_history=d.get('self_history'),
+            n_eigenmodes=d.get('n_eigenmodes'),
+            n_orients=d.get('n_orients'),
+            cv=d.get('cv'),
+            n_jobs=d.get('n_jobs'),
+            copy=d.get('copy', True),
+            use_lapack=d.get('use_lapack', True),
+            config=cls._config_from_dict(d),
+        )
+        obj._restore_common(d)
+        # tuple of floats on the fitted object; HDF5 hands back an array
+        cv_lambdas = d.get('cv_lambdas')
+        obj.cv_lambdas = None if cv_lambdas is None \
+            else tuple(float(x) for x in cv_lambdas)
+        obj.mse_path = d.get('mse_path')
+        obj.es_path = d.get('es_path')
+        for name in ('aic', 'bic'):
+            if d.get(name) is not None:
+                setattr(obj, name, d[name])
+        return obj
+
+    def _cvfit(self, lambda_t, info_y, info_f, info_r, info_cv, info_pred,
                splits, em_state, config):
         lam_idx, lambda_ = lambda_t
 

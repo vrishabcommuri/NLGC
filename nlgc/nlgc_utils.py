@@ -14,6 +14,11 @@ from nlgc.config import ModelMultiprocessConfig
 from nlgc.test.profile import pretty_print_elapsed
 import time
 
+# Bump on any breaking change to the 'meta'/'stats'/'models' keys and add a
+# matching _from_dict_vN. Additive keys need no bump; the loaders use .get().
+FORMAT_VERSION = 1
+
+
 class NLGC:
     """NLGC object
 
@@ -99,6 +104,85 @@ class NLGC:
         return fdr_control(self.avg_debiased_dev, self.p * (eff_eigenmodes**2), 
                            alpha)
 
+
+    def to_dict(self):
+        """Plain-data state, versioned, for nlgc.io.save_model.
+
+        Listed explicitly, not off __dict__, which would capture the cached
+        avg_debiased_dev. forward_orig goes to a .fif sidecar; _debug is dropped.
+        """
+        return {
+            'format_version': FORMAT_VERSION,
+            'meta': {
+                'subject': self.subject,
+                'nx': self.nx,
+                'ny': self.ny,
+                't': self.t,
+                'p': self.p,
+                'n_eigenmodes': self.n_eigenmodes,
+                'n_orients': self.n_orients,
+                'n_segments': self.n_segments,
+            },
+            'stats': {
+                'd_raw': self.d_raw,
+                'bias_f': self.bias_f,
+                'bias_r': self.bias_r,
+                'nonconv_flag': self._nonconv_flag,
+            },
+            'models': [m.to_dict() for m in self._model_f],
+            'source_space': {
+                'labels': self._labels,
+                'label_vertidx': self._label_vertidx,
+                'eig_src_weights': self.eig_src_weights,
+                'whitener': self.whitener,
+            },
+        }
+
+    @classmethod
+    def from_dict(cls, d):
+        """Rebuild from to_dict output, dispatching on format_version.
+
+        A new version adds a branch beside the existing one; it must not edit
+        one, or files already written stop loading. Split the bodies back out
+        into methods if this grows past two or three of them.
+        """
+        version = d.get('format_version')
+        if version == 1:
+            meta = d.get('meta', {})
+            stats = d.get('stats', {})
+            src = d.get('source_space', {})
+
+            # JSON hands the vol path's int keys back as strings
+            label_vertidx = src.get('label_vertidx')
+            if isinstance(label_vertidx, dict):
+                label_vertidx = {int(k): v for k, v in label_vertidx.items()}
+            models = [NeuraLVAR.from_dict(m) for m in d.get('models', [])]
+
+            # keyword form: 18 positional params is too many to reshuffle safely
+            return cls(
+                subject=meta.get('subject'),
+                nx=meta.get('nx'),
+                ny=meta.get('ny'),
+                t=meta.get('t'),
+                p=meta.get('p'),
+                n_eigenmodes=meta.get('n_eigenmodes'),
+                n_orients=meta.get('n_orients'),
+                n_segments=meta.get('n_segments'),
+                d_raw=stats.get('d_raw'),
+                bias_f=stats.get('bias_f'),
+                bias_r=stats.get('bias_r'),
+                model_f=models,
+                nonconv_flag=stats.get('nonconv_flag'),
+                label_names=src.get('labels'),
+                label_vertidx=label_vertidx,
+                forward_orig=None,  # reattached by nlgc.io.load_model
+                whitener=src.get('whitener'),
+                eig_src_weights=src.get('eig_src_weights'),
+            )
+
+        raise ValueError(
+            f"Unrecognized NLGC format_version: {version!r} (this build of "
+            f"nlgc writes and understands version {FORMAT_VERSION})")
 
     def pickle_as(self, filename):
         """saving the object as a pickle
