@@ -93,6 +93,11 @@ def _nlgc_map(name, evoked, forward, noise_cov, src_target, patch_idx,
         contains the connectivity map and the some related parameters (see NLGC
         class for more info)
     """
+    import os
+
+    print("OMP:", os.environ.get("OMP_NUM_THREADS"))
+    print("MKL:", os.environ.get("MKL_NUM_THREADS"))
+    print("OPENBLAS:", os.environ.get("OPENBLAS_NUM_THREADS"))
 
 
     start_time = time.time()

@@ -201,7 +201,8 @@ def multiprocess_test_links(links_to_check, y, F, R, lambda_, em_state, config):
    
     n_jobs = min(config.parallel.n_workers, len(links_to_check))
 
-    Parallel(n_jobs=n_jobs, verbose=10)(
+    timeout=99999
+    Parallel(n_jobs=n_jobs, verbose=10, timeout=timeout)(
         delayed(_learn_reduced_model_parallel)(
             link, *(shared_args + args)
         ) for link in links_to_check

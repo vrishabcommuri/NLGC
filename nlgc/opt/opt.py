@@ -363,7 +363,8 @@ class NeuraLVARCV(NeuraLVAR):
         for shm in (shm_y, shm_f, shm_r, shm_c, shm_pred):
             shm.close()
     
-        return em_state
+        return fit_state
+    
 
     def fit(self, y, F, R, em_state):
         """
@@ -479,6 +480,7 @@ class NeuraLVARCV(NeuraLVAR):
             # split)
             em_state = lastsplit_em_states[best_lambda_idx]
             em_state, smoother_result = rts_smoother_jax(y, F, R, em_state)
+
 
         m = em_state.N_sources_upper
         self._parameters = (

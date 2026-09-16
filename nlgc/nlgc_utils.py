@@ -241,11 +241,13 @@ def gc_extraction(y, F, R, ROIs, em_state, config):
         plot_transition_blurred(model_f._ravel_a(model_f._parameters[0]), 
                                 em_state.N_sources_upper, config.latent.order)
         plt.show()
+        plt.close()
 
         plot_transition_blurred(model_f._ravel_a(model_f._parameters[0]) \
                                 > 0.0001, 
                                 em_state.N_sources_upper, config.latent.order)
         plt.show()
+        plt.close()
         
     if config.numerical.verbose:
         print("link screening")

@@ -1,3 +1,5 @@
+import matplotlib
+matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 import numpy as np
 import scipy
@@ -223,14 +225,17 @@ def plot_leadfield_diagnostics(F, K):
     # Gramian (shows source U block 'correlations')
     S = F.T @ F
 
+    fig1 = plt.figure()
     plt.imshow(S, vmin=-1, vmax=1, cmap="RdBu_r")
     plt.colorbar(label="Signed sensor-mode inner product")
     plt.show()
+    plt.close(fig1)
 
-    plt.figure()
+    fig2 = plt.figure()
     plt.imshow(np.abs(S), vmin=0, vmax=1, cmap="magma")
     plt.colorbar(label="Absolute sensor-mode overlap")
     plt.show()
+    plt.close(fig2)
 
     n_nodes = F.shape[1] // K
     redundancy = np.zeros(n_nodes)
@@ -241,20 +246,28 @@ def plot_leadfield_diagnostics(F, K):
                 continue
             B = S[K*r:K*(r+1), K*s:K*(s+1)]
             redundancy[r] += np.linalg.norm(B, "fro")**2
-            
+
+    fig3 = plt.figure()
     plt.imshow(redundancy[:, np.newaxis] @ redundancy[np.newaxis, :])
     plt.colorbar(label="Nodal Redundancy (Higher Increases Unresolvability)")
     plt.show()
+    plt.close(fig3)
 
 
 def plot_whitener_diagnostics(y, whitener):
     vm = y.max()
+    fig1 = plt.figure()
     plt.imshow(y, cmap='seismic', vmax=vm, vmin=-vm)
     plt.show()
+    plt.close(fig1)
 
     vm = whitener.max() 
+    fig2 = plt.figure()
     plt.imshow(whitener, vmax=vm, vmin=-vm, cmap='seismic')
     plt.show()
+    plt.close(fig2)
+
+    plt.close('all')
 
 
     
