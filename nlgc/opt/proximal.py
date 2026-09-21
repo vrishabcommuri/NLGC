@@ -43,11 +43,14 @@ def proximal_param_update(em_state, smoother_result, config, lambda_):
                                    A = em_state.A.at[:m].set(A_shrunk))
     
     Q_new = solve_for_Q(em_state.A[:m], s1, s2, s3, n, n_orients, 
-                        nu0=None,           # set auto
-                        q_base=1e-4,        # TODO optarg?
+                        nu0= config.qprior.nu0,           # set auto
+                        q_base= config.qprior.q_base,        # TODO optarg?
                         singular_values=em_state.Q_prior_scales, 
                         source_mass=None,   # set auto
-                        sigma_gamma=1)      # TODO optarg?
+                        sigma_gamma= config.qprior.sigma_gamma, # TODO optarg?
+                        sigma_min= config.qprior.sigma_min, 
+                        sigma_max= config.qprior.sigma_max, 
+                        eig_floor= config.qprior.eig_floor)      
 
     em_state = dataclasses.replace(em_state,
                                    Q = em_state.Q.at[:m, :m].set(Q_new))
@@ -340,7 +343,7 @@ def solve_for_Q(A, s1, s2, s3, n_transitions, block_size, nu0=None, q_base=1e-4,
     # posterior: IW(Psi0 + n Qhat, nu0 + n).
     # its mode is:
     # (Psi0 + n Qhat) / (nu0 + n + block_size + 1).
-    q_blocks = psi0_blocks + n_transitions * q_blocks /\
+    q_blocks = (psi0_blocks + n_transitions * q_blocks) /\
                (nu0 + n_transitions + block_size + 1.0)
 
     # symmetrize for safety
@@ -366,6 +369,34 @@ def solve_for_Q(A, s1, s2, s3, n_transitions, block_size, nu0=None, q_base=1e-4,
     Q_new = Q_new.at[idx, :, idx, :].set(q_blocks)
 
     return Q_new.reshape(m, m)
+
+def _unpack_chol(theta, d):
+    """lower-triangular cholesky factor from unconstrained parameters."""
+    L = jnp.zeros((d, d), dtype=theta.dtype).at[jnp.tril_indices(d)].set(theta)
+    return L.at[jnp.diag_indices(d)].set(jnp.exp(jnp.diag(L)))
+
+
+def _pack_chol(L, d):
+    """inverse of _unpack_chol."""
+    L = L.at[jnp.diag_indices(d)].set(jnp.log(jnp.diag(L)))
+    return L[jnp.tril_indices(d)]
+
+def q_block_objective(theta, S, a_s, a_c, d):
+    """
+    penalized objective for a single Q block, in cholesky coordinates.
+
+    a_s * sum(log var) + a_c * logdet C + tr(Q^-1 S), which expands back to
+    the IW log-posterior plus -c * logdet C
+    """
+    L = _unpack_chol(theta, d)
+    Q = L @ L.T
+
+    log_var = jnp.log(jnp.diag(Q))
+    logdet_Q = 2.0 * jnp.sum(jnp.log(jnp.diag(L)))
+
+    logdet_C = logdet_Q - jnp.sum(log_var)
+
+    return a_s * jnp.sum(log_var) + a_c * logdet_C + jnp.trace(jnp.linalg.solve(Q, S))
 
 
 def penalized_q_objective(A, Q, s1, s2, s3, lambda_, n_orients, lagsparsity):

@@ -152,16 +152,17 @@ def prepare_eigenmodes(info, forward, noise_cov, labels, rank, n_eigenmodes=2,
                               n_orients, prepargs)
         
     # test if there are empty columns
+    eff_eigenmodes = n_eigenmodes * n_orients
     sel = np.any(G, axis=0)
     G = G[:, sel].copy()
     label_vertidx = [i for select, i in zip(sel, label_vertidx) if select]
-    
+    singular_values = singular_values[sel[::eff_eigenmodes]].copy() # Make sure to select corresponding singular values
     if not isinstance(forward, list) and is_fixed_orient(forward):
         src_flip = [i for select, i in zip(sel, src_flip) if select]
 
     discarded_labels = []
     j = 0
-    eff_eigenmodes = n_eigenmodes * n_orients
+    
     for i, sel_ in enumerate(sel[::eff_eigenmodes]):
         if not sel_:
             discarded_labels.append(labels.pop(i - j))

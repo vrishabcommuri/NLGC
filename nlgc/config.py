@@ -120,6 +120,18 @@ class ModelSparsityConfig:
     use_empirical_null: bool = False
 
 @dataclass(frozen=True)
+class ModelQPriorConfig:
+    lkj_mode: bool = False
+    eta: float = 1
+    nu0: Union[int, None] = None
+    q_base: float = 1e-4
+    # source_mass: Union[, None] = None
+    sigma_gamma: float = 1
+    sigma_min: float = .25
+    sigma_max: float = 4.0
+    eig_floor: float = 1e-10
+
+@dataclass(frozen=True)
 class ModelForwardConfig:
     loose: float = 0.0
     depth: float = 0.0
@@ -160,6 +172,7 @@ class ModelGCTestConfig:
 class ModelConfig:
     latent: ModelLatentConfig
     sparsity: ModelSparsityConfig
+    qprior: ModelQPriorConfig
     forward: ModelForwardConfig
     optimizer: ModelOptimizerConfig
     validation: ModelValidationConfig
@@ -220,6 +233,17 @@ class ModelConfig:
                 use_wald_screen = kwargs.pop("use_wald_screen", True),
                 wald_screen_alpha = kwargs.pop("wald_screen_alpha", 0.05),
                 use_empirical_null = kwargs.pop("use_empirical_null", False),
+            ),
+
+            qprior = ModelQPriorConfig(
+                lkj_mode = kwargs.pop("lkj_mode", False),
+                eta = kwargs.pop("eta", 1.0),
+                nu0 = kwargs.pop("nu0", None),
+                q_base = kwargs.pop("q_base", 1e-4),
+                sigma_gamma = kwargs.pop("sigma_gamma", 1),
+                sigma_min = kwargs.pop("sigma_min", .25),
+                sigma_max = kwargs.pop("sigma_max", 4.0),
+                eig_floor = kwargs.pip("eig_floor", 1e-10),
             ),
 
             forward = ModelForwardConfig(
@@ -284,7 +308,7 @@ def to_legacy_kwargs(config):
         raise ValueError(f"Unrecognized parallel config: {type(parallel)}")
 
     kwargs = {"parallel_mode": mode}
-    for section in (config.latent, config.sparsity, config.forward,
+    for section in (config.latent, config.sparsity, config.qprior, config.forward,
                     config.optimizer, config.validation, config.numerical,
                     config.gctest, parallel):
         for f in fields(section):

@@ -707,8 +707,11 @@ def lead_field_generation(root, subject_id, src_space, n_eigenmodes, n_orients, 
     # fwd_origin_data = fwd_origin['sol']
     if rank == None:
         rank_fwd_origin = np.linalg.matrix_rank(fwd_origin['sol']['data'])
+        print(type(rank_fwd_origin))
+    else:
+        rank_fwd_origin = rank
     print(type(rank_fwd_origin))
-    weights, G, label_vertidx, label_names, gain_info, whitener, singular_values = prepare_eigenmodes(info = info, forward = fwd_origin, noise_cov = noise_cov, labels = fwd_target['src'], rank = 155, n_eigenmodes=n_eigenmodes, n_orients = n_orients, loose=loose, depth=depth, pca=pca, mode='svd_flip')
+    weights, G, label_vertidx, label_names, gain_info, whitener, singular_values = prepare_eigenmodes(info = info, forward = fwd_origin, noise_cov = noise_cov, labels = fwd_target['src'], rank = rank_fwd_origin, n_eigenmodes=n_eigenmodes, n_orients = n_orients, loose=loose, depth=depth, pca=pca, mode='svd_flip')
     print(f'G shape: {G.shape}')
     return G, info, noise_cov, fwd_origin, weights, rank, singular_values
 

@@ -38,6 +38,8 @@ def batch_em_state(em_state, A_masks):
         P0 = jnp.broadcast_to(em_state.P0, (K, *em_state.P0.shape)),
         N0 = jnp.broadcast_to(em_state.N0, (K, *em_state.N0.shape)),
         A_mask=A_masks,
+        Q_prior_scales = None if em_state.Q_prior_scales is None \
+            else jnp.broadcast_to(em_state.Q_prior_scales, (K, *em_state.Q_prior_scales.shape))
     )
 
     batched_state = dataclasses.replace(
