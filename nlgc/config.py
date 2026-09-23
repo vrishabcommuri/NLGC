@@ -243,7 +243,7 @@ class ModelConfig:
                 sigma_gamma = kwargs.pop("sigma_gamma", 1),
                 sigma_min = kwargs.pop("sigma_min", .25),
                 sigma_max = kwargs.pop("sigma_max", 4.0),
-                eig_floor = kwargs.pip("eig_floor", 1e-10),
+                eig_floor = kwargs.pop("eig_floor", 1e-10),
             ),
 
             forward = ModelForwardConfig(
