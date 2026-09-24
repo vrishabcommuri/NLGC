@@ -15,15 +15,17 @@ def _default_n_workers():
     (Linux, Intel macs) int() raises and we fall back.
     """
     try:
-        return int(subprocess.run(['sysctl', '-n', 'hw.perflevel0.logicalcpu'],
-                                  capture_output=True, text=True).stdout)
+        num_cores = int(subprocess.run(['sysctl', '-n', 'hw.perflevel0.logicalcpu'],
+                                  capture_output=True, text=True).stdout) 
     except (OSError, ValueError):
-        num_cores = cpu_count()
+        num_cores = cpu_count()  
         print("could not identify P-core count, possibly because you are",
               "running on a linux machine or on an older mac that doesn't", 
-              "expose the number of Performance cores. ",
-              f"defaulting to {num_cores}")
-        return num_cores
+              "expose the number of Performance cores. ")
+
+    # restrict number to avoid overloading
+    num_cores = int(num_cores - 0.25*num_cores)
+    return num_cores
 
 
 def _as_lambda_tuple(value):
