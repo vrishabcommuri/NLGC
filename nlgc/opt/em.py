@@ -23,6 +23,7 @@ class EMState:
     P0: Union[Array, None] = None
     N0: Union[Array, None] = None
     Q_prior_scales: Union[Array, None] = None
+    q_val: float = None
     source_mass: Union[Array, None] = None #TODO: Not sure if needed
 
     # companion upper portion; this is marked as meta information

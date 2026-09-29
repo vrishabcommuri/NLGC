@@ -9,6 +9,7 @@ from nlgc.utils.initialize import initialize_em_state
 import time
 from nlgc.utils.param_vis import generate_report
 
+
 def nlgc_map(name, evoked, forward, noise_cov, src_target, patch_idx,
              config=None, save_dir = None, **kwargs):
     """Fit an NLGC map, teeing this run's console output to save_dir/run.log."""
@@ -187,14 +188,15 @@ def _nlgc_map(name, evoked, forward, noise_cov, src_target, patch_idx,
             config=config, evoked=evoked, forward=forward,
             noise_cov=noise_cov, weights=weights)
 
-        d_raw_, bias_r_, bias_f_, model_f, conv_flag_ = \
+        d_raw_, bias_r_, bias_f_, model_f, conv_flag_, cv_em_states = \
             gc_extraction(y.T, F_companion, R_companion, ROIs=patch_idx,
                           em_state=em_state, config=config)
         
         d_raw[this_segment] = d_raw_
         bias_r[this_segment] = bias_r_
         bias_f[this_segment] = bias_f_
-        models.append(model_f)
+        models.append(model_f)       # 0 index final model parameterization
+        models.append(cv_em_states)  # 1 index exposes cv parameterizations 
         conv_flag[this_segment] = conv_flag_
 
     # TODO !!!SHOULD NOT return nlgc object because a common workflow is to

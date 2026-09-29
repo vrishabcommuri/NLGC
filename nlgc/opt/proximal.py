@@ -20,6 +20,7 @@ def proximal_param_update(em_state, smoother_result, config, lambda_):
     A_prev = em_state.A[:m]
     Q_upper = em_state.Q[:m, :m]
     A_mask = em_state.A_mask[:m]
+    q_val = em_state.q_val
     
     dtype = jnp.result_type(A_prev)
     out_type = jax.ShapeDtypeStruct((m, m*p), dtype)
@@ -43,14 +44,14 @@ def proximal_param_update(em_state, smoother_result, config, lambda_):
                                    A = em_state.A.at[:m].set(A_shrunk))
     
     Q_new = solve_for_Q(em_state.A[:m], s1, s2, s3, n, n_orients, 
-                        nu0= config.qprior.nu0,           # set auto
-                        q_base= config.qprior.q_base,        # TODO optarg?
-                        singular_values=em_state.Q_prior_scales, 
-                        source_mass=None,   # set auto
-                        sigma_gamma= config.qprior.sigma_gamma, # TODO optarg?
-                        sigma_min= config.qprior.sigma_min, 
-                        sigma_max= config.qprior.sigma_max, 
-                        eig_floor= config.qprior.eig_floor)      
+                        nu0 = config.qprior.nu0,                 # set auto
+                        q_base = q_val,                          # set auto
+                        singular_values = em_state.Q_prior_scales, 
+                        source_mass = None,                      # set auto
+                        sigma_gamma = config.qprior.sigma_gamma, 
+                        sigma_min = config.qprior.sigma_min, 
+                        sigma_max = config.qprior.sigma_max, 
+                        eig_floor = config.qprior.eig_floor)      
 
     em_state = dataclasses.replace(em_state,
                                    Q = em_state.Q.at[:m, :m].set(Q_new))
@@ -82,6 +83,7 @@ def solve_for_a(Q, s1, s2, A, A_mask, lambda2, n_orients=3, max_iter=5000,
     # ------------------------------------------------------------
     d = jnp.sqrt(jnp.diag(s2))
     d_safe = jnp.maximum(d, 1e-12)
+
     s2_tilde = s2 / jnp.outer(d_safe, d_safe)
     s1_tilde = s1 / d_safe[None, :]
 
@@ -179,7 +181,7 @@ def solve_for_a(Q, s1, s2, A, A_mask, lambda2, n_orients=3, max_iter=5000,
         
         change = jnp.sqrt(num_diff / den_diff) if den_diff > 0 else 1.0
         
-        if verbose > 1 and i % 250 == 0:
+        if (verbose > 1) and (i % 250 == 0):
             print(f"iterate {i}/{max_iter}, change: {change:.6f}")
             
         if change < tol:

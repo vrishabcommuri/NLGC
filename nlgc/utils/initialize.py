@@ -10,6 +10,14 @@ def initialize_em_state(y, F, r, singular_values, config, evoked=None,
 
     em_state.log_likelihood = np.zeros(config.optimizer.max_iter + 1)
     em_state.Q_prior_scales = singular_values
+    
+    if config.latent.n_eigenmodes > 1:
+        assert config.latent.n_orients == 1, \
+            "mixed multiple eigenmodes and orientations not supported"
+    
+    if config.latent.n_orients == 1:
+        em_state.Q_prior_scales = singular_values.flatten()[:, np.newaxis]
+
 
     if config.optimizer.warm_start:
         em_state.smoothed_state = warm_start_sources(evoked, forward, noise_cov, 
@@ -37,7 +45,8 @@ def companion_init(y, F, r, config):
                   [np.eye(N = m*(p-1), M = m*p)]])
 
     Q = np.zeros_like(zero_companion)
-    Q[:m,:m] = data_driven_Q_init(y, F)
+    Q_upper, q_val = data_driven_Q_init(y, F, verbose=config.numerical.verbose)
+    Q[:m,:m] = Q_upper
 
     F = np.hstack([F, np.zeros((total_sensor_dim, m*(p-1)))])
     R = r * np.eye(total_sensor_dim)
@@ -49,28 +58,34 @@ def companion_init(y, F, r, config):
         P0 = np.zeros_like(zero_companion),
         N0 = np.zeros_like(zero_companion),
         N_sources_upper = total_latent_dim,
+        q_val = q_val,
     )
 
     return F, R, em_state
 
 
-def data_driven_Q_init(y, F, target_factor=1.2, q_floor=1e-8, q_ceiling=1e8,
-    svd_rtol=None, verbose=False):
+def data_driven_Q_init(y, F, target_factor=1.2, capture_fraction=0.20,
+    q_floor=1e-8, q_ceiling=1e8, svd_rtol=None, verbose=False):
     """
-    Return isotropic initial Q = q I using only F's observable sensor subspace.
+    Initialize isotropic Q = q I for whitened data where R = I.
+
+    The initialization combines: a scalar root heuristic, when a positive root
+    exists; and a gain-engagement lower bound that prevents a nearly zero prior
+         covariance from making the Kalman update inert.
 
     Parameters
     ----------
-    y : array, shape (n_sensors, n_times)
+    y : array, shape (n_obs, n_times)
         Whitened sensor data.
-    F : array, shape (n_sensors, n_states)
-        Whitened condensed leadfield.
+    F : array, shape (n_obs, n_state)
+        Whitened forward/gain matrix.
     target_factor : float
-        Target scale in the original root heuristic.
+        Retained from the original scalar root criterion.
+    capture_fraction : float
+        Desired observation-mode innovation capture at a robust leadfield
+        singular-value scale. Typical range: 0.10 to 0.30.
     q_floor, q_ceiling : float
-        Bounds for a strictly positive covariance scale.
-    svd_rtol : float | None
-        Relative singular-value cutoff. Default is numerical precision based.
+        Hard numerical/model bounds on q.
     """
     y = np.asarray(y, dtype=float)
     F = np.asarray(F, dtype=float)
@@ -82,16 +97,19 @@ def data_driven_Q_init(y, F, target_factor=1.2, q_floor=1e-8, q_ceiling=1e8,
 
     if y.shape[0] != n_obs:
         raise ValueError(
-            f"F is ({n_obs}, {n_state}) but y is {y.shape}; expected "
-            "y.shape[0] == F.shape[0]."
+            f"F is {F.shape} but y is {y.shape}; "
+            "expected y.shape[0] == F.shape[0]."
         )
 
     if not np.isfinite(y).all() or not np.isfinite(F).all():
         raise ValueError("y or F contains NaN/Inf.")
 
+    if not (0.0 < capture_fraction < 1.0):
+        raise ValueError("capture_fraction must lie strictly between 0 and 1.")
+
     U, s, _ = linalg.svd(F, full_matrices=False, check_finite=True)
 
-    if s.size == 0 or s[0] == 0:
+    if s.size == 0 or s[0] <= 0.0:
         raise ValueError("F has zero numerical rank.")
 
     if svd_rtol is None:
@@ -100,37 +118,46 @@ def data_driven_Q_init(y, F, target_factor=1.2, q_floor=1e-8, q_ceiling=1e8,
     keep = s > (svd_rtol * s[0])
 
     if not np.any(keep):
-        raise ValueError("No nonzero singular values retained for F.")
+        raise ValueError("No singular values retained for F.")
 
     U_obs = U[:, keep]
-    eigvals = s[keep] ** 2
-
-    # energy of y in the observation model's identifiable sensor subspace.
+    sigma2 = s[keep] ** 2
     projected = U_obs.T @ y
-    est_source_pow = np.sum(projected**2, axis=1)
+    projected_energy = np.sum(projected**2, axis=1)
 
+    # ------------------------------------------------------------
+    # gain-engagement lower bound
+    # ------------------------------------------------------------
+    sigma2_ref = np.mean(sigma2) # rms gain scale
+    
+    sigma2_ref = max(float(sigma2_ref), np.finfo(float).tiny)
+
+    q_gain = capture_fraction / ((1.0 - capture_fraction) * sigma2_ref)
+
+
+    # ------------------------------------------------------------
+    # root criterion
+    # ------------------------------------------------------------
     target = target_factor * n_obs * y.shape[1]
 
     def fun(q):
-        return np.sum(est_source_pow / (1.0 + q * eigvals)**2) - target
+        return (
+            np.sum(projected_energy / (1.0 + q * sigma2) ** 2)
+            - target
+        )
 
     f0 = fun(0.0)
+    q_root = None
+    root_status = "not_attempted"
 
-    # under the observable-subspace version, f(q) -> -target < 0.
-    if f0 <= 0:
-        q_val = q_floor
-        status = "root_not_needed_f0_nonpositive"
-    else:
+    if f0 > 0.0:
         lo = 0.0
-        hi = max(1.0, q_floor)
+        hi = max(1.0, q_gain, q_floor)
 
-        while fun(hi) > 0 and hi < q_ceiling:
+        while fun(hi) > 0.0 and hi < q_ceiling:
             hi *= 10.0
 
-        if fun(hi) > 0:
-            q_val = q_ceiling
-            status = "root_not_bracketed_used_ceiling"
-        else:
+        if fun(hi) <= 0.0:
             sol = optimize.root_scalar(
                 fun,
                 bracket=(lo, hi),
@@ -138,18 +165,42 @@ def data_driven_Q_init(y, F, target_factor=1.2, q_floor=1e-8, q_ceiling=1e8,
                 xtol=max(q_floor * 0.1, 1e-14),
                 rtol=1e-8,
             )
-            q_val = max(float(sol.root), q_floor)
-            status = "brentq" if sol.converged else "brentq_not_converged"
+
+            if sol.converged:
+                q_root = float(sol.root)
+                root_status = "brentq"
+            else:
+                root_status = "brentq_not_converged"
+        else:
+            root_status = "root_not_bracketed"
+    else:
+        root_status = "f0_nonpositive"
+
+    # never initialized below engagement scale
+    if q_root is None:
+        q_val = q_gain
+        status = f"gain_floor_{root_status}"
+    else:
+        q_val = q_root
+        status = root_status
+
+    q_val = float(np.clip(q_val, q_floor, q_ceiling))
 
     if verbose:
-        residual = y - U_obs @ (U_obs.T @ y)
+        observable_fraction = np.sum(projected**2) /\
+                              max(np.sum(y**2), np.finfo(float).tiny)
+    
+
+        h_ref = q_val * sigma2_ref / (1.0 + q_val * sigma2_ref)
+
         print(
-            f"F={F.shape}; effective_rank={keep.sum()}; "
+            f"F={F.shape}; rank={int(keep.sum())}; "
             f"sigma=[{s[keep].min():.3e}, {s[keep].max():.3e}]; "
-            f"observable_y_fraction="
-            f"{np.sum(projected**2) / np.sum(y**2):.4f}; "
-            f"f(0)={f0:.3e}; q={q_val:.3e}; status={status}; "
-            f"residual_norm_sq={np.sum(residual**2):.3e}"
+            f"sigma2_ref={sigma2_ref:.3e}; "
+            f"observable_y_fraction={observable_fraction:.4f}; "
+            f"f0={f0:.3e}; q_root={q_root}; "
+            f"q_gain={q_gain:.3e}; q={q_val:.3e}; "
+            f"h_ref={h_ref:.3f}; status={status}"
         )
 
-    return q_val * np.eye(n_state)
+    return q_val * np.eye(n_state), q_val

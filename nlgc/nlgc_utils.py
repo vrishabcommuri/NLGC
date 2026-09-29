@@ -109,7 +109,8 @@ class NLGC:
         """Plain-data state, versioned, for nlgc.io.save_model.
 
         Listed explicitly, not off __dict__, which would capture the cached
-        avg_debiased_dev. forward_orig goes to a .fif sidecar; _debug is dropped.
+        avg_debiased_dev. forward_orig goes to a .fif sidecar; _debug is
+        dropped.
         """
         return {
             'format_version': FORMAT_VERSION,
@@ -129,7 +130,8 @@ class NLGC:
                 'bias_r': self.bias_r,
                 'nonconv_flag': self._nonconv_flag,
             },
-            'models': [m.to_dict() for m in self._model_f],
+            'models': [m.to_dict() for m in self._model_f \
+                       if isinstance(m, NLGC)],
             'source_space': {
                 'labels': self._labels,
                 'label_vertidx': self._label_vertidx,
@@ -217,12 +219,12 @@ def gc_extraction(y, F, R, ROIs, em_state, config):
     if len(lambda_range) > 1:
         # pick best lambda from list
         model_f = NeuraLVARCV.from_config(config)
-        em_state, smoother_result = model_f.fit(y, F, R, 
+        em_state, smoother_result, cv_em_states = model_f.fit(y, F, R, 
                                                 copy.deepcopy(em_state))
     else:
         model_f = NeuraLVAR.from_config(config)
         lambda_ = lambda_range[0]
-        em_state, smoother_result = model_f.fit(y, F, R, lambda_, 
+        em_state, smoother_result, cv_em_states = model_f.fit(y, F, R, lambda_, 
                                                copy.deepcopy(em_state))
         
     lambda_ = model_f.lambda_
@@ -282,7 +284,7 @@ def gc_extraction(y, F, R, ROIs, em_state, config):
         end = time.time()
         pretty_print_elapsed(end-start)
 
-    return dev_raw, bias_r, bias_f, model_f, nonconv_flag
+    return dev_raw, bias_r, bias_f, model_f, nonconv_flag, cv_em_states
 
 
 

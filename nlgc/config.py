@@ -23,8 +23,6 @@ def _default_n_workers():
               "running on a linux machine or on an older mac that doesn't", 
               "expose the number of Performance cores. ")
 
-    # restrict number to avoid overloading
-    num_cores = int(num_cores - 0.25*num_cores)
     return num_cores
 
 
@@ -154,7 +152,7 @@ class ModelOptimizerConfig:
 class ModelValidationConfig:
     cv: int = 5
     use_es: bool = False
-    cv_type: str = "DisturbanceCV"
+    cv_type: str = "GCV"
 
 @dataclass(frozen=True)
 class ModelNumericalConfig:
@@ -268,7 +266,7 @@ class ModelConfig:
             
             validation = ModelValidationConfig(
                 cv = kwargs.pop("cv", 5),
-                cv_type = kwargs.pop("cv_type", "DisturbanceCV"),
+                cv_type = kwargs.pop("cv_type", "GCV"),
                 use_es = kwargs.pop("use_es", True),
             ),
             

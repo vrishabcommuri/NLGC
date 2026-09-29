@@ -20,6 +20,9 @@ from joblib import Parallel, delayed
 from multiprocessing import current_process
 from mne.utils import logger
 from threadpoolctl import threadpool_limits
+from joblib import dump, load
+import tempfile
+import os
 jax.config.update("jax_enable_x64", True)
                                          
 
@@ -175,7 +178,7 @@ def multiprocess_test_links(links_to_check, y, F, R, lambda_, em_state, config):
     # artificially diminishing the deviance difference. so do one run of the
     # full model as if it were reduced and then compare to reduced lls
     model_f = NeuraLVAR.from_config(config)
-    em_state_warm, smoother_result_warm = model_f.fit(y, F, R, lambda_, 
+    em_state_warm, smoother_result_warm, _ = model_f.fit(y, F, R, lambda_, 
                                                       em_state)
     fullmodel_log_likelihood = em_state_warm\
                                 .log_likelihood[em_state_warm.em_iter]
@@ -196,11 +199,14 @@ def multiprocess_test_links(links_to_check, y, F, R, lambda_, em_state, config):
     shared_ll_r, info_ll_r, shm_ll_r = create_shared_mem(dev_raw)
     shared_nonconv_flag, info_nonconv_flag, shm_nonconv_flag = \
         create_shared_mem(nonconv_flag)
+
+    tmp_dir = tempfile.mkdtemp()
+    em_state_path = os.path.join(tmp_dir, 'em_state.joblib')
+    dump(em_state, em_state_path)
     
     shared_args = (info_y, info_f, info_bias_r, info_ll_r, info_nonconv_flag) 
-    args = (R, lambda_, em_state, config)  
+    args = (R, lambda_, em_state_path, config)  
 
-   
     n_jobs = min(config.parallel.n_workers, len(links_to_check))
 
     timeout=99999
@@ -228,19 +234,20 @@ def multiprocess_test_links(links_to_check, y, F, R, lambda_, em_state, config):
     return dev_raw, bias_r, bias_f, nonconv_flag
 
 
-def _learn_reduced_model(targ, src, y, F, R, lambda_f, em_state, config):   
+def _learn_reduced_model(targ, src, y, F, R, lambda_f, em_state_path, config):   
     if config.numerical.verbose: 
         print(f"reduced model {current_process().name} "
               f"processing {src}->{targ}")
     
     model_r = NeuraLVAR.from_config(config)
 
+    em_state = load(em_state_path, mmap_mode='r')
     em_state = dataclasses.replace(
         em_state,
         A_mask = link_to_A_mask(targ, src, em_state, config)
     )
     
-    em_state, smoother_result = model_r.fit(y, F, R, lambda_f, em_state)
+    em_state, smoother_result, _ = model_r.fit(y, F, R, lambda_f, em_state)
 
     ll = em_state.log_likelihood[em_state.em_iter]
     if config.numerical.verbose:
@@ -255,7 +262,7 @@ def _learn_reduced_model(targ, src, y, F, R, lambda_f, em_state, config):
 
 def _learn_reduced_model_parallel(link_index, info_y, info_f, info_bias_r, 
                                   info_ll_r, info_nonconv_flag, R, lambda_f, 
-                                  em_state, config):
+                                  em_state_path, config):
     
     # prevent oversubscription
     with threadpool_limits(limits=1, user_api='blas'):
@@ -272,7 +279,7 @@ def _learn_reduced_model_parallel(link_index, info_y, info_f, info_bias_r,
 
         targ, src = link_index
         ll, bias, flag = _learn_reduced_model(targ, src, y, F, R, lambda_f, 
-                                              em_state, config)
+                                              em_state_path, config)
         ll_r[targ, src] = ll
         bias_r[targ, src] = bias
         nonconv_flag[targ, src] = flag
@@ -348,7 +355,7 @@ def multiprocess_test_links_ggc(links_to_check, y, F, R, lambda_, em_state,
     # warm-started model run, holdover from likelihood GC approach but preserved
     # here for consistency
     model_f = NeuraLVAR.from_config(config)
-    em_state_warm, smoother_result_warm = model_f.fit(y, F, R, lambda_, 
+    em_state_warm, smoother_result_warm, _ = model_f.fit(y, F, R, lambda_, 
                                                       em_state)
     
     em_state_warm = _copycast_em_state_numpy(em_state_warm)

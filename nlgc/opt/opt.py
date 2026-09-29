@@ -80,6 +80,30 @@ class NeuraLVAR:
         return np.sum(np.absolute(a))
 
     @staticmethod
+    def _triage_cv_paths(x_gcv, y_gcv):
+        """
+        Ensure that outlier cv folds don't throw off knee detection. Find the
+        outlier and then look for monotonic decrease after it.
+        """
+        x = np.asarray(x_gcv)
+        y = np.asarray(y_gcv)
+
+        peak = np.argmax(y)
+
+        keep = np.ones(len(y), dtype=bool)
+        keep[:peak] = False
+        
+        # After the peak, require monotonic decrease
+        running_min = y[peak]
+        for i in range(peak + 1, len(y)):
+            if y[i] > running_min:
+                keep[i] = False
+            else:
+                running_min = y[i]
+
+        return x[keep], y[keep]
+
+    @staticmethod
     def GCV(D, N, df):
         """
         Generalized CV metric
@@ -110,7 +134,7 @@ class NeuraLVAR:
         self.ll = -smoother_result.negative_log_likelihood
         self.lambda_ = lambda_
 
-        return em_state, smoother_result
+        return em_state, smoother_result, None
 
 
     def information_criterion(self, type='akike'):
@@ -344,6 +368,10 @@ class NeuraLVARCV(NeuraLVAR):
             
             # get GCV params
             A = fit_state.A[:fit_state.N_sources_upper]
+            
+            print(f"lambda = {curr_lambda}: A coeff sum = {A.sum()},"
+                  f" A num nonzero {(A != 0).sum()}")
+
             df = np.sum(np.abs(A) > 1e-12)  # nonzero support
             N = y.shape[0]                  # num samples
             D = -smoother_result.model_fit  # positive fit criterion
@@ -464,13 +492,20 @@ class NeuraLVARCV(NeuraLVAR):
             else:
                 raise Exception(f"cv type {self.config.validation.cv_type} "
                                  "not supported.")
+            
+            print(f"\nraw measurement disturbance smoother CVs: {x_gcv}, "
+                  f"{self.mse_path[2, 0, :]}\n")
+
+            print(f"\nraw GCVs: {x_gcv}, {self.mse_path[1, 0, :]}\n")
+            
+            x_gcv, y_gcv = self._triage_cv_paths(x_gcv, y_gcv)
+            
+            print(f"\ntriaged CV paths: {x_gcv=}, {y_gcv=}\n")
 
             # find knee in L-shaped curve
             best_lambda = KneeLocator(x_gcv, y_gcv, 
                                       direction='decreasing',
                                       curve='convex').knee
-            
-            print(f"\nmeasurement disturbance smoother CVs: {x_gcv}, {y_gcv}\n")
             
             print(f'\n\nbest_regularizing parameter: {best_lambda} using GCV\n')
 
@@ -501,7 +536,8 @@ class NeuraLVARCV(NeuraLVAR):
         self.aic = (2*df - 2*self.ll) / t
         self.bic = (np.log(t)*df - 2*self.ll) / t
 
-        return em_state, smoother_result
+        return em_state, smoother_result, \
+        {lam:lastsplit_em_states[lidx] for lidx, lam in enumerate(lambda_range)}
     
 
 def create_shared_mem(arr):

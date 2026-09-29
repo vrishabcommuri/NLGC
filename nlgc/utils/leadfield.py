@@ -122,7 +122,7 @@ def prepare_eigenmodes(info, forward, noise_cov, labels, rank, n_eigenmodes=2,
     depth_dict = {'exp': depth, 
                   'limit_depth_chs': 'whiten', 
                   'combine_xyz': 'fro', 
-                  'limit': None}
+                  'limit': 10.0}
         
     prepargs = {
         'pca': pca,
