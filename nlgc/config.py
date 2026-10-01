@@ -7,7 +7,7 @@ import subprocess
 _default_lambda_range = (5e-1, 2e-1, 1e-1, 5e-2, 2e-2, 1e-2, 5e-3, 2e-3, 1e-3, 5e-4)
 
 
-def _default_n_workers():
+def _default_n_workers(perc=1):
     """P-core count on Apple silicon, else total cpu count.
 
     Each worker carries its own JAX runtime, so the E-cores cost more in memory
@@ -23,7 +23,7 @@ def _default_n_workers():
               "running on a linux machine or on an older mac that doesn't", 
               "expose the number of Performance cores. ")
 
-    return num_cores
+    return int(num_cores * perc)
 
 
 def _as_lambda_tuple(value):
@@ -198,8 +198,12 @@ class ModelConfig:
 
         elif parallel_mode == "multiprocess":
             n_workers = kwargs.pop("n_workers", None)
-            if n_workers is None or n_workers <= 0:
+            if n_workers is None or n_workers == -1:
                 n_workers = _default_n_workers()
+            if n_workers == -2:
+                n_workers = _default_n_workers(0.75)
+            if n_workers == -3:
+                n_workers = _default_n_workers(0.5)
             parallel = ModelMultiprocessConfig(n_workers=n_workers)
 
         else:
