@@ -9,6 +9,7 @@ from nlgc.utils.restriction import link_to_A_mask
 from nlgc.opt.em import em_jax, _copycast_em_state_numpy
 from nlgc.bias_utils import compute_bias, compute_bias_vdG
 from nlgc.opt.kalman.steady_state import solve_ss_covariance_qz
+from nlgc.opt.kalman.filter import rts_smoother_jax
 # from nlgc.test.viz import (plot_transition_and_mask, 
 #                            plot_transition_and_mask_blurred)
 # import matplotlib.pyplot as plt
@@ -170,16 +171,7 @@ def multiprocess_test_links(links_to_check, y, F, R, lambda_, em_state, config):
     m = em_state.N_sources_upper
     nx = m // (eff_eigenmodes)
 
-    # do one warm-started full model to compare to warm-started reduced models
-    # the idea is that if EM takes full model k iterations and removing a param
-    # immediately puts us within the convergence envelope, it still takes two
-    # additional iterations to establish convergence. because EM is a
-    # hillclimbing algorithm, the reduced model ll will increase slightly,
-    # artificially diminishing the deviance difference. so do one run of the
-    # full model as if it were reduced and then compare to reduced lls
-    model_f = NeuraLVAR.from_config(config)
-    em_state_warm, smoother_result_warm, _ = model_f.fit(y, F, R, lambda_, 
-                                                      em_state)
+    em_state_warm, smoother_result_warm = rts_smoother_jax(y, F, R, em_state)
     fullmodel_log_likelihood = em_state_warm\
                                 .log_likelihood[em_state_warm.em_iter]
     

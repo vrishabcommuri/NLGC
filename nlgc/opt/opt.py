@@ -454,6 +454,7 @@ class NeuraLVARCV(NeuraLVAR):
         self.cv_lambdas = lambda_range
         cv_mat[:] = np.reshape(shared_cv_mat, cv_mat.shape)
         pred_mat[:] = np.reshape(shared_pred_mat, pred_mat.shape)
+        
         self.mse_path = cv_mat
         self.es_path = compute_es_criterion(pred_mat)
 
@@ -469,12 +470,34 @@ class NeuraLVARCV(NeuraLVAR):
         # we use the Generalized CV metric.
         if self.config.validation.use_es:
             # best log likelihood lambda
-            index = self.mse_path[0].mean(axis=0).argmin()
-            try:
-                best_lambda = lambda_range[np.nanargmin(self.es_path[:index])]
-            except ValueError as ex:
-                print(f"Estimation Stability error: {ex} fallback to ML lambda")
-                best_lambda = lambda_range[index]
+            if self.config.validation.cv_type == 'escvknee':
+                x_gcv = lambda_range
+                y_gcv = self.es_path
+
+                print(f"\nraw selected CV path: {x_gcv=}, {y_gcv=}\n")
+                            
+                # find knee in L-shaped curve
+                best_lambda = KneeLocator(x_gcv, y_gcv, 
+                                        direction='decreasing',
+                                        curve='convex').knee
+                
+                print(f'\n\nbest_regularizing parameter: {best_lambda} using CV\n')
+            else:
+                try:
+                    best_lambda = lambda_range[np.nanargmin(self.es_path)]
+                except ValueError as ex:
+                    index = self.mse_path[0].mean(axis=0).argmin()
+                    print("Estimation Stability error: "
+                          f"{ex} fallback to ML lambda")
+                    best_lambda = lambda_range[index]
+
+            if best_lambda == np.min(lambda_range) or \
+               best_lambda == np.max(lambda_range):
+                raise Exception(f"{best_lambda=} is at the boundary of "
+                                 "the lambda range. This indicates a "
+                                 "convergence issue and the model should be "
+                                 "inspected and reprocessed/reparameterized.")
+
             print(f'\n\nbest_regularizing parameter: {best_lambda} using es\n')
 
             em_state, smoother_result = self._fit(y, F, R, best_lambda, 
@@ -497,17 +520,26 @@ class NeuraLVARCV(NeuraLVAR):
                   f"{self.mse_path[2, 0, :]}\n")
 
             print(f"\nraw GCVs: {x_gcv}, {self.mse_path[1, 0, :]}\n")
+
+            print(f"\nraw selected CV path: {x_gcv=}, {y_gcv=}\n")
             
             x_gcv, y_gcv = self._triage_cv_paths(x_gcv, y_gcv)
             
-            print(f"\ntriaged CV paths: {x_gcv=}, {y_gcv=}\n")
+            print(f"\ntriaged CV path: {x_gcv=}, {y_gcv=}\n")
 
             # find knee in L-shaped curve
             best_lambda = KneeLocator(x_gcv, y_gcv, 
                                       direction='decreasing',
                                       curve='convex').knee
             
-            print(f'\n\nbest_regularizing parameter: {best_lambda} using GCV\n')
+            print(f'\n\nbest_regularizing parameter: {best_lambda} using CV\n')
+
+            if best_lambda == np.min(lambda_range) or \
+               best_lambda == np.max(lambda_range):
+                raise Exception(f"{best_lambda=} is at the boundary of "
+                                 "the lambda range. This indicates a "
+                                 "convergence issue and the model should be "
+                                 "inspected and reprocessed/reparameterized.")
 
             best_lambda_idx = np.where(x_gcv == best_lambda)[0][0]
 
@@ -555,16 +587,45 @@ def link_share_memory(info):
     return arr, shm
 
 
-def compute_es_criterion(pred):
-    cv_split_repeats = np.arange(pred.shape[0]) + 1
-    cv_split_repeats[:] = 1
-    shape = pred.shape[:-2] + (-1,)
-    pred.shape = shape
-    es = np.empty(pred.shape[1], pred.dtype)
-    for j in range(pred.shape[1]):
+def compute_es_criterion(pred_mat, cv_split_repeats=None):
+    """
+    Computes Estimation Stability (ES) across cross-validation folds.
+    
+    Parameters
+    ----------
+    pred_mat : np.ndarray
+        Array of shape (K_folds, N_lambdas, N_states)
+    cv_split_repeats : np.ndarray or None
+        Optional weights for each fold (e.g., sample counts per fold).
+    """
+    # flatten source x sample dims into one sample dim
+    shapes = pred_mat.shape
+    pred_mat = pred_mat.reshape(shapes[0], shapes[1], -1) 
+
+    pred = copy.deepcopy(pred_mat)
+    k_folds, n_lambdas, n_samples = pred.shape
+
+    if cv_split_repeats is None:
+        # weight for each fold (e.g., in case of unequal samples)
+        cv_split_repeats = np.ones(k_folds, dtype=pred.dtype)
+
+    # normalize weights so they average to 1
+    weights = cv_split_repeats / np.mean(cv_split_repeats)
+    weights_col = weights[:, np.newaxis]  # shape: (k_folds, 1)
+
+    es = np.empty(n_lambdas, dtype=pred.dtype)
+
+    for j in range(n_lambdas):
+        # shape: (k_folds, n_samples)
         this_pred = pred[:, j, :]
-        this_pred_mean = (this_pred * cv_split_repeats[:, None]).mean(axis=0)
-        fluctuation = (this_pred - this_pred_mean[None, :]) * \
-            np.sqrt(cv_split_repeats[:, None])
-        es[j] = (fluctuation ** 2).sum() / (this_pred_mean ** 2).sum()
-    return es 
+        
+        # weighted mean estimate across folds for lambda_j (n_samples,)
+        this_pred_mean = (this_pred * weights_col).mean(axis=0)
+        
+        # weighted difference from mean across folds: shape (k_folds, n_samples)
+        fluctuation = (this_pred - this_pred_mean[None, :]) * np.sqrt(weights_col)
+        
+        # total fluctuation variance over total state norm for lambda_j
+        es[j] = np.sum(fluctuation ** 2) / np.sum(this_pred_mean ** 2)
+
+    return es

@@ -6,7 +6,8 @@ from dataclasses import dataclass, field
 import jax
 import jax.numpy as jnp  
 from nlgc.opt.kalman.filter import (rts_smoother_blas, rts_smoother_jax)  
-from nlgc.opt.proximal import proximal_param_update  
+from nlgc.opt.proximal import proximal_param_update, relative_A_change_jax
+
 from functools import partial  
 jax.config.update("jax_enable_x64", True)
 
@@ -132,27 +133,46 @@ def em_jax(y, F, R, em_state, config, lambda_, N_iter):
 
             # E-step 
             em_new, smoother_result = rts_smoother_jax(y, F, R, em_state)
-        
-            # M-step
-            def ppu(i, val):
-                em_new, _, _ = val
 
-                em_out, rel_A_change, curr_objective = proximal_param_update(
+            # M-step
+            A_prev = em_new.A[:em_new.N_sources_upper]
+            Q_prev = em_new.Q[:em_new.N_sources_upper, :em_new.N_sources_upper]
+
+            def ppu(i, val):
+                em_new, _ = val
+
+                em_out, _, curr_objective = proximal_param_update(
                     em_new,
                     smoother_result,
                     config,
                     lambda_,
                 )
 
-                return em_out, rel_A_change, curr_objective
+                return em_out, curr_objective
             
             # M-step cyclic iters
-            em_new, rel_A_change, curr_objective = jax.lax.fori_loop(
+            em_new, curr_objective = jax.lax.fori_loop(
                 lower=0,
                 upper=config.optimizer.max_cyclic_iter, # num M-step cycles
                 body_fun=ppu,
-                init_val=(em_new, 0.0, 0.0)
+                init_val=(em_new, 0.0)
             )
+
+            # calculate relative change after restarts
+            A_curr = em_new.A[:em_new.N_sources_upper]
+            Q_curr = em_new.Q[:em_new.N_sources_upper, :em_new.N_sources_upper]
+
+            # damped update
+            # gamma = jnp.asarray(0.5, dtype=em_new.A.dtype)
+
+            # em_new.A = em_new.A\
+            #       .at[:em_new.N_sources_upper]\
+            #       .set((1.0 - gamma) * A_prev + gamma * A_curr)
+            # em_new.Q = em_new.Q\
+            #       .at[:em_new.N_sources_upper, :em_new.N_sources_upper]\
+            #       .set((1.0 - gamma) * Q_prev + gamma * Q_curr)
+
+            rel_A_change = relative_A_change_jax(A_curr, A_prev)
 
             # likelihood belonging to the smoother_result generated from the OLD
             # parameter state, not em_new.A.
