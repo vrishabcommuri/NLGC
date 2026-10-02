@@ -29,6 +29,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 import os
 import re
 import zipfile
+import dataclasses
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Union
@@ -292,6 +293,7 @@ def _report_frontmatter(report):
     """YAML header so a vault can filter and sort runs; None fields skipped."""
     p = report.param_dict
     data_gen = p.get('data_gen') or {}
+    qprior = p.get('qprior') or {}
     fields_ = [
         ('run', os.path.basename(os.path.normpath(report.directory))),
         ('created', datetime.now().strftime('%Y-%m-%d')),
@@ -304,6 +306,8 @@ def _report_frontmatter(report):
         ('src_space', p.get('src_space')),
         ('seed', data_gen.get('seed')),
         ('band', data_gen.get('band')),
+        ('q_mode', qprior.get('q_mode')),
+        ('lkj_eta', qprior.get('lkj_eta')),
     ]
     lines = ['---', 'tags: [nlgc, model-comparison]']
     for key, value in fields_:
@@ -1210,41 +1214,36 @@ use_es: bool
 verbose: bool
         Default: False, Run GC extraction with verbose mode or not
 '''
-def nlgc_map_opt(M, G, r, order, self_history=None, var_thr=1.0, n_segments=1, lambda_range=None, max_iter=500,
-                 max_cyclic_iter=3, tol=1e-5, sparsity_factor=0.0, cv=5, n_eigenmodes = 2, n_orients = 1, xs_init = None, a_init = None, use_es = False, patch_idx = None, verbose = False,
-                 parallel_mode = 'serial', n_devices = 1, n_workers = 1, n_warmup_iter = 25, rank = None, singular_values = None,
-                 use_wald_screen = True, wald_screen_alpha = 0.05,
-                 use_empirical_null = True):
+def nlgc_map_opt(M, G, r, config=None, xs_init=None, a_init=None,
+                 singular_values=None, **kwargs):
+    # like nlgc_map: model settings arrive as a ModelConfig, or as legacy kwargs
+    # that are turned into one
+    if config is None:
+        config = ModelConfig.from_legacy_kwargs(kwargs)
+
+    order = config.latent.order
+    n_eigenmodes = config.latent.n_eigenmodes
+    n_orients = config.latent.n_orients
+    n_segments = config.latent.n_segments
+    patch_idx = config.forward.patch_idx
+    verbose = config.numerical.verbose
+
     n_sensors, nnx = G.shape
     len_patch_idx = nnx // (n_eigenmodes * n_orients)
     _, t = M.shape
     tt = t // n_segments
 
-    # The refactored core takes a ModelConfig plus a companion-form EMState rather
-    # than the old kwarg list; build them here so run_GT_sim's interface is unchanged.
-    config = ModelConfig.from_legacy_kwargs(dict(
-        order=order, self_history=self_history, n_eigenmodes=n_eigenmodes,
-        n_orients=n_orients, n_segments=n_segments, var_thr=var_thr,
-        sparsity_factor=sparsity_factor, lambda_range=lambda_range,
-        max_iter=max_iter, max_cyclic_iter=max_cyclic_iter, tol=tol,
-        cv=cv, use_es=use_es, parallel_mode=parallel_mode,
-        n_devices=n_devices, n_workers=n_workers,
-        n_warmup_iter=n_warmup_iter,
-        use_wald_screen=use_wald_screen,
-        wald_screen_alpha=wald_screen_alpha,
-        use_empirical_null=use_empirical_null,
-        patch_idx=tuple(patch_idx) if patch_idx is not None else (),
-        verbose=verbose,
-        rank = rank, singular_values = singular_values))
+    if singular_values is None:
+        # no leadfield compression to take a profile from: a flat profile makes
+        # sigma_norm 1, i.e. the isotropic prior q_base * I
+        singular_values = np.ones(nnx)
 
     d_raw = np.zeros((n_segments, len_patch_idx, len_patch_idx))
     bias_r = np.zeros((n_segments, len_patch_idx, len_patch_idx))
     bias_f = np.zeros((n_segments, 1))
     conv_flag = np.zeros((n_segments, len_patch_idx, len_patch_idx))
     models = []
-    ROI_list = list(range(len_patch_idx))
-    if patch_idx is not None:
-        ROI_list = patch_idx
+    ROI_list = list(patch_idx) if patch_idx else list(range(len_patch_idx))
 
     for seg in range(0, n_segments):
         if verbose:
@@ -1280,13 +1279,14 @@ def nlgc_map_opt(M, G, r, order, self_history=None, var_thr=1.0, n_segments=1, l
         # gc_extraction wants TIME-major y: it feeds the kalman layer, which
         # asserts y.shape[1] == F.shape[0] (see nlgc/test/test_gc.py, which
         # passes ssm.y built as x @ F.T). Opposite of initialize_em_state above.
-        d_raw_, bias_r_, bias_f_, model_f, conv_flag_ = \
+        d_raw_, bias_r_, bias_f_, model_f, conv_flag_, cv_em_states = \
             gc_extraction(y_seg.T, F_companion, R_companion,
                           ROIs=ROI_list, em_state=em_state, config=config)
         d_raw[seg] = d_raw_
         bias_r[seg] = bias_r_
         bias_f[seg] = bias_f_
         models.append(model_f)
+        models.append(cv_em_states)
         conv_flag[seg] = conv_flag_
 
     nlgc_obj = NLGC('Simulation_rnd', len_patch_idx, n_sensors, t, order,
@@ -1373,29 +1373,46 @@ def run_GT_sim(*args, save_dir=None, **kwargs):
         return _run_GT_sim(*args, save_dir=save_dir, **kwargs)
 
 
+# defaults that differ from ModelConfig's own, kept so existing calls behave the same
+_SIM_DEFAULTS = dict(order = 2, n_eigenmodes = 1, tol = 1e-5, use_es = False,
+                     use_empirical_null = True)
+
+
 def _run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0, band = "wide", fs = 50, natures = 'all', target_spec_rad = .45,
-        root = None, subject_id = None, session_name = None, trans = None, order = 2, t = 500, n_eigenmodes = 1, n_orients = 1,
-        n_segments = 1, loose = 0.0, depth = 0.0, pca = True, rank = None, lambda_range = None,
-        max_iter = 500, max_cyclic_iter = 3, tol = 1e-5, sparsity_factor = 0.0, cv = 5 ,var_thr = 1.0, alpha = .1, 
-        m_active = 10, n_links = 10, warm_start = False, self_history = None, passed_evoked = None, use_es = False, 
-        verbose = False, diff_lf = False, patch_idx = None, a_init = None, save_dir = None, run_ggc = False, ggc_kwargs = None,
-        parallel_mode = 'serial', n_devices = 1, n_workers = 1, n_warmup_iter = 25,
-        use_wald_screen = True, wald_screen_alpha = 0.05,
-        use_empirical_null = True,
+        root = None, subject_id = None, session_name = None, trans = None, t = 500,
+        alpha = .1, m_active = 10, n_links = 10, passed_evoked = None, diff_lf = False,
+        a_init = None, save_dir = None, run_ggc = False, ggc_kwargs = None,
         vol_pos_origin = 10.0, vol_pos_target = 30.0, debug_report = False,
-        obsidian_report = False,
-        n_sensors = None, n_sources = None):
+        obsidian_report = False, n_sensors = None, n_sources = None,
+        config = None, **kwargs):
+
+    # everything that is not simulation setup is model configuration and goes
+    # through ModelConfig, as in nlgc_map. alpha stays named: here it is the
+    # FDR level for get_J_statistics, not the config's retired sparsity.alpha
+    if config is None:
+        if kwargs.get('patch_idx') is None:
+            kwargs.pop('patch_idx', None)
+        config = ModelConfig.from_legacy_kwargs({**_SIM_DEFAULTS, **kwargs})
+
+    # the generators and leadfield code below still read these as locals
+    order = config.latent.order
+    n_eigenmodes = config.latent.n_eigenmodes
+    n_orients = config.latent.n_orients
+    n_segments = config.latent.n_segments
+    loose, depth = config.forward.loose, config.forward.depth
+    pca, rank = config.forward.pca, config.forward.rank
+    lambda_range = config.sparsity.lambda_range
+    verbose = config.numerical.verbose
+    warm_start = config.optimizer.warm_start
 
     if src_space not in ['surf', 'vol', 'mixed']:
         raise Exception(f'src_space {src_space} not implemented')
 
-    if lambda_range is not None:
-        _lams = ((lambda_range,) if isinstance(lambda_range, (int, float))
-                 else lambda_range)
-        if any(l <= 0 for l in _lams):
-            raise ValueError(
-                f'only positive lambdas are allowed, got {lambda_range}')
+    if any(l <= 0 for l in lambda_range):
+        raise ValueError(
+            f'only positive lambdas are allowed, got {lambda_range}')
 
+    singular_values = None   # only the real leadfield paths produce a profile
     if (passed_evoked != None):
         print('using passed in evoked')
         noise_cov = mne.read_cov(passed_evoked['noise_cov'])
@@ -1486,13 +1503,8 @@ def _run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0,
         print(f'Creating diff lf; shape of second lead field: {f.shape}')
     start_time = time.time()
     if run_ggc == False or (run_ggc and ggc_kwargs != None and ggc_kwargs['model_params'] == None):
-        temp_obj = nlgc_map_opt(y.T, f, r=r_cov, order=p, self_history=p, lambda_range=lambda_range, n_segments=n_segments,
-                                    var_thr=var_thr, max_iter=max_iter, max_cyclic_iter=max_cyclic_iter, tol=tol,
-                                    sparsity_factor=sparsity_factor, n_eigenmodes = n_eigenmodes, n_orients = n_orients, xs_init = stc_init, a_init = a_init, use_es = use_es, patch_idx = patch_idx, verbose = verbose,
-                                    parallel_mode = parallel_mode, n_devices = n_devices, n_workers = n_workers,
-                                    n_warmup_iter = n_warmup_iter, use_wald_screen = use_wald_screen,
-                                    wald_screen_alpha = wald_screen_alpha, rank = rank, singular_values = singular_values,
-                                    use_empirical_null = use_empirical_null)
+        temp_obj = nlgc_map_opt(y.T, f, r=r_cov, config=config, xs_init = stc_init, a_init = a_init,
+                                singular_values = singular_values)
     else:
         temp_obj = ggc_kwargs['model']
     end_time = time.time()
@@ -1572,45 +1584,18 @@ def _run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0,
             'n_segments': n_segments,
             'src_space': src_space,
             't': t,
-            'use_es': use_es,
             'data_gen': data_gen_dict,
-            'warm_start': warm_start,
-            'self_history': self_history,
+            'passed_evoked': passed_evoked,
             'lead_field_gen': lead_gen_dict,
             'diff_lf': diff_lf,
-            'passed_evoked': passed_evoked,
-            'forward': {
-                'loose': loose,
-                'depth': depth,
-                'pca': pca,
-                'rank': rank,
-            },
-            'optimizer': {
-                'max_iter': max_iter,
-                'max_cyclic_iter': max_cyclic_iter,
-                'tol': tol,
-                'cv': cv,
-                'n_warmup_iter': n_warmup_iter,
-            },
-            'screening': {
-                'sparsity_factor': sparsity_factor,
-                'var_thr': var_thr,
-                'alpha': alpha,
-                'use_wald_screen': use_wald_screen,
-                'wald_screen_alpha': wald_screen_alpha,
-                'use_empirical_null': use_empirical_null,
-                'patch_idx': patch_idx,
-            },
-            'parallel': {
-                'parallel_mode': parallel_mode,
-                'n_devices': n_devices,
-                'n_workers': n_workers,
-            },
-            'ggc_params':ggc_dict,
-            'verbose': verbose,
+            # the FDR level for get_J_statistics, not the config's sparsity.alpha
+            'screening': {'alpha': alpha},
+            'ggc_params': ggc_dict,
             'debug_report': debug_report,
             'obsidian_report': obsidian_report,
             'nlgc_map_time': total_time,
+            # every model setting, one table per config section
+            **dataclasses.asdict(config),
         }
         if run_ggc:
             ggc_model_extras = {

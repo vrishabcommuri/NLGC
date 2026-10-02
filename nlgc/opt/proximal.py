@@ -48,7 +48,7 @@ def proximal_param_update(em_state, smoother_result, config, lambda_):
     q_base = q_val if qp.q_base is None else qp.q_base
 
     Q_new = solve_for_Q(em_state.A[:m], s1, s2, s3, n, n_orients,
-                        mode=qp.mode, nu0=qp.nu0, q_base=q_base,
+                        mode=qp.q_mode, nu0=qp.nu0, q_base=q_base,
                         lkj_eta=qp.lkj_eta,
                         singular_values=em_state.Q_prior_scales,
                         source_mass=em_state.source_mass,

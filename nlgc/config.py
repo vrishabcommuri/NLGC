@@ -123,7 +123,7 @@ class ModelSparsityConfig:
 class ModelQPriorConfig:
     """Prior on the block-diagonal innovation covariance Q.
 
-    mode: 'mle' -> Q = Qhat, no prior (control)
+    q_mode: 'mle' -> Q = Qhat, no prior (control)
           'iw'  -> inverse-Wishart posterior mode, closed form
           'lkj' -> LKJ(lkj_eta) on each block's correlations, damped newton
 
@@ -131,7 +131,7 @@ class ModelQPriorConfig:
     be of order n/2 to matter. nu0 is a pseudo-sample size: the IW weight is
     (nu0 + d + 1)/(nu0 + n + d + 1).
     """
-    mode: str = 'iw'
+    q_mode: str = 'iw'
     # prior scale of Q, also the reference for the SPD floor. None -> the
     # data-driven em_state.q_val
     q_base: Union[float, None] = None
@@ -145,15 +145,15 @@ class ModelQPriorConfig:
     eig_floor: float = 1e-10
 
     def __post_init__(self):
-        if self.mode not in ('mle', 'iw', 'lkj'):
+        if self.q_mode not in ('mle', 'iw', 'lkj'):
             raise ValueError(
-                f"mode must be 'mle', 'iw' or 'lkj', got {self.mode!r}")
-        if (self.mode == 'lkj') != (self.lkj_eta != 1.0):
+                f"q_mode must be 'mle', 'iw' or 'lkj', got {self.q_mode!r}")
+        if (self.q_mode == 'lkj') != (self.lkj_eta != 1.0):
             raise ValueError(
                 "lkj_eta != 1.0 is required for, and only valid with, "
-                "mode='lkj'")
-        if self.mode != 'iw' and self.nu0 is not None:
-            raise ValueError("nu0 only applies to mode='iw'")
+                "q_mode='lkj'")
+        if self.q_mode != 'iw' and self.nu0 is not None:
+            raise ValueError("nu0 only applies to q_mode='iw'")
 
 @dataclass(frozen=True)
 class ModelForwardConfig:
@@ -264,7 +264,7 @@ class ModelConfig:
             ),
 
             qprior = ModelQPriorConfig(
-                mode = kwargs.pop("mode", "iw"),
+                q_mode = kwargs.pop("q_mode", "iw"),
                 q_base = kwargs.pop("q_base", None),
                 nu0 = kwargs.pop("nu0", None),
                 sigma_gamma = kwargs.pop("sigma_gamma", 1.0),
