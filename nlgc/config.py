@@ -121,15 +121,39 @@ class ModelSparsityConfig:
 
 @dataclass(frozen=True)
 class ModelQPriorConfig:
-    lkj_mode: bool = False
-    eta: float = 1
-    nu0: Union[int, None] = None
-    q_base: float = 1e-4
-    # source_mass: Union[, None] = None
-    sigma_gamma: float = 1
+    """Prior on the block-diagonal innovation covariance Q.
+
+    mode: 'mle' -> Q = Qhat, no prior (control)
+          'iw'  -> inverse-Wishart posterior mode, closed form
+          'lkj' -> LKJ(lkj_eta) on each block's correlations, damped newton
+
+    The LKJ strength in the objective is c = 2*(lkj_eta - 1)/n, so lkj_eta must
+    be of order n/2 to matter. nu0 is a pseudo-sample size: the IW weight is
+    (nu0 + d + 1)/(nu0 + n + d + 1).
+    """
+    mode: str = 'iw'
+    # prior scale of Q, also the reference for the SPD floor. None -> the
+    # data-driven em_state.q_val
+    q_base: Union[float, None] = None
+    # iw only. None -> block_size + 2
+    nu0: Union[float, None] = None
+    sigma_gamma: float = 1.0
     sigma_min: float = .25
     sigma_max: float = 4.0
+    # lkj only
+    lkj_eta: float = 1.0
     eig_floor: float = 1e-10
+
+    def __post_init__(self):
+        if self.mode not in ('mle', 'iw', 'lkj'):
+            raise ValueError(
+                f"mode must be 'mle', 'iw' or 'lkj', got {self.mode!r}")
+        if (self.mode == 'lkj') != (self.lkj_eta != 1.0):
+            raise ValueError(
+                "lkj_eta != 1.0 is required for, and only valid with, "
+                "mode='lkj'")
+        if self.mode != 'iw' and self.nu0 is not None:
+            raise ValueError("nu0 only applies to mode='iw'")
 
 @dataclass(frozen=True)
 class ModelForwardConfig:
@@ -240,13 +264,13 @@ class ModelConfig:
             ),
 
             qprior = ModelQPriorConfig(
-                lkj_mode = kwargs.pop("lkj_mode", False),
-                eta = kwargs.pop("eta", 1.0),
+                mode = kwargs.pop("mode", "iw"),
+                q_base = kwargs.pop("q_base", None),
                 nu0 = kwargs.pop("nu0", None),
-                q_base = kwargs.pop("q_base", 1e-4),
-                sigma_gamma = kwargs.pop("sigma_gamma", 1),
+                sigma_gamma = kwargs.pop("sigma_gamma", 1.0),
                 sigma_min = kwargs.pop("sigma_min", .25),
                 sigma_max = kwargs.pop("sigma_max", 4.0),
+                lkj_eta = kwargs.pop("lkj_eta", 1.0),
                 eig_floor = kwargs.pop("eig_floor", 1e-10),
             ),
 

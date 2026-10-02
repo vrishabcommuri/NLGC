@@ -10,6 +10,11 @@ def initialize_em_state(y, F, r, singular_values, config, evoked=None,
 
     em_state.log_likelihood = np.zeros(config.optimizer.max_iter + 1)
     em_state.Q_prior_scales = singular_values
+
+    # one singular value per column of G, in any 2-D shape
+    assert em_state.Q_prior_scales is not None and \
+        em_state.Q_prior_scales.size == em_state.N_sources_upper
+
     
     if config.latent.n_eigenmodes > 1:
         assert config.latent.n_orients == 1, \

@@ -44,22 +44,25 @@ def proximal_param_update(em_state, smoother_result, config, lambda_):
     em_state = dataclasses.replace(em_state,
                                    A = em_state.A.at[:m].set(A_shrunk))
     
-    Q_new = solve_for_Q(em_state.A[:m], s1, s2, s3, n, n_orients, 
-                        nu0 = config.qprior.nu0,                 # set auto
-                        q_base = q_val,                          # set auto
-                        singular_values = em_state.Q_prior_scales, 
-                        source_mass = None,                      # set auto
-                        sigma_gamma = config.qprior.sigma_gamma, 
-                        sigma_min = config.qprior.sigma_min, 
-                        sigma_max = config.qprior.sigma_max, 
-                        eig_floor = config.qprior.eig_floor)      
+    qp = config.qprior
+    q_base = q_val if qp.q_base is None else qp.q_base
+
+    Q_new = solve_for_Q(em_state.A[:m], s1, s2, s3, n, n_orients,
+                        mode=qp.mode, nu0=qp.nu0, q_base=q_base,
+                        lkj_eta=qp.lkj_eta,
+                        singular_values=em_state.Q_prior_scales,
+                        source_mass=em_state.source_mass,
+                        sigma_gamma=qp.sigma_gamma, sigma_min=qp.sigma_min,
+                        sigma_max=qp.sigma_max, eig_floor=qp.eig_floor)
+    
 
     em_state = dataclasses.replace(em_state,
                                    Q = em_state.Q.at[:m, :m].set(Q_new))
     
 
-    obj, _, _, _ = penalized_q_objective(A_shrunk, Q_new, s1, s2, s3, lambda_, 
-                                         n_orients, lagsparsity)
+    obj, _, _, _ = penalized_q_objective(A_shrunk, Q_new, s1, s2, s3, lambda_,
+                                             n_orients, lagsparsity,
+                                             lkj_eta=qp.lkj_eta, n=n)
     
     rel_A_change = relative_A_change_jax(A_shrunk, A_prev)
 
@@ -222,13 +225,29 @@ def make_block_spd_and_diagonal_shrink(
     )
 
 
-def solve_for_Q(A, s1, s2, s3, n_transitions, block_size, nu0=None, q_base=1e-4,
-    singular_values=None, source_mass=None, sigma_gamma=0.0, sigma_min=0.25,
-    sigma_max=4.0, eig_floor=1e-10):
+def solve_for_Q(A, s1, s2, s3, n_transitions, block_size, mode='iw', nu0=None,
+    q_base=1e-4, lkj_eta=1.0, singular_values=None, source_mass=None,
+    sigma_gamma=0.0, sigma_min=0.25, sigma_max=4.0, eig_floor=1e-10):
     """
-    Inverse-Wishart MAP update for a block-diagonal innovation covariance Q.
+    MAP update for a block-diagonal innovation covariance Q. The mode selects
+    the prior: 'mle' (none), 'iw' (inverse-Wishart) or 'lkj' (LKJ on the
+    within-block correlations).
 
     Qhat := scatter matrix Q update (from smoother statistics)
+
+    Every mode minimizes the same per-block objective
+
+        a_s * sum(log var) + a_c * logdet C + tr(Q^-1 S),    a_c = a_s - c
+
+    and differs only in how (a_s, S, c) are set, with k = nu0 + block_size + 1:
+
+        mode   a_s                S                c
+        mle    1                  Qhat             0
+        iw     1 + k/n            Qhat + k*Q0/n    0
+        lkj    1                  Qhat             2(lkj_eta - 1)/n
+
+    mle and iw have the closed form Q = S / a_s. For iw this is exactly the
+    inverse-Wishart posterior mode
 
                  [(nu0 + block_size + 1) * Q0_r] + [n_transitions * Qhat]
     Q_wish_map = --------------------------------------------------------
@@ -238,6 +257,9 @@ def solve_for_Q(A, s1, s2, s3, n_transitions, block_size, nu0=None, q_base=1e-4,
     
     the sigma exponent scales the weighting of sigma, which are the normalized
     singular values from the leadfield compression
+
+    lkj has no closed form (the LKJ term is not conjugate) so it is solved per
+    block by damped newton in _solve_q_block.
 
     Parameters
     ----------
@@ -252,15 +274,25 @@ def solve_for_Q(A, s1, s2, s3, n_transitions, block_size, nu0=None, q_base=1e-4,
     block_size : int
         Number of retained modes per catchment, e.g. 3.
 
+    mode : {'mle', 'iw', 'lkj'}
+        Which prior to apply, see the table above.
+
     nu0 : float or None
-        Inverse-Wishart prior degrees of freedom. Must exceed block_size - 1. If
-        None, uses block_size + 2, a weak proper prior.
+        iw only. Inverse-Wishart prior degrees of freedom. Must exceed
+        block_size - 1. If None, uses block_size + 2, a weak proper prior.
 
     q_base : float
         Global prior mode of Q when singular_values is None or sigma_gamma=0.
+        Also the reference scale of the SPD floor in every mode.
+
+    lkj_eta : float
+        lkj only. p(C) ~ det(C)^(lkj_eta - 1). The strength is
+        c = 2(lkj_eta - 1)/n_transitions, so lkj_eta must be of order
+        n_transitions/2 to matter.
 
     singular_values : array or None
-        Shape (n_blocks, block_size), one retained singular-value vector per
+        One entry per column of G, in any 2-D shape; reshaped to
+        (n_blocks, block_size), one retained singular-value vector per
         catchment. These should be from the local SVD before they would have
         been placed in the leadfield.
 
@@ -281,118 +313,122 @@ def solve_for_Q(A, s1, s2, s3, n_transitions, block_size, nu0=None, q_base=1e-4,
     q_hat = s3 - A @ s1.T - s1 @ A.T + A @ s2 @ A.T
     q_hat = 0.5 * (q_hat + q_hat.T)
 
-    m = q_hat.shape[0]
-    if m % block_size != 0:
+    m, d, n = q_hat.shape[0], block_size, n_transitions
+    if m % d != 0:
         raise ValueError(
-            f"State dimension {m} is not divisible by block_size={block_size}"
+            f"State dimension {m} is not divisible by block_size={d}"
         )
+    n_blocks = m // d
 
-    n_blocks = m // block_size
-    if nu0 is None:
-        nu0 = float(block_size + 2)
+    # block_diagonal pulls out the diagonal blocks of Qhat; symmetrize for safety
+    S = block_diagonal(q_hat, d)
+    S = 0.5 * (S + jnp.swapaxes(S, -1, -2))
+    a_s, c = 1.0, 0.0    # mle: S = Qhat, no prior
 
-    if nu0 <= block_size - 1:
-        raise ValueError(
-            "nu0 must be greater than block_size - 1 for a proper "
-            "inverse-Wishart prior."
-        )
-
-    idx = jnp.arange(n_blocks)
-
-    q4 = q_hat.reshape(
-        n_blocks, block_size, n_blocks, block_size
-    )
-    q_blocks = q4[idx, :, idx, :]
-    q_blocks = 0.5 * (
-        q_blocks + jnp.swapaxes(q_blocks, -1, -2)
-    )
-
-    # define the prior mode Q0_r = q_base * I
-    if singular_values is None or sigma_gamma == 0.0:
-        # in this case we don't normalize using leadfield metrics
-        q0_blocks = q_base * jnp.broadcast_to(
-            jnp.eye(block_size, dtype=q_hat.dtype),
-            (n_blocks, block_size, block_size),
-        )
-    else:
-        # normalize using leadfield metrics (e.g., catchment/voronoi region
-        # singular values)
-        sigma = jnp.asarray(singular_values, dtype=q_hat.dtype)
-
-        if sigma.shape != (n_blocks, block_size):
+    if mode == 'iw':
+        nu0 = float(d + 2) if nu0 is None else nu0
+        if nu0 <= d - 1:
             raise ValueError(
-                "singular_values must have shape "
-                f"({n_blocks}, {block_size}), got {sigma.shape}"
+                "nu0 must be greater than block_size - 1 for a proper "
+                "inverse-Wishart prior."
             )
 
-        # remove first-order catchment-size/source-mass dependence. this is
-        # necessary because different catchment (voronoi) regions have different
-        # numbers of fine source vectors and represent differently-sized
-        # volumes. the condensed leadfield singular values scale with N, the
-        # number of fine vectors in the catchment, so we may optionally
-        # normalize them 
-        if source_mass is not None:
-            source_mass = jnp.asarray(
-                source_mass,
-                dtype=q_hat.dtype,
-            )
+        # define the prior mode Q0_r (q_base * I, or scaled by the leadfield
+        # singular values)
+        q0_blocks = _iw_prior_mode(q_hat, n_blocks, d, q_base, sigma_gamma,
+                                   singular_values, source_mass, sigma_min,
+                                   sigma_max)
 
-            if source_mass.shape != (n_blocks,):
-                raise ValueError(
-                    "source_mass must have shape "
-                    f"({n_blocks},), got {source_mass.shape}"
-                )
+        # if Q ~ IW(Psi0, nu0), select Psi0 so mode(Q) = Q0:
+        # mode(IW(Psi0, nu0)) = Psi0 / (nu0 + block_size + 1), so Psi0 = k * Q0.
+        k = nu0 + d + 1.0
 
-            sigma = sigma / jnp.sqrt(
-                jnp.maximum(source_mass[:, None], 1e-12)
-            )
+        # posterior: IW(Psi0 + n Qhat, nu0 + n). its mode is
+        # (Psi0 + n Qhat) / (nu0 + n + block_size + 1), which written as
+        # S / a_s (divide top and bottom by n) is:
+        #   a_s = 1 + k/n,   S = Qhat + Psi0/n = Qhat + k * Q0 / n
+        a_s = 1.0 + k / n
+        S = S + k * q0_blocks / n
 
-        # define a centering value and rescale all singular values to be wrt the
-        # reference
-        positive_sigma = jnp.where(sigma > 0.0, sigma, jnp.nan)
-        sigma_ref = jnp.nanmedian(positive_sigma)
+    elif mode == 'lkj':
+        # LKJ strength in the objective's per-sample units, c = 2(eta - 1)/n
+        c = 2.0 * (lkj_eta - 1.0) / n
 
-        sigma_norm = sigma / jnp.maximum(sigma_ref, 1e-12)
-        sigma_norm = jnp.clip(sigma_norm, sigma_min, sigma_max)
+    elif mode != 'mle':
+        raise ValueError(f"mode must be 'mle', 'iw' or 'lkj', got {mode!r}")
 
-        # q0_j = q_base * sigma_norm_j^(2 * gamma)
-        # gamma=0 returns isotropic blocks.
-        prior_var = q_base * sigma_norm ** (2.0 * sigma_gamma)
-        q0_blocks = jax.vmap(jnp.diag)(prior_var)
-
-    # if Q ~ IW(Psi0, nu0), select Psi0 so mode(Q) = Q0:
-    # mode(IW(Psi0, nu0)) = Psi0 / (nu0 + block_size + 1).
-    psi0_blocks = (nu0 + block_size + 1.0) * q0_blocks
-
-    # posterior: IW(Psi0 + n Qhat, nu0 + n).
-    # its mode is:
-    # (Psi0 + n Qhat) / (nu0 + n + block_size + 1).
-    q_blocks = (psi0_blocks + n_transitions * q_blocks) /\
-               (nu0 + n_transitions + block_size + 1.0)
-
-    # symmetrize for safety
-    q_blocks = 0.5 * (q_blocks + jnp.swapaxes(q_blocks, -1, -2))
+    # c == 0 (mle, iw) has the closed form S / a_s. only lkj needs newton;
+    # a 1x1 block has no correlations to shrink
+    if mode == 'lkj' and d > 1:
+        q_blocks = jax.vmap(_solve_q_block, in_axes=(0, None, None, None))(
+            S, a_s, a_s - c, d)
+    else:
+        q_blocks = S / a_s
 
     # numerical SPD enforcement; should rarely change blocks if smoother
     # statistics and model updates are internally consistent.
-    eigval, eigvec = jnp.linalg.eigh(q_blocks)
+    q_blocks = _spd_floor(q_blocks, q_base, eig_floor)
 
-    block_scale = jnp.maximum(jnp.max(jnp.abs(eigval), axis=-1, keepdims=True),
-                              q_base)
-
-    eigval = jnp.maximum(eigval, eig_floor * block_scale)
-
-    q_blocks = jnp.einsum("...ij,...j,...kj->...ik", eigvec, eigval, eigvec)
-
-    # symmetrize for safety
-    q_blocks = 0.5 * (q_blocks + jnp.swapaxes(q_blocks, -1, -2))
-
-    Q_new = jnp.zeros_like(q_hat).reshape(n_blocks, block_size, 
-                                          n_blocks, block_size)
-    
+    idx = jnp.arange(n_blocks)
+    Q_new = jnp.zeros_like(q_hat).reshape(n_blocks, d, n_blocks, d)
     Q_new = Q_new.at[idx, :, idx, :].set(q_blocks)
 
     return Q_new.reshape(m, m)
+
+def _iw_prior_mode(q_hat, n_blocks, block_size, q_base, sigma_gamma,
+                   singular_values, source_mass, sigma_min, sigma_max):
+    """
+    diagonal prior mode Q0 per block, q_base * sigma_norm^(2 * sigma_gamma).
+    Again modularized IW prior outside of solve_for_Q to make logic easier for 
+    different modes of solve_for_Q.
+    """
+    # define the prior mode Q0_r = q_base * I
+    if singular_values is None or sigma_gamma == 0.0:
+        # in this case we don't normalize using leadfield metrics
+        return q_base * jnp.broadcast_to(
+            jnp.eye(block_size, dtype=q_hat.dtype),
+            (n_blocks, block_size, block_size),
+        )
+
+    sigma = jnp.asarray(singular_values, dtype=q_hat.dtype)
+
+    # size check + reshape: a C-order reshape reads the same buffer, so
+    # singular_values[i] still belongs to G's column i whatever 2-D view it
+    # arrives in
+    if sigma.size != n_blocks * block_size:
+        raise ValueError(
+            f"singular_values must have {n_blocks * block_size} entries, "
+            f"got {sigma.size}"
+        )
+    sigma = sigma.reshape(n_blocks, block_size)
+
+    # remove first-order catchment-size/source-mass dependence
+    if source_mass is not None:
+        source_mass = jnp.asarray(source_mass, dtype=q_hat.dtype)
+
+        if source_mass.shape != (n_blocks,):
+            raise ValueError(
+                "source_mass must have shape "
+                f"({n_blocks},), got {source_mass.shape}"
+            )
+
+        sigma = sigma / jnp.sqrt(jnp.maximum(source_mass[:, None], 1e-12))
+
+    # center on the global median and clip
+    positive_sigma = jnp.where(sigma > 0.0, sigma, jnp.nan)
+    sigma_ref = jnp.nanmedian(positive_sigma)
+
+    sigma_norm = sigma / jnp.maximum(sigma_ref, 1e-12)
+    sigma_norm = jnp.clip(sigma_norm, sigma_min, sigma_max)
+
+    prior_var = q_base * sigma_norm ** (2.0 * sigma_gamma)
+    return jax.vmap(jnp.diag)(prior_var)
+
+# damped newton on the d(d+1)/2 cholesky parameters of one Q block
+Q_NEWTON_ITERS = 30
+Q_LINE_SEARCH = 8       # backtracking ladder 1, 1/2, 1/4, ...
+Q_TRUST_RADIUS = 1.0    # theta holds log-sd, so 1.0 caps a step at a factor of e
+
 
 def _unpack_chol(theta, d):
     """lower-triangular cholesky factor from unconstrained parameters."""
@@ -404,6 +440,40 @@ def _pack_chol(L, d):
     """inverse of _unpack_chol."""
     L = L.at[jnp.diag_indices(d)].set(jnp.log(jnp.diag(L)))
     return L[jnp.tril_indices(d)]
+
+
+def _spd_floor(q_blocks, q_base, eig_floor):
+    """
+    numerical SPD enforcement; should rarely change blocks if smoother
+    statistics and model updates are internally consistent.
+
+    strict-SPD enforcement per block, with a floor relative to block scale. Ensures Q is positive definite, 
+    symmetrical and raises eigenvalues to eig_floor*block_scale, was part of solve_for_Q but modularized it.
+    
+    """
+    q_blocks = 0.5 * (q_blocks + jnp.swapaxes(q_blocks, -1, -2))
+
+    eigval, eigvec = jnp.linalg.eigh(q_blocks)
+    scale = jnp.maximum(jnp.max(jnp.abs(eigval), axis=-1, keepdims=True), q_base)
+    eigval = jnp.maximum(eigval, eig_floor * scale)
+
+    q_blocks = jnp.einsum("...ij,...j,...kj->...ik", eigvec, eigval, eigvec)
+    return 0.5 * (q_blocks + jnp.swapaxes(q_blocks, -1, -2))
+
+
+def block_diagonal(sigma, block_size):
+    """stack of the block_size x block_size diagonal blocks of sigma."""
+    m = sigma.shape[0]
+    if m % block_size:
+        raise ValueError(
+            f'state dimension {m} is not divisible by block_size={block_size}')
+    n_blocks = m // block_size
+
+    idx = jnp.arange(n_blocks)
+    S = sigma.reshape(n_blocks, block_size, n_blocks, block_size)
+
+    return S[idx, :, idx, :]
+
 
 def q_block_objective(theta, S, a_s, a_c, d):
     """
@@ -422,8 +492,57 @@ def q_block_objective(theta, S, a_s, a_c, d):
 
     return a_s * jnp.sum(log_var) + a_c * logdet_C + jnp.trace(jnp.linalg.solve(Q, S))
 
+def _solve_q_block(S, a_s, a_c, d, n_iters= Q_NEWTON_ITERS):
+    """MAP estimate for one block by damped newton on its cholesky factor."""
+    # S / a_s is the closed-form answer at c = 0: the IW posterior mode when
+    # S = Qhat + Psi0/n, and the MLE (Qhat) in lkj mode where a_s = 1 and there
+    # is no IW term. the newton path only has to move it as far as the LKJ term
+    # asks.
+    jitter = 1e-10 * jnp.maximum(jnp.trace(S) / d, 1.0)
+    theta = _pack_chol(jnp.linalg.cholesky(S / a_s + jitter * jnp.eye(d)), d)
 
-def penalized_q_objective(A, Q, s1, s2, s3, lambda_, n_orients, lagsparsity):
+    obj = lambda th: q_block_objective(th, S, a_s, a_c, d)
+    grad_fn = jax.grad(q_block_objective)
+    hess_fn = jax.hessian(q_block_objective)
+
+    # 1, 1/2, 1/4, ... ; branch-free so this stays vmap-able
+    scales = 0.5 ** jnp.arange(Q_LINE_SEARCH, dtype=theta.dtype)
+
+    def newton_step(_, th):
+        g = grad_fn(th, S, a_s, a_c, d)
+        H = hess_fn(th, S, a_s, a_c, d)
+
+        # the hessian goes indefinite when a prior is strong, which flips the
+        # newton direction to ascent. reflecting the negative eigenvalues keeps
+        # newton's scaling while guaranteeing descent, since
+        # g @ step = sum_i (v_i @ g)^2 / |lambda_i| > 0. a raw-gradient fallback
+        # also descends but carries the wrong units, and with a stiff penalty
+        # the trust radius truncates it into a step the line search rejects
+        # outright -- the iteration then sits on a fixed point.
+        # the floor doubles as the near-singular damping.
+        evals, evecs = jnp.linalg.eigh(H)
+        evals = jnp.maximum(jnp.abs(evals), 1e-8)
+        step = evecs @ ((evecs.T @ g) / evals)
+
+        norm = jnp.linalg.norm(step)
+        step = step * jnp.minimum(1.0, Q_TRUST_RADIUS / jnp.maximum(norm, 1e-12))
+
+        # keep the largest step that actually decreases the objective
+        candidates = th - scales[:, None] * step
+        f = jax.vmap(obj)(candidates)
+        f = jnp.where(jnp.isfinite(f), f, jnp.inf)
+        best = jnp.argmin(f)
+
+        return jnp.where(f[best] < obj(th), candidates[best], th)
+
+    theta = jax.lax.fori_loop(0, n_iters, newton_step, theta)
+
+    L = _unpack_chol(theta, d)
+    return L @ L.T
+
+
+def penalized_q_objective(A, Q, s1, s2, s3, lambda_, n_orients, lagsparsity,
+                          lkj_eta=1.0, n=None):
     """
     compute the penalized Q function objective (up to additive constants).
     """
@@ -439,7 +558,7 @@ def penalized_q_objective(A, Q, s1, s2, s3, lambda_, n_orients, lagsparsity):
 
     Sigma = 0.5 * (Sigma + Sigma.T)
 
-    sign, logdet = jnp.linalg.slogdet(Q)
+    _, logdet = jnp.linalg.slogdet(Q)
 
     q_term = logdet + jnp.trace(jnp.linalg.solve(Q, Sigma))
 
@@ -455,7 +574,15 @@ def penalized_q_objective(A, Q, s1, s2, s3, lambda_, n_orients, lagsparsity):
 
     penalty = lambda_ * jnp.sum(norms)
 
-    total = quad + q_term + penalty
+    # -------- lkj term: -c * logdet C, c = 2(lkj_eta - 1)/n --------
+    lkj = 0.0
+    if lkj_eta != 1.0 and n_orients > 1:
+        blocks = block_diagonal(Q, n_orients)
+        logdet_C = jnp.linalg.slogdet(blocks)[1] \
+            - jnp.log(jnp.diagonal(blocks, axis1=-2, axis2=-1)).sum(-1)
+        lkj = -(2.0 / n) * (lkj_eta - 1.0) * logdet_C.sum()
+
+    total = quad + q_term + penalty + lkj
 
     return total, quad, q_term, penalty
 

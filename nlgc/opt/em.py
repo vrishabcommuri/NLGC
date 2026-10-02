@@ -40,8 +40,9 @@ def _triage_em_state(em_state):
     assert em_state.N0 is not None and len(em_state.N0.shape) == 2
     assert em_state.N_sources_upper is not None
     assert em_state.log_likelihood is not None
+    # one singular value per retained eigenmode, in any 2-D shape
     assert em_state.Q_prior_scales is not None and \
-           len(em_state.Q_prior_scales.shape) == 2
+           em_state.Q_prior_scales.size == em_state.N_sources_upper
 
 
 def _copycast_em_state_numpy(em_state):
