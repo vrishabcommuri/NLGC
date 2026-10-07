@@ -651,12 +651,12 @@ a: ground truth a matrix which VAR model is trying to estimate, contains GC link
 def lead_field_generation(root, subject_id, src_space, n_eigenmodes, n_orients, loose=0.0, depth=0.0, pca=True, rank=None, trans = None,
                           vol_pos_origin=5.0, vol_pos_target=18.0):
     
-    full_empty_room_path = root + "meg/" + subject_id + "/" + subject_id + "_emptyroom-raw.fif"
+    full_empty_room_path = root + "/meg/" + subject_id + "/" + subject_id + "_emptyroom-raw.fif"
     raw_empty_room = mne.io.read_raw_fif(full_empty_room_path)
     info = raw_empty_room.info
     noise_cov = mne.compute_raw_covariance(raw_empty_room, tmin=0, tmax=None)
     if trans == None:
-        expected_trans_file= root + "meg/" + subject_id + "/" + subject_id + "-trans.fif"
+        expected_trans_file= root + "/meg/" + subject_id + "/" + subject_id + "-trans.fif"
         if (os.path.exists(expected_trans_file)):
             print(" trans file found")
             trans_file = expected_trans_file
@@ -726,7 +726,8 @@ def lead_field_generation(root, subject_id, src_space, n_eigenmodes, n_orients, 
         fwd_target = mne.make_forward_solution(info = info, trans = trans_file, src = src_target, bem = bem_folder + subject_id + "-inner_skull-bem-sol.fif", ignore_ref = True)
     # fwd_origin_data = fwd_origin['sol']
     if rank == None:
-        rank_fwd_origin = np.linalg.matrix_rank(fwd_origin['sol']['data'])
+        # int(): matrix_rank returns numpy.int64, which _triage_rank rejects
+        rank_fwd_origin = int(np.linalg.matrix_rank(fwd_origin['sol']['data']))
         print(type(rank_fwd_origin))
     else:
         rank_fwd_origin = rank
@@ -1421,7 +1422,7 @@ def _run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0,
     verbose = config.numerical.verbose
     warm_start = config.optimizer.warm_start
 
-    if src_space not in ['surf', 'vol', 'mixed']:
+    if src_space not in ['surf', 'vol', 'mixed', 'vol-surf']:
         raise Exception(f'src_space {src_space} not implemented')
 
     if any(l <= 0 for l in lambda_range):
