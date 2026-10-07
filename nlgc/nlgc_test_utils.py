@@ -649,7 +649,7 @@ a: ground truth a matrix which VAR model is trying to estimate, contains GC link
     
 # Assume folder setup follows eelbrain pipeline
 def lead_field_generation(root, subject_id, src_space, n_eigenmodes, n_orients, loose=0.0, depth=0.0, pca=True, rank=None, trans = None,
-                          vol_pos_origin=10.0, vol_pos_target=30.0):
+                          vol_pos_origin=5.0, vol_pos_target=18.0):
     
     full_empty_room_path = root + "meg/" + subject_id + "/" + subject_id + "_emptyroom-raw.fif"
     raw_empty_room = mne.io.read_raw_fif(full_empty_room_path)
@@ -705,7 +705,23 @@ def lead_field_generation(root, subject_id, src_space, n_eigenmodes, n_orients, 
         if src_space == 'mixed':
             surf_src = mne.setup_source_space(subject = subject_id, spacing = 'ico4', surface = 'white', subjects_dir = subjects_dir, add_dist = 'patch', verbose = None)
             src_origin = surf_src + src_origin
-        
+    
+        fwd_origin = mne.make_forward_solution(info = info, trans = trans_file, src = src_origin, bem = bem_folder + subject_id + "-inner_skull-bem-sol.fif", ignore_ref = True)
+        fwd_target = mne.make_forward_solution(info = info, trans = trans_file, src = src_target, bem = bem_folder + subject_id + "-inner_skull-bem-sol.fif", ignore_ref = True)
+    elif src_space == 'vol-surf':
+        inner_skull_surf = bem_folder + 'inner_skull.surf'
+        if os.path.exists(inner_skull_surf):
+            vol_bounds = dict(surface=inner_skull_surf)
+        else:
+            bem_file = bem_folder + subject_id + "-inner_skull-bem.fif"
+            if not os.path.exists(bem_file):
+                raise FileNotFoundError(
+                    f'Need either {inner_skull_surf} or {bem_file} to bound the '
+                    f'volume source space')
+            print(f'inner_skull.surf not found, bounding volume with {bem_file}')
+            vol_bounds = dict(bem=bem_file)
+        src_origin = mne.setup_volume_source_space(subject = subject_id, pos = vol_pos_origin, subjects_dir = subjects_dir, **vol_bounds)
+        src_target = mne.setup_source_space(subject = subject_id, spacing = 'ico1', surface = 'white', subjects_dir = subjects_dir, add_dist = 'patch', verbose = None)
         fwd_origin = mne.make_forward_solution(info = info, trans = trans_file, src = src_origin, bem = bem_folder + subject_id + "-inner_skull-bem-sol.fif", ignore_ref = True)
         fwd_target = mne.make_forward_solution(info = info, trans = trans_file, src = src_target, bem = bem_folder + subject_id + "-inner_skull-bem-sol.fif", ignore_ref = True)
     # fwd_origin_data = fwd_origin['sol']
@@ -1382,7 +1398,7 @@ def _run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0,
         root = None, subject_id = None, session_name = None, trans = None, t = 500,
         alpha = .1, m_active = 10, n_links = 10, passed_evoked = None, diff_lf = False,
         a_init = None, save_dir = None, run_ggc = False, ggc_kwargs = None,
-        vol_pos_origin = 10.0, vol_pos_target = 30.0, debug_report = False,
+        vol_pos_origin = 5.0, vol_pos_target = 18.0, debug_report = False,
         obsidian_report = False, n_sensors = None, n_sources = None,
         config = None, **kwargs):
 
