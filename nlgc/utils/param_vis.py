@@ -45,7 +45,7 @@ def generate_coefficient_matrix_plot(model_params):
     arr_model = np.concatenate(model_params[:], axis = 1)
     fig, ax = plt.subplots(figsize=(75, 75))
     ax.imshow(scipy.signal.convolve2d(arr_model, np.ones((conv,conv))), cmap = 'seismic', vmin=-1, vmax=1)
-    ax.title('Derived Model Parameters Concatenated', fontsize = 80)
+    ax.set_title('Derived Model Parameters Concatenated', fontsize = 80)
 
     return fig
 
@@ -60,51 +60,46 @@ def generate_no_diagonal_summed_coeff_matrix_plot(model_params):
 
     fig, ax = plt.subplots(figsize=(75, 75))
     ax.imshow(scipy.signal.convolve2d(model_params_summed, np.ones((conv,conv))), cmap = 'seismic', vmin=-1, vmax=1)
-    ax.title('No Diagonal Absolute Summed Lags Derived Model Params', fontsize = 80)
+    ax.set_title('No Diagonal Absolute Summed Lags Derived Model Params', fontsize = 80)
 
     return fig
 
 
 
-# Generate json of parameters used for running NLGC map
-def generate_report(save_dir, model, param_dict):
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
-        print(f"Directory '{save_dir}' created.")
-    else:
-        print(f"Directory '{save_dir}' already exists.")
+# Generate parameter json and diagnostic pdf for a saved NLGC model
+def generate_report(model_path, save_dir=None):
+    """Write a diagnostic report for the model saved at `model_path`.
 
-    with open(save_dir + "nlgc_map_params.json", "w") as f:
-        json.dump(param_dict, f, indent=4)
+    model_path : path to an .h5 written by nlgc.io.save_model
+    save_dir : where to write the report (default: the model's directory)
 
-    model_path = save_dir + 'model.pkl'
+    Writes model-report.pdf; returns its path.
+    """
+    from nlgc.io import load_model
 
-    with open(model_path, 'wb') as file:
-        pickle.dump(model, file)
+    model_path = str(model_path)
+    if save_dir is None:
+        save_dir = os.path.dirname(os.path.abspath(model_path))
+    os.makedirs(save_dir, exist_ok=True)
 
+    model = load_model(model_path)
 
     model_params = model._model_f[0]._parameters[0]
+    zs, ps = find_poles_and_zeros(model, model.p)
 
-    zs, ps = find_poles_and_zeros(model, param_dict.order)
-
-    figs = [generate_coefficient_matrix_plot(model_params = model_params),
-            generate_no_diagonal_summed_coeff_matrix_plot(model_params = model_params),
-            zplane(np.array(zs),np.array(ps), 'Model Parameters Pole Zero Plot'),
+    figs = [generate_coefficient_matrix_plot(model_params=model_params),
+            generate_no_diagonal_summed_coeff_matrix_plot(model_params=model_params),
+            zplane(np.array(zs), np.array(ps), 'Model Parameters Pole Zero Plot'),
             ]
 
-    with PdfPages(save_dir + 'model-report.pdf') as pdf:
-
+    pdf_path = os.path.join(save_dir, 'model-report.pdf')
+    with PdfPages(pdf_path) as pdf:
         for fig in figs:
             pdf.savefig(fig)
-            plt.close()
+            plt.close(fig)
 
         d = pdf.infodict()
         d['Title'] = 'Model Analyatics PDF'
         d['Author'] = 'Kavin Loganathan'
 
-    
-
-
-
-    
-
+    return pdf_path

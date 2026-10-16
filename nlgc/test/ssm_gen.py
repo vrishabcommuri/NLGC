@@ -17,6 +17,9 @@ class SSMState:
     N_times: int
     N_sources: int
     N_sensors: int
+    # leadfield path only: per-patch singular values from lead_field_generation,
+    # the Q prior's sigma_gamma profile
+    singular_values: Array = None
 
 
 def gen_small_ssm(T=200, nx=4, ny=6):
@@ -212,17 +215,18 @@ def gen_sparse_var_ssm(
             
         n_sensors, _ = G.shape
         print(f"{G.shape=}")
-        print(f"generating ssm with leadfield ({n_sensors=} x {n_sources=})")
+        print(f"generating ssm with leadfield ({n_sensors=} x {G.shape[1]=})")
 
     rng = np.random.default_rng(seed)
 
+    singular_values = None
     if leadfield is not None:
         # ignoring these would return an SSMState disagreeing with its own args
         if n_sources is not None or n_sensors is not None:
             raise ValueError(
                 'n_sources and n_sensors are dictated by the leadfield; omit '
                 'them when passing leadfield')
-        G, n_sources, n_sensors = _leadfield_observation(
+        G, n_sources, n_sensors, singular_values = _leadfield_observation(
             leadfield, n_eigenmodes, n_orients)
     else:
         G = None
@@ -332,6 +336,7 @@ def gen_sparse_var_ssm(
         N_times=T,
         N_sources=n_units,
         N_sensors=n_sensors,
+        singular_values=singular_values,
     )
 
     return ssm, A_lags, supports
@@ -386,7 +391,8 @@ def make_sparse_source_mask(n_sources, sparsity, rng):
 
 def _leadfield_observation(leadfield, n_eigenmodes, n_orients):
     """
-    (G, n_sources, n_sensors) from `lead_field_generation` keyword arguments.
+    (G, n_sources, n_sensors, singular_values) from `lead_field_generation`
+    keyword arguments.
 
     n_eigenmodes / n_orients are injected here rather than read from the dict,
     so the ground truth and the leadfield cannot disagree about block layout.
@@ -394,14 +400,15 @@ def _leadfield_observation(leadfield, n_eigenmodes, n_orients):
     # local: nlgc_test_utils pulls in mne, matplotlib and ggc
     from nlgc.nlgc_test_utils import lead_field_generation
 
-    G, *_ = lead_field_generation(          # (G, info, noise_cov, fwd, weights)
+    # (G, info, noise_cov, fwd, weights, rank, singular_values)
+    G, *_, singular_values = lead_field_generation(
         n_eigenmodes=n_eigenmodes, n_orients=n_orients, **leadfield)
 
     n_sensors, m = G.shape
     block_size = n_eigenmodes * n_orients
     assert m % block_size == 0, (m, block_size)
 
-    return G, m // block_size, n_sensors
+    return G, m // block_size, n_sensors, singular_values
 
 
 def expand_source_blocks(source_mask, block_size):

@@ -455,8 +455,39 @@ def _plot_deviance_pages(report, model):
         plt.close()
 
 
+def _plot_q_pages(report, Q_true, Q_hat):
+    """Ground-truth vs fitted process-noise covariance Q.
+
+    Q is diagonal-dominant, so besides the two matrices on one symmetric color
+    scale there is a page of the diagonals and one of the within-block (d x d)
+    correlation, where mle / iw / lkj actually differ.
+    """
+    style = report.style
+    Q_true = np.asarray(Q_true)
+    Q_hat = np.asarray(Q_hat)
+    lim = max(np.abs(Q_true).max(), np.abs(Q_hat).max())
+
+    for Q, column, title in ((Q_true, 'Ground truth', 'Ground Truth Q'),
+                             (Q_hat, 'Derived', 'Derived Model Q')):
+        fig = plt.figure(figsize=style['fig_size'])
+        plt.imshow(Q, cmap='seismic', vmin=-lim, vmax=lim)
+        plt.colorbar()
+        plt.title(title, fontsize=style['title'])
+        _report_savefig(report, fig, group='Process noise Q', column=column)
+        plt.close()
+
+    fig = plt.figure(figsize=style['fig_size'])
+    plt.plot(np.diag(Q_true), label='Ground truth')
+    plt.plot(np.diag(Q_hat), label='Derived')
+    plt.legend(fontsize=style['title'])
+    plt.xlabel('state index')
+    plt.title('Diagonal of Q', fontsize=style['title'])
+    _report_savefig(report, fig, group='Process noise Q', column='Diagonal')
+    plt.close()
+
+
 # Save information in
-def save_info(dir, a, JG, model, order, param_dict, ggc_model = None, J_GGC = None, ggc_model_extras = None,  zip_pkl = True, debug_report = False, obsidian_report = False):
+def save_info(dir, a, JG, model, order, param_dict, ggc_model = None, J_GGC = None, ggc_model_extras = None,  zip_pkl = True, debug_report = False, obsidian_report = False, Q_true = None):
 
     conv = int(np.floor((5/350)*a.shape[1]) + 1)
     if not os.path.exists(dir):
@@ -528,7 +559,8 @@ def save_info(dir, a, JG, model, order, param_dict, ggc_model = None, J_GGC = No
         plt.close()
 
 
-        model_params_abs = np.abs(model_params[:]*negated_identity)
+        negated_identity_model = np.abs(np.eye(model_params.shape[1]) - 1)
+        model_params_abs = np.abs(model_params[:]*negated_identity_model)
         model_params_summed = np.sum(model_params_abs[:], axis = 0)
         fig = plt.figure(figsize=style['fig_size'])
         
@@ -539,18 +571,28 @@ def save_info(dir, a, JG, model, order, param_dict, ggc_model = None, J_GGC = No
         plt.close()
 
 
-        zs_t, ps_t, zs, ps = find_poles_and_zeros(a, model, order)
+        # the pole-zero comparison indexes the fit with the ground truth's
+        # coordinates, which only works when both have the same state space
+        # (it does not when the fit uses fewer orientations than the data)
+        if a.shape[1] == model_params.shape[1]:
+            zs_t, ps_t, zs, ps = find_poles_and_zeros(a, model, order)
 
-        # sized from the report so both formats match their other figures
-        fig = zplane(np.array(zs_t), np.array(ps_t), 'Ground Truth Pole Zero Plot',
-                     figsize=style['fig_size'], title_fontsize=style['title'])
-        _report_savefig(report, fig, group='Pole-zero', column='Ground truth')
-        plt.close()
+            # sized from the report so both formats match their other figures
+            fig = zplane(np.array(zs_t), np.array(ps_t), 'Ground Truth Pole Zero Plot',
+                         figsize=style['fig_size'], title_fontsize=style['title'])
+            _report_savefig(report, fig, group='Pole-zero', column='Ground truth')
+            plt.close()
 
-        fig = zplane(np.array(zs),np.array(ps), 'Model Parameters Pole Zero Plot',
-                     figsize=style['fig_size'], title_fontsize=style['title'])
-        _report_savefig(report, fig, group='Pole-zero', column='Derived')
-        plt.close()
+            fig = zplane(np.array(zs),np.array(ps), 'Model Parameters Pole Zero Plot',
+                         figsize=style['fig_size'], title_fontsize=style['title'])
+            _report_savefig(report, fig, group='Pole-zero', column='Derived')
+            plt.close()
+        else:
+            print('skipping the pole-zero comparison: ground truth and fit '
+                  'have different state dimensions')
+
+        if Q_true is not None:
+            _plot_q_pages(report, Q_true, model._model_f[0]._parameters[2])
 
     finally:
         # runs even if a figure raised, so a partial report survives
@@ -570,6 +612,10 @@ def save_info(dir, a, JG, model, order, param_dict, ggc_model = None, J_GGC = No
         pickle.dump(a, file)
     with open(JG_path, 'wb') as file:
         pickle.dump(JG, file)
+    Q_path = dir + 'Q-true.pkl'
+    if Q_true is not None:
+        with open(Q_path, 'wb') as file:
+            pickle.dump(Q_true, file)
 
 
     if ggc_model != None:
@@ -590,6 +636,8 @@ def save_info(dir, a, JG, model, order, param_dict, ggc_model = None, J_GGC = No
                            arcname=os.path.basename(forward_path))
         zip_file.write(A_path, arcname="G-Coeffs.pkl") 
         zip_file.write(JG_path, arcname= 'JG.pkl')
+        if Q_true is not None:
+            zip_file.write(Q_path, arcname='Q-true.pkl')
         if ggc_model != None:
             zip_file.write(ggc_model_path, arcname='ggc_model.pkl')
             zip_file.write(J_GGC_path, arcname='J_GGC.pkl')
@@ -600,6 +648,8 @@ def save_info(dir, a, JG, model, order, param_dict, ggc_model = None, J_GGC = No
         os.remove(forward_path)
     os.remove(A_path)
     os.remove(JG_path)
+    if Q_true is not None:
+        os.remove(Q_path)
     if ggc_model != None:
         os.remove(ggc_model_path)
         os.remove(J_GGC_path)
@@ -743,7 +793,7 @@ def _voxel_block(v, n_orient=3):
     return slice(n_orient * v, n_orient * (v + 1))
 
 
-def _make_3d_coupling(strength=0.15, mode="mixed", rng=None):
+def _make_3d_coupling(strength=0.15, mode="mixed", rng=None, d=3):
     """
     Create a 3x3 voxel-to-voxel coupling block.
     Rows = target RAS components
@@ -753,9 +803,11 @@ def _make_3d_coupling(strength=0.15, mode="mixed", rng=None):
         rng = np.random.default_rng()
 
     if mode == "same_axis":
-        B = np.eye(3)
+        B = np.eye(d)
 
     elif mode == "cross_axis":
+        if d != 3:
+            raise ValueError('cross_axis coupling is defined for 3 orientations')
         # R->A, A->S, S->R style cross-orientation coupling
         B = np.array([
             [0.0, 0.0, 1.0],
@@ -764,7 +816,7 @@ def _make_3d_coupling(strength=0.15, mode="mixed", rng=None):
         ])
 
     elif mode == "mixed":
-        B = rng.normal(size=(3, 3))
+        B = rng.normal(size=(d, d))
         B /= np.linalg.norm(B, ord="fro") + 1e-12
 
     else:
@@ -826,10 +878,6 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
 
     # taken as a parameter so the ground truth and the leadfield can never
     # silently disagree about the orientation count
-    if n_orients != 3:
-        raise NotImplementedError(
-            f'vol_data_generation assumes 3 orientations per voxel, got {n_orients}')
-
     if G is None:
 
         n_sensors = 156 if n_sensors is None else n_sensors
@@ -852,8 +900,9 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
 
         if m % n_orients != 0:
             raise ValueError(
-                f"G has {m} columns, which is not divisible by 3. "
-                "Expected G.shape = (n_sensors, 3*n_voxels)."
+                f"G has {m} columns, which is not divisible by n_orients="
+                f"{n_orients}. Expected G.shape = (n_sensors, "
+                f"{n_orients}*n_voxels)."
             )
 
         n_voxels = m // (n_eigenmodes * n_orients)
@@ -935,6 +984,7 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
                 strength=strength,
                 mode=coupling_mode,
                 rng=rng,
+                d=n_orients,
             )
 
             if natures == "all":
@@ -1401,7 +1451,7 @@ def _run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0,
         a_init = None, save_dir = None, run_ggc = False, ggc_kwargs = None,
         vol_pos_origin = 5.0, vol_pos_target = 18.0, debug_report = False,
         obsidian_report = False, n_sensors = None, n_sources = None,
-        config = None, **kwargs):
+        config = None, gen_n_orients = None, **kwargs):
 
     # everything that is not simulation setup is model configuration and goes
     # through ModelConfig, as in nlgc_map. alpha stays named: here it is the
@@ -1430,6 +1480,22 @@ def _run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0,
             f'only positive lambdas are allowed, got {lambda_range}')
 
     singular_values = None   # only the real leadfield paths produce a profile
+
+    # vol_data_generation always generates 3 orientations per voxel, so the
+    # ground truth leadfield is built with 3. n_orients (from the config) is
+    # what the model is FIT with, and when it differs the fit gets its own
+    # leadfield below. gen_n_orients sets the generation count: by default 3 for
+    # the volume spaces and n_orients for surf. in vol-surf the orientations are
+    # SVD modes of each patch, so any count works, e.g. gen_n_orients = n_orients = 2
+    if gen_n_orients is None:
+        gen_n_orients = n_orients if src_space == 'surf' else 3
+    fit_lf = n_orients != gen_n_orients
+    if fit_lf and not lead_field_gen:
+        raise ValueError(
+            f'fitting with n_orients={n_orients} but generating with '
+            f'{gen_n_orients} needs lead_field_gen=True, to build the second '
+            f'leadfield')
+
     if (passed_evoked != None):
         print('using passed in evoked')
         noise_cov = mne.read_cov(passed_evoked['noise_cov'])
@@ -1438,13 +1504,13 @@ def _run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0,
         src_target = mne.read_source_spaces(passed_evoked['src_target'])
         info = evoked[0].info
         weights, G, grouped_vertidx, src_flips, rank, singular_values = prepare_eigenmodes(info, fwd, noise_cov, src_target, 
-                                                                            n_eigenmodes=n_eigenmodes, n_orients = n_orients, loose=loose, depth=depth, pca=pca, rank=rank, mode='svd_flip')
+                                                                            n_eigenmodes=n_eigenmodes, n_orients = gen_n_orients, loose=loose, depth=depth, pca=pca, rank=rank, mode='svd_flip')
     elif (lead_field_gen):
         # keyword args: the positional form silently shifted n_orients<-loose and
         # dropped `trans`, so the real trans file was never used
         G, info, noise_cov, fwd, weights, rank, singular_values = lead_field_generation(
             root=root, subject_id=subject_id, src_space=src_space,
-            n_eigenmodes=n_eigenmodes, n_orients=n_orients, loose=loose,
+            n_eigenmodes=n_eigenmodes, n_orients=gen_n_orients, loose=loose,
             depth=depth, pca=pca, rank=rank, trans=trans,
             vol_pos_origin=vol_pos_origin, vol_pos_target=vol_pos_target)
     elif (type(lf) != type(None)):
@@ -1465,7 +1531,7 @@ def _run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0,
             n_sensors = n_sensors, n_patches = n_sources)
     else:
         f, y, x, r_cov, p, JG, pow_actives, a = vol_data_generation(seed = seed, band = band, fs = fs, natures = natures, n_eigenmodes = n_eigenmodes, G = G, p = order, t = t
-                                                                    ,n_active_voxels = m_active, n_links = n_links, target_spec_rad = target_spec_rad, n_orients = n_orients,
+                                                                    ,n_active_voxels = m_active, n_links = n_links, target_spec_rad = target_spec_rad, n_orients = gen_n_orients,
                                                                     verbose = verbose, n_sensors = n_sensors, n_voxels = n_sources)
 
     # captured before the diff_lf branch below can reassign f
@@ -1511,7 +1577,7 @@ def _run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0,
         # noise = np.random.normal(mean, std_dev, x.shape)
         # stc_init = x + noise
         # print(stc_init)
-    if diff_lf:
+    if diff_lf or fit_lf:
         f, info, noise_cov, fwd, weights, rank, singular_values = lead_field_generation(
             root=root, subject_id=subject_id, src_space=src_space,
             n_eigenmodes=n_eigenmodes, n_orients=n_orients, loose=loose,
@@ -1587,6 +1653,7 @@ def _run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0,
             'block_size': block_size,
             'requested_n_sensors': n_sensors,
             'requested_n_sources': n_sources,
+            'gen_n_orients': gen_n_orients,
             'gen_shape': gen_lf_shape,
             'fit_shape': fit_lf_shape,
         }
@@ -1642,3 +1709,127 @@ def _run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0,
     return temp_obj
 
 
+
+
+
+def run_ssm_sim(*args, save_dir=None, **kwargs):
+    """Run an ssm_gen simulation on a real leadfield, teeing console output to
+    run.log. Thin wrapper; every argument is documented on _run_ssm_sim below.
+    """
+    with tee_output(save_dir):
+        return _run_ssm_sim(*args, save_dir=save_dir, **kwargs)
+
+
+def _run_ssm_sim(lead_field_gen=True, src_space='vol-surf', seed=0, root=None, subject_id=None,
+                 trans=None, t=1500, alpha=.1, save_dir=None,
+                 vol_pos_origin=5.0, vol_pos_target=18.0,
+                 debug_report=False, obsidian_report=False, config=None,
+                 leadfield=None, sparsity=0.25, self_decay=0.8,
+                 cross_scale=0.1, q_scale=0.05, measurement_noise_scale=1e2,
+                 burnin=100, n_sensors=None, n_sources=None, **kwargs):
+    """Like _run_GT_sim, but the data come from ssm_gen.gen_sparse_var_ssm.
+
+    The leadfield is the real one (lead_field_generation), so the number of
+    sensors and sources is whatever that leadfield dictates. The true Q is
+    ssm_gen's q_scale * I. Returns the fitted NLGC object, with the true Q on
+    `_Q_true`.
+
+    leadfield : dict | None
+        Keyword arguments for lead_field_generation; built from root,
+        subject_id, src_space, trans, vol_pos_* and the config when None.
+        Ignored when lead_field_gen is False.
+    lead_field_gen : bool
+        False skips the real leadfield and uses ssm_gen's random observation
+        matrix of n_sensors x n_sources (plumbing checks only).
+    burnin : int
+        Samples generated and discarded, since ssm_gen starts at x = 0.
+    """
+    from .test.ssm_gen import gen_sparse_var_ssm
+
+    if config is None:
+        config = ModelConfig.from_legacy_kwargs({**_SIM_DEFAULTS, **kwargs})
+
+    order = config.latent.order
+    n_eigenmodes = config.latent.n_eigenmodes
+    n_orients = config.latent.n_orients
+    n_segments = config.latent.n_segments
+    block_size = n_eigenmodes * n_orients
+
+    if not lead_field_gen:
+        leadfield = None
+    elif leadfield is None:
+        leadfield = dict(
+            root=root, subject_id=subject_id, src_space=src_space,
+            loose=config.forward.loose, depth=config.forward.depth,
+            pca=config.forward.pca, rank=config.forward.rank, trans=trans,
+            vol_pos_origin=vol_pos_origin, vol_pos_target=vol_pos_target)
+
+    ssm, A_lags, supports = gen_sparse_var_ssm(
+        T=t + burnin, order=order, n_orients=n_orients,
+        n_eigenmodes=n_eigenmodes, sparsity=sparsity, self_decay=self_decay,
+        cross_scale=cross_scale, q_scale=q_scale, seed=seed,
+        leadfield=leadfield, measurement_noise_scale=measurement_noise_scale,
+        **({} if lead_field_gen else dict(n_sensors=n_sensors,
+                                          n_sources=n_sources)))
+
+    n_units = ssm.N_sources
+    n_patches = n_units // block_size
+    y = ssm.y[burnin:]
+    f = ssm.F[:, :n_units]
+    r_cov = ssm.R
+    a = np.stack(A_lags)            # (order, n_units, n_units), target x source
+    Q_true = ssm.Q[:n_units, :n_units]
+
+    # patch-level ground truth links, target x source, no self loops, as in
+    # vol_data_generation
+    support = np.any(np.stack(supports), axis=0)
+    JG = support.reshape(n_patches, block_size, n_patches, block_size)\
+                .any(axis=(1, 3))
+    np.fill_diagonal(JG, False)
+
+    print(f"ssm sim: {f.shape[0]} sensors, {n_patches} patches, "
+          f"{int(JG.sum())} ground truth links")
+
+    start_time = time.time()
+    temp_obj = nlgc_map_opt(y.T, f, r=r_cov, config=config,
+                            singular_values=ssm.singular_values)
+    total_time = time.time() - start_time
+    temp_obj._Q_true = Q_true
+
+    if save_dir != None:
+        fit_lf_shape = tuple(int(v) for v in f.shape)
+        param_dict = {
+            'best_lambda': temp_obj._model_f[0].lambda_,
+            'lambda_range': config.sparsity.lambda_range,
+            'leadfield': {
+                'n_sensors': fit_lf_shape[0],
+                'n_sources': fit_lf_shape[1],
+                'n_patches': n_patches,
+                'block_size': block_size,
+                'fit_shape': fit_lf_shape,
+            },
+            'order': order,
+            'n_eigenmodes': n_eigenmodes,
+            'n_orients': n_orients,
+            'n_segments': n_segments,
+            'src_space': src_space,
+            't': t,
+            'ssm_gen': dict(seed=seed, sparsity=sparsity,
+                            self_decay=self_decay, cross_scale=cross_scale,
+                            q_scale=q_scale, burnin=burnin,
+                            measurement_noise_scale=measurement_noise_scale),
+            'lead_field_gen': dict(root_dir=root, subject_id=subject_id,
+                                   trans=trans,
+                                   vol_pos_origin=vol_pos_origin,
+                                   vol_pos_target=vol_pos_target),
+            'screening': {'alpha': alpha},
+            'debug_report': debug_report,
+            'obsidian_report': obsidian_report,
+            'nlgc_map_time': total_time,
+            **dataclasses.asdict(config),
+        }
+        save_info(dir=save_dir, a=a, JG=JG, model=temp_obj, order=order,
+                  param_dict=param_dict, debug_report=debug_report,
+                  obsidian_report=obsidian_report, Q_true=Q_true)
+
+    return temp_obj

@@ -217,7 +217,7 @@ def _nlgc_map(name, evoked, forward, noise_cov, src_target, patch_idx,
     total_time = stop_time - start_time
 
     nlgc_param_dict = {
-        name: name,
+        'name': name,
         'n_eigenmodes': config.latent.n_eigenmodes,
         'n_orients': config.latent.n_orients,
         'order': config.latent.order,
@@ -227,7 +227,12 @@ def _nlgc_map(name, evoked, forward, noise_cov, src_target, patch_idx,
         'nlgc_map_time': total_time
     }
     if save_dir is not None:
-        generate_report(save_dir = save_dir, model = nlgc_obj, 
-                        param_dict = nlgc_param_dict)
+        import json, os
+        from nlgc.io import save_model
+        os.makedirs(save_dir, exist_ok=True)
+        with open(os.path.join(save_dir, 'nlgc_map_params.json'), 'w') as f:
+            json.dump(nlgc_param_dict, f, indent=4, default=str)
+        model_path = save_model(nlgc_obj, os.path.join(save_dir, 'model.h5'))
+        generate_report(model_path)
 
     return nlgc_obj
