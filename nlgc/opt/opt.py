@@ -152,9 +152,12 @@ class NeuraLVAR:
     def to_dict(self):
         """Plain-data state; lands under NLGC.to_dict's 'models' key.
 
-        Breaking changes here need a FORMAT_VERSION bump. _preprocessing is
-        dropped (always None via from_config); asarray because these may be jax.
+        Breaking changes here need a FORMAT_VERSION bump. asarray because
+        these may be jax.
         """
+        # _preprocessing is an unfitted sklearn transformer (None via
+        # from_config), so its class and constructor params rebuild it exactly
+        prep = self._preprocessing
         d = {
             'class': type(self).__name__,
             'order': self._order,
@@ -167,6 +170,9 @@ class NeuraLVAR:
             'll': self.ll,
             'config': None if self.config is None
                       else to_legacy_kwargs(self.config),
+            'preprocessing': None if prep is None
+                             else {'class': type(prep).__name__,
+                                   'params': prep.get_params()},
         }
         if self._parameters is not None:
             for name, value in zip(self._PARAMETER_NAMES, self._parameters):
@@ -208,6 +214,10 @@ class NeuraLVAR:
         return ModelConfig.from_legacy_kwargs(dict(cfg))
 
     def _restore_common(self, d):
+        prep = d.get('preprocessing')
+        if prep is not None:
+            self._preprocessing = getattr(preprocessing, prep['class'])(
+                **prep['params'])
         self.lambda_ = d.get('lambda_')
         self.ll = d.get('ll')
 

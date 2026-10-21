@@ -5,7 +5,8 @@
 
 Arrays become datasets named for their position in NLGC.to_dict's output;
 everything else goes into a JSON 'skeleton' root attribute. The mne.Forward
-goes to a sidecar <stem>-fwd.fif.
+goes to a sidecar <stem>-fwd.fif. Format v2 saves every _model_f entry (fitted
+models and their CV EMState dicts); v1 files saved none and load with [].
 """
 import json
 import os

@@ -336,9 +336,14 @@ def to_legacy_kwargs(config):
         raise ValueError(f"Unrecognized parallel config: {type(parallel)}")
 
     kwargs = {"parallel_mode": mode}
-    for section in (config.latent, config.sparsity, config.qprior, config.forward,
-                    config.optimizer, config.validation, config.numerical,
-                    config.gctest, parallel):
+    # getattr: configs unpickled from older builds may predate a section;
+    # from_legacy_kwargs then fills its defaults
+    sections = [getattr(config, name, None)
+                for name in ("latent", "sparsity", "qprior", "forward",
+                             "optimizer", "validation", "numerical", "gctest")]
+    for section in sections + [parallel]:
+        if section is None:
+            continue
         for f in fields(section):
             value = getattr(section, f.name)
             kwargs[f.name] = list(value) if isinstance(value, tuple) else value
