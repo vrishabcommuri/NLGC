@@ -136,6 +136,8 @@ def gen_sparse_var_ssm(
     leadfield=None,
     from_nlgc_map=None,
     measurement_noise_scale=1e2,
+    q_within_corr=0.0,
+    q_log_sd=0.0,
 ):
     """
     generate sparse VAR(p) state-space model.
@@ -162,6 +164,12 @@ def gen_sparse_var_ssm(
     measurement_noise_scale : float
         Leadfield path only: signal power / noise power. A fixed `r_scale` is
         meaningless there because the gain is whitened and column-normalized.
+
+    q_within_corr, q_log_sd : float
+        Correlated / unequal innovations within each source block (block =
+        n_eigenmodes * n_orients); see `make_block_q`. Both 0 (default) gives
+        the original q_scale * I. Drawn from a separate rng, so A, the links
+        and the noise draws are the same as at the defaults.
 
     Returns
     -------
@@ -277,18 +285,25 @@ def gen_sparse_var_ssm(
 
     Q = np.zeros((state_dim, state_dim))
 
-    Q[:n_units, :n_units] = (
-        q_scale * np.eye(n_units)
-    )
+    block_size = n_eigenmodes * n_orients
+    q_blocks = make_block_q(n_sources, block_size, q_scale,
+                            within_corr=q_within_corr, log_sd=q_log_sd,
+                            rng=np.random.default_rng([seed, 1]))
+    Q[:n_units, :n_units] = block_diag_from_blocks(q_blocks)
 
     x = np.zeros((T, state_dim))
 
     print("gen proc noise")
 
     process_noise = np.zeros((T, state_dim))
-    process_noise[:, :n_units] = (
-        rng.standard_normal((T, n_units)) * np.sqrt(q_scale)
-    )
+    if q_within_corr == 0.0 and q_log_sd == 0.0:
+        # unchanged identity path, so default runs reproduce bit for bit
+        process_noise[:, :n_units] = (
+            rng.standard_normal((T, n_units)) * np.sqrt(q_scale)
+        )
+    else:
+        L = np.linalg.cholesky(Q[:n_units, :n_units])
+        process_noise[:, :n_units] = rng.standard_normal((T, n_units)) @ L.T
 
     print("gen latent dynamics")
     
@@ -345,6 +360,65 @@ def gen_sparse_var_ssm(
 #-------------------------------------------------------------------------------
 # vector ssm and VAR(p) helpers
 #-------------------------------------------------------------------------------
+
+def make_block_q(n_blocks, block_size, scale, within_corr=0.0, log_sd=0.0,
+                 rng=None):
+    """
+    (n_blocks, d, d) stack of SPD innovation covariance blocks, one per source.
+
+    Per block, with Z ~ randn(d, d):
+
+        C   = (1 - within_corr) I + within_corr * corr(Z Z^T)
+        v   = scale * exp(log_sd * randn(d))
+        Q_b = diag(sqrt v) C diag(sqrt v)
+
+    C is a convex combination of I and a full-rank Wishart correlation, so it
+    is SPD for any within_corr in [0, 1]. At within_corr = log_sd = 0 this is
+    exactly scale * I and draws nothing, so callers keep their rng streams.
+
+    within_corr : float
+        0 -> uncorrelated units within a source, 1 -> a fully random
+        correlation. Within-source only, so Q stays block diagonal.
+    log_sd : float
+        Spread of the per-unit variances around scale, on the log scale.
+    rng : np.random.Generator | None
+        Pass one separate from the generator's main stream so turning this on
+        does not move A, the links or the data noise.
+    """
+    if not 0.0 <= within_corr <= 1.0:
+        raise ValueError(f"within_corr must be in [0, 1], got {within_corr}")
+    if log_sd < 0.0:
+        raise ValueError(f"log_sd must be >= 0, got {log_sd}")
+
+    d = block_size
+    blocks = np.broadcast_to(scale * np.eye(d), (n_blocks, d, d)).copy()
+    if within_corr == 0.0 and log_sd == 0.0:
+        return blocks
+
+    rng = np.random.default_rng() if rng is None else rng
+    for b in range(n_blocks):
+        C = np.eye(d)
+        if within_corr > 0.0 and d > 1:
+            Z = rng.standard_normal((d, d))
+            W = Z @ Z.T
+            sd = np.sqrt(np.diag(W))
+            C = (1.0 - within_corr) * C + within_corr * W / np.outer(sd, sd)
+
+        v = scale * np.exp(log_sd * rng.standard_normal(d)) if log_sd > 0.0 \
+            else np.full(d, scale)
+        blocks[b] = np.sqrt(v)[:, None] * C * np.sqrt(v)[None, :]
+
+    return 0.5 * (blocks + np.swapaxes(blocks, -1, -2))
+
+
+def block_diag_from_blocks(blocks):
+    """(n_blocks, d, d) -> the (n_blocks*d, n_blocks*d) block-diagonal matrix."""
+    n_blocks, d, _ = blocks.shape
+    out = np.zeros((n_blocks * d, n_blocks * d))
+    for b in range(n_blocks):
+        out[b * d:(b + 1) * d, b * d:(b + 1) * d] = blocks[b]
+    return out
+
 
 def make_companion_from_lags(A_lags):
     """

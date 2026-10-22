@@ -7,18 +7,23 @@ import numpy as np
 from nlgc.config import ModelConfig
 import jax.numpy as jnp
 import dataclasses
+import matplotlib
+matplotlib.use("Agg")  # plt.show() would otherwise block a local run
 import matplotlib.pyplot as plt
 import time
 import jax
 import copy
 jax.config.update("jax_enable_x64", True)
 
+# em_blas iterations for the tests that drive it directly; the config no longer
+# carries a warm-up count since em_blas / em_jax were merged into solve_params
+N_WARMUP_ITER = 25
+
 def make_initial_em_state(ssm, order=1, n_orients=1, max_iter=500,
-                          n_warmup_iter=25):
-    # em_iter accumulates across BOTH phases of solve_params (em_blas for
-    # n_warmup_iter, then em_jax for max_iter), and a state can be re-fit, so the
-    # trajectory needs room for their sum -- em_blas indexes it unguarded.
-    # See nlgc/utils/initialize.py, which sizes it the same way.
+                          n_warmup_iter=N_WARMUP_ITER):
+    # solve_params resizes the trajectory to max_iter + 1 itself, but the tests
+    # that call em_blas directly (and may re-fit a state) rely on this sizing --
+    # em_blas indexes it unguarded.
     n_ll = n_warmup_iter + max_iter + 1
     em_state = EMState(
         A = np.zeros_like(ssm.A),
@@ -40,6 +45,10 @@ def make_initial_em_state(ssm, order=1, n_orients=1, max_iter=500,
     em_state.A = A
     em_state.Q = Q
     em_state.N_sources_upper = m
+    # the Q prior needs a scale and a per-unit profile; nlgc_map_opt uses a flat
+    # profile when it has no leadfield singular values, and q_val sets q_base
+    em_state.Q_prior_scales = np.ones((m, 1))
+    em_state.q_val = 0.01
 
     return em_state
 
@@ -53,7 +62,7 @@ def test_em_recovers_A():
     lambda_ = 0.1
 
     final_state, _ = em_blas(ssm.y, ssm.F, ssm.R, em_state, config, lambda_, 
-                             config.optimizer.n_warmup_iter)
+                             N_WARMUP_ITER)
     
     A_est = final_state.A
     A_true = ssm.A
@@ -95,7 +104,7 @@ def test_em_recovers_Q():
     em_state = make_initial_em_state(ssm)
 
     final_state, _ = em_blas(ssm.y, ssm.F, ssm.R, em_state, config, lambda_=0.0,
-                             N_iter=config.optimizer.n_warmup_iter)
+                             N_iter=N_WARMUP_ITER)
 
     Q_est = final_state.Q
     Q_true = ssm.Q
@@ -130,14 +139,13 @@ def test_em_jax_matches_blas():
     ssm = gen_small_ssm(T=1000)
 
     # do 2 blas iterations for jax stability 
-    config = ModelConfig.from_legacy_kwargs({"order": 1, 
-                                             'n_warmup_iter':2}) 
+    config = ModelConfig.from_legacy_kwargs({"order": 1})
 
     em_state_blas = make_initial_em_state(ssm)
 
     intermediate_state_blas, _ = em_blas(ssm.y, ssm.F, ssm.R, em_state_blas, 
                                   config, lambda_=0.0, 
-                                  N_iter=config.optimizer.n_warmup_iter)
+                                  N_iter=2)
     
     
     # do 25 blas iterations (default) for final
@@ -150,12 +158,12 @@ def test_em_jax_matches_blas():
                                     jnp.array(ssm.R), 
                                     em_state_jax, 
                                     config, lambda_=0.0, 
-                                    N_iter=config.optimizer.n_warmup_iter)
+                                    N_iter=N_WARMUP_ITER)
     
     final_state_blas, _ = em_blas(ssm.y, ssm.F, ssm.R, 
                                          intermediate_state_blas, 
                                          config, lambda_=0.0,
-                                         N_iter=config.optimizer.n_warmup_iter)
+                                         N_iter=N_WARMUP_ITER)
 
     np.testing.assert_allclose(
         final_state_jax.A,
@@ -179,17 +187,14 @@ def test_em_likelihood_increases():
 
     for _ in range(10):
         # force one iteration at a time for evaluation
-        config = ModelConfig.from_legacy_kwargs({
-            "order": 1,
-            "n_warmup_iter": 1,
-        })
-
+        config = ModelConfig.from_legacy_kwargs({"order": 1})
 
         em_state, _ = em_blas(ssm.y, ssm.F, ssm.R, em_state, config, 
-                              lambda_=0.0, 
-                              N_iter=config.optimizer.n_warmup_iter)
+                              lambda_=0.0, N_iter=1)
 
-        likelihoods.append(em_state.log_likelihood[-1])
+        # em_blas writes slot em_iter + 1 and then advances em_iter to it; the
+        # last slot of the array is never written in 10 iterations
+        likelihoods.append(em_state.log_likelihood[em_state.em_iter])
 
     likelihoods = np.asarray(likelihoods)
     assert np.all(
@@ -203,21 +208,16 @@ def test_em_likelihood_increases():
 def test_em_lambda_controls_sparsity():
     ssm = gen_small_ssm(T=1000)
 
-    config = ModelConfig.from_legacy_kwargs({
-        "order":1,
-        "n_warmup_iter":50,
-    })
+    config = ModelConfig.from_legacy_kwargs({"order":1})
 
     em_state0 = make_initial_em_state(ssm)
     em_state1 = make_initial_em_state(ssm)
 
     no_penalty_state, _ = em_blas(ssm.y, ssm.F, ssm.R, em_state0, config, 
-                                  lambda_=0.0, 
-                                  N_iter=config.optimizer.n_warmup_iter)
+                                  lambda_=0.0, N_iter=50)
 
     sparse_state, _ = em_blas(ssm.y, ssm.F, ssm.R, em_state1, config, 
-                              lambda_=1.0,
-                              N_iter=config.optimizer.n_warmup_iter)
+                              lambda_=1.0, N_iter=50)
 
     assert np.linalg.norm(sparse_state.A) < np.linalg.norm(no_penalty_state.A)
     print(f"sparse A norm {np.linalg.norm(sparse_state.A):.3f} < "
@@ -237,13 +237,10 @@ def test_em_A_mask_enforced():
         A_mask=A_mask,
     )
 
-    config = ModelConfig.from_legacy_kwargs({
-        "order":1,
-        "n_warmup_iter":30,
-    })
+    config = ModelConfig.from_legacy_kwargs({"order":1})
 
     result, _ = em_blas(ssm.y, ssm.F, ssm.R, em_state, config, lambda_=0.0, 
-                        N_iter=config.optimizer.n_warmup_iter)
+                        N_iter=30)
 
     assert result.A[0,0] == 0.0
 
@@ -255,8 +252,7 @@ def test_em_stable():
     em_state = make_initial_em_state(ssm)
     lambda_ = 0.1
 
-    result, _ = solve_params(ssm.y, ssm.F, ssm.R, em_state, config, lambda_, 
-                             zeroed_index=None)
+    result, _ = solve_params(ssm.y, ssm.F, ssm.R, em_state, config, lambda_)
 
     assert np.all(np.isfinite(result.A))
     assert np.all(np.isfinite(result.Q))
@@ -294,7 +290,7 @@ def test_em_var3_scalar():
     lambda_ = 0.1
 
     final_em_state, _ = solve_params(ssm.y, ssm.F, ssm.R, em_state, config, 
-                                     lambda_, zeroed_index=None)
+                                     lambda_)
     
     A_est = final_em_state.A
     A_true = ssm.A
@@ -375,14 +371,13 @@ def test_em_var_vector(
             "n_orients": n_orients,
             "verbose": True,
             "tol": 1e-5,
-            "A_tol": 5e-3,
         }
     )
 
     start = time.perf_counter()
 
     final_em_state, _ = solve_params(ssm.y, ssm.F, ssm.R, em_state, config, 
-                                     lambda_, zeroed_index=None)
+                                     lambda_)
 
     jax.block_until_ready(final_em_state.A)
     em_time = time.perf_counter() - start
@@ -584,7 +579,6 @@ def test_profile_em_blas_vs_jax(
             "n_orients": n_orients,
             "verbose": False,
             "tol": 1e-5,
-            "A_tol": 5e-3,
         }
     )
 
@@ -605,7 +599,7 @@ def test_profile_em_blas_vs_jax(
         em_blas_state,
         config,
         lambda_,
-        config.optimizer.n_warmup_iter,
+        N_WARMUP_ITER,
     )
 
     blas_time = time.perf_counter() - t0

@@ -10,6 +10,7 @@ from .utils.leadfield import prepare_eigenmodes
 from .utils.runlog import tee_output
 from .utils.transforms import surface_ico4_to_surface_eigs
 from .config import ModelConfig, to_legacy_kwargs
+import pathlib
 from .utils.initialize import initialize_em_state
 from mne.minimum_norm import apply_inverse, make_inverse_operator, InverseOperator
 from mne.source_space import SourceSpaces
@@ -455,26 +456,48 @@ def _plot_deviance_pages(report, model):
         plt.close()
 
 
-def _plot_q_pages(report, Q_true, Q_hat):
+def _mean_block_corr(Q, block_size):
+    """mean |off-diagonal correlation| inside each (block_size x block_size)
+    diagonal block of Q, one value per block."""
+    n_blocks = Q.shape[0] // block_size
+    out = np.zeros(n_blocks)
+    off = ~np.eye(block_size, dtype=bool)
+    for b in range(n_blocks):
+        B = Q[b * block_size:(b + 1) * block_size, b * block_size:(b + 1) * block_size]
+        sd = np.sqrt(np.maximum(np.diag(B), 1e-300))
+        out[b] = np.abs(B / np.outer(sd, sd))[off].mean()
+    return out
+
+
+def _plot_q_pages(report, Q_true, Q_hat, block_size=None):
     """Ground-truth vs fitted process-noise covariance Q.
 
     Q is diagonal-dominant, so besides the two matrices on one symmetric color
     scale there is a page of the diagonals and one of the within-block (d x d)
-    correlation, where mle / iw / lkj actually differ.
+    correlation, where mle / iw / lkj actually differ. When the fit has a
+    different state dimension than the ground truth (fit n_orients !=
+    gen_n_orients) only the two matrices are drawn, each on its own scale.
     """
     style = report.style
     Q_true = np.asarray(Q_true)
     Q_hat = np.asarray(Q_hat)
-    lim = max(np.abs(Q_true).max(), np.abs(Q_hat).max())
+    same_shape = Q_true.shape == Q_hat.shape
+    shared_lim = max(np.abs(Q_true).max(), np.abs(Q_hat).max())
 
     for Q, column, title in ((Q_true, 'Ground truth', 'Ground Truth Q'),
                              (Q_hat, 'Derived', 'Derived Model Q')):
+        lim = shared_lim if same_shape else np.abs(Q).max()
         fig = plt.figure(figsize=style['fig_size'])
         plt.imshow(Q, cmap='seismic', vmin=-lim, vmax=lim)
         plt.colorbar()
         plt.title(title, fontsize=style['title'])
         _report_savefig(report, fig, group='Process noise Q', column=column)
         plt.close()
+
+    if not same_shape:
+        print('skipping the Q diagonal / block correlation comparison: ground '
+              'truth and fit have different state dimensions')
+        return
 
     fig = plt.figure(figsize=style['fig_size'])
     plt.plot(np.diag(Q_true), label='Ground truth')
@@ -483,6 +506,21 @@ def _plot_q_pages(report, Q_true, Q_hat):
     plt.xlabel('state index')
     plt.title('Diagonal of Q', fontsize=style['title'])
     _report_savefig(report, fig, group='Process noise Q', column='Diagonal')
+    plt.close()
+
+    if block_size is None or block_size < 2 or Q_true.shape[0] % block_size:
+        return
+
+    fig = plt.figure(figsize=style['fig_size'])
+    plt.plot(_mean_block_corr(Q_true, block_size), 'o-', label='Ground truth')
+    plt.plot(_mean_block_corr(Q_hat, block_size), 'o-', label='Derived')
+    plt.ylim(0, 1)
+    plt.legend(fontsize=style['title'])
+    plt.xlabel('source (block) index')
+    plt.ylabel('mean |within-block correlation|')
+    plt.title('Within-block correlation of Q', fontsize=style['title'])
+    _report_savefig(report, fig, group='Process noise Q',
+                    column='Block correlation')
     plt.close()
 
 
@@ -592,7 +630,9 @@ def save_info(dir, a, JG, model, order, param_dict, ggc_model = None, J_GGC = No
                   'have different state dimensions')
 
         if Q_true is not None:
-            _plot_q_pages(report, Q_true, model._model_f[0]._parameters[2])
+            _plot_q_pages(report, Q_true, model._model_f[0]._parameters[2],
+                          block_size=param_dict.get('leadfield', {})
+                                                .get('block_size'))
 
     finally:
         # runs even if a figure raised, so a partial report survives
@@ -607,7 +647,8 @@ def save_info(dir, a, JG, model, order, param_dict, ggc_model = None, J_GGC = No
     # the sidecar only exists when the model carries a forward
     forward_path = _forward_path(model_path)
     has_forward = os.path.exists(forward_path)
-
+    with open(dir + 'model.pkl', 'wb') as file:
+        pickle.dump(model, file)
     with open(A_path, 'wb') as file:
         pickle.dump(a, file)
     with open(JG_path, 'wb') as file:
@@ -699,93 +740,196 @@ a: ground truth a matrix which VAR model is trying to estimate, contains GC link
     
 # Assume folder setup follows eelbrain pipeline
 def lead_field_generation(root, subject_id, src_space, n_eigenmodes, n_orients, loose=0.0, depth=0.0, pca=True, rank=None, trans = None,
-                          vol_pos_origin=5.0, vol_pos_target=18.0):
-    
+                          vol_pos_origin=5.0, vol_pos_target=18.0, lf_source='build',
+                          megdir=None, mridir=None, session='resting',
+                          pipeline_band='4-8Hz', trial=0, cov_eig_thr=1e-30):
+    """Whitened, eigenmode-reduced leadfield for a real subject.
+
+    Returns (G, info, noise_cov, fwd, weights, rank, singular_values), where
+    rank is the one actually used.
+
+    lf_source : {'build', 'pipeline'}
+        'build' makes the source spaces and forward from the subject's BEM and
+        the empty-room noise covariance under root (the eelbrain layout).
+        'pipeline' reads what nlgc_pipeline already wrote, exactly as
+        analysis/resting/test_nlgc.py does, so a sim sees the same leadfield as
+        a real fit.
+    megdir, mridir : str | Path | None
+        pipeline only; default root/'meg' and root/'mri'.
+    session, pipeline_band, trial
+        pipeline only; select the cov, evoked and forward files.
+    cov_eig_thr : float
+        pipeline only, used when rank is None: the rank is the number of noise
+        covariance eigenvalues above this.
+
+    src_space picks the origin / target spaces: 'surf' = ico4 / ico1,
+    'vol' = vol5 / vol18 (vol_pos_* when building), 'vol-surf' = vol5 / ico1,
+    'mixed' (build only) = ico4 + vol / vol.
+    """
+    if lf_source == 'build':
+        info, noise_cov, fwd, labels = _build_forward(
+            root, subject_id, src_space, trans, vol_pos_origin, vol_pos_target)
+        if rank is None:
+            # int(): matrix_rank returns numpy.int64, which _triage_rank rejects
+            rank = int(np.linalg.matrix_rank(fwd['sol']['data']))
+    elif lf_source == 'pipeline':
+        megdir = pathlib.Path(root, 'meg') if megdir is None else pathlib.Path(megdir)
+        mridir = pathlib.Path(root, 'mri') if mridir is None else pathlib.Path(mridir)
+        info, noise_cov, fwd, labels = _load_pipeline_forward(
+            subject_id, src_space, megdir, mridir, session, pipeline_band, trial)
+        if rank is None:
+            rank = _cov_rank(noise_cov, cov_eig_thr)
+    else:
+        raise ValueError(
+            f"lf_source must be 'build' or 'pipeline', got {lf_source!r}")
+    print(f'rank: {rank}')
+
+    weights, G, label_vertidx, label_names, gain_info, whitener, singular_values = prepare_eigenmodes(info = info, forward = fwd, noise_cov = noise_cov, labels = labels, rank = rank, n_eigenmodes=n_eigenmodes, n_orients = n_orients, loose=loose, depth=depth, pca=pca, mode='svd_flip')
+    print(f'G shape: {G.shape}')
+    return G, info, noise_cov, fwd, weights, rank, singular_values
+
+
+def _volume_bounds(bem_folder, subject_id):
+    """Boundary for setup_volume_source_space.
+
+    inner_skull.surf is watershed output and is not always present; the BEM
+    surfaces carry the same boundary, so fall back to those when it is missing.
+    """
+    inner_skull_surf = bem_folder + 'inner_skull.surf'
+    if os.path.exists(inner_skull_surf):
+        return dict(surface=inner_skull_surf)
+    bem_file = bem_folder + subject_id + "-inner_skull-bem.fif"
+    if not os.path.exists(bem_file):
+        raise FileNotFoundError(
+            f'Need either {inner_skull_surf} or {bem_file} to bound the '
+            f'volume source space')
+    print(f'inner_skull.surf not found, bounding volume with {bem_file}')
+    return dict(bem=bem_file)
+
+
+def _to_fixed_surf_ori(fwd):
+    # align dipoles to cortical surface normals, 1 orientation per source
+    return mne.convert_forward_solution(fwd, surf_ori=True, force_fixed=True,
+                                        use_cps=True)
+
+
+def _build_forward(root, subject_id, src_space, trans, vol_pos_origin,
+                   vol_pos_target):
+    """(info, noise_cov, fwd_origin, target source space) built from the BEM."""
     full_empty_room_path = root + "/meg/" + subject_id + "/" + subject_id + "_emptyroom-raw.fif"
     raw_empty_room = mne.io.read_raw_fif(full_empty_room_path)
     info = raw_empty_room.info
     noise_cov = mne.compute_raw_covariance(raw_empty_room, tmin=0, tmax=None)
-    if trans == None:
-        expected_trans_file= root + "/meg/" + subject_id + "/" + subject_id + "-trans.fif"
-        if (os.path.exists(expected_trans_file)):
+    if trans is None:
+        expected_trans_file = root + "/meg/" + subject_id + "/" + subject_id + "-trans.fif"
+        if os.path.exists(expected_trans_file):
             print(" trans file found")
             trans_file = expected_trans_file
-        else: 
+        else:
             print("No trans file provided using mne fsaverage instead")
             trans_file = "fsaverage"
     else:
         trans_file = trans
-    bem_folder= root + "/mri/" + subject_id + "/bem/"
-    print(bem_folder)
+    bem_folder = root + "/mri/" + subject_id + "/bem/"
+    bem_sol = bem_folder + subject_id + "-inner_skull-bem-sol.fif"
     subjects_dir = root + "/mri/"
+    print(bem_folder)
     print(src_space)
+
+    def fwd_for(src, **kw):
+        return mne.make_forward_solution(info=info, trans=trans_file, src=src,
+                                         bem=bem_sol, **kw)
+
     if src_space == 'surf':
-        fwd_origin = mne.make_forward_solution(info, trans_file, src = bem_folder + subject_id + "-ico-4-src.fif",
-                                            bem = bem_folder + subject_id  + "-inner_skull-bem-sol.fif")
-        fwd_target = mne.make_forward_solution(info, trans_file, src = bem_folder + subject_id  + "-ico-1-src.fif",
-                                            bem = bem_folder + subject_id + "-inner_skull-bem-sol.fif")
-        fwd_origin = mne.convert_forward_solution(
-            fwd_origin,
-            surf_ori=True,      # align dipoles to cortical surface normals
-            force_fixed=True,   # reduce to 1 orientation per source (fixed)
-            use_cps=True
-        )
-        fwd_target = mne.convert_forward_solution(
-            fwd_target,
-            surf_ori=True,      # align dipoles to cortical surface normals
-            force_fixed=True,   # reduce to 1 orientation per source (fixed)
-            use_cps=True
-        )
-    elif src_space == 'vol' or src_space == 'mixed':
-        # inner_skull.surf is watershed output and is not always present; the BEM
-        # surfaces carry the same boundary, so fall back to those when it is missing.
-        inner_skull_surf = bem_folder + 'inner_skull.surf'
-        if os.path.exists(inner_skull_surf):
-            vol_bounds = dict(surface=inner_skull_surf)
-        else:
-            bem_file = bem_folder + subject_id + "-inner_skull-bem.fif"
-            if not os.path.exists(bem_file):
-                raise FileNotFoundError(
-                    f'Need either {inner_skull_surf} or {bem_file} to bound the '
-                    f'volume source space')
-            print(f'inner_skull.surf not found, bounding volume with {bem_file}')
-            vol_bounds = dict(bem=bem_file)
+        fwd_origin = _to_fixed_surf_ori(fwd_for(bem_folder + subject_id + "-ico-4-src.fif"))
+        fwd_target = _to_fixed_surf_ori(fwd_for(bem_folder + subject_id + "-ico-1-src.fif"))
+    elif src_space in ('vol', 'mixed', 'vol-surf'):
+        vol_bounds = _volume_bounds(bem_folder, subject_id)
         src_origin = mne.setup_volume_source_space(subject = subject_id, pos = vol_pos_origin, subjects_dir = subjects_dir, **vol_bounds)
-        src_target = mne.setup_volume_source_space(subject = subject_id, pos = vol_pos_target, subjects_dir = subjects_dir, **vol_bounds)
+        if src_space == 'vol-surf':
+            src_target = mne.setup_source_space(subject = subject_id, spacing = 'ico1', surface = 'white', subjects_dir = subjects_dir, add_dist = 'patch', verbose = None)
+        else:
+            src_target = mne.setup_volume_source_space(subject = subject_id, pos = vol_pos_target, subjects_dir = subjects_dir, **vol_bounds)
         if src_space == 'mixed':
             surf_src = mne.setup_source_space(subject = subject_id, spacing = 'ico4', surface = 'white', subjects_dir = subjects_dir, add_dist = 'patch', verbose = None)
             src_origin = surf_src + src_origin
-    
-        fwd_origin = mne.make_forward_solution(info = info, trans = trans_file, src = src_origin, bem = bem_folder + subject_id + "-inner_skull-bem-sol.fif", ignore_ref = True)
-        fwd_target = mne.make_forward_solution(info = info, trans = trans_file, src = src_target, bem = bem_folder + subject_id + "-inner_skull-bem-sol.fif", ignore_ref = True)
-    elif src_space == 'vol-surf':
-        inner_skull_surf = bem_folder + 'inner_skull.surf'
-        if os.path.exists(inner_skull_surf):
-            vol_bounds = dict(surface=inner_skull_surf)
-        else:
-            bem_file = bem_folder + subject_id + "-inner_skull-bem.fif"
-            if not os.path.exists(bem_file):
-                raise FileNotFoundError(
-                    f'Need either {inner_skull_surf} or {bem_file} to bound the '
-                    f'volume source space')
-            print(f'inner_skull.surf not found, bounding volume with {bem_file}')
-            vol_bounds = dict(bem=bem_file)
-        src_origin = mne.setup_volume_source_space(subject = subject_id, pos = vol_pos_origin, subjects_dir = subjects_dir, **vol_bounds)
-        src_target = mne.setup_source_space(subject = subject_id, spacing = 'ico1', surface = 'white', subjects_dir = subjects_dir, add_dist = 'patch', verbose = None)
-        fwd_origin = mne.make_forward_solution(info = info, trans = trans_file, src = src_origin, bem = bem_folder + subject_id + "-inner_skull-bem-sol.fif", ignore_ref = True)
-        fwd_target = mne.make_forward_solution(info = info, trans = trans_file, src = src_target, bem = bem_folder + subject_id + "-inner_skull-bem-sol.fif", ignore_ref = True)
-    # fwd_origin_data = fwd_origin['sol']
-    if rank == None:
-        # int(): matrix_rank returns numpy.int64, which _triage_rank rejects
-        rank_fwd_origin = int(np.linalg.matrix_rank(fwd_origin['sol']['data']))
-        print(type(rank_fwd_origin))
+        fwd_origin = fwd_for(src_origin, ignore_ref=True)
+        fwd_target = fwd_for(src_target, ignore_ref=True)
     else:
-        rank_fwd_origin = rank
-    print(type(rank_fwd_origin))
-    weights, G, label_vertidx, label_names, gain_info, whitener, singular_values = prepare_eigenmodes(info = info, forward = fwd_origin, noise_cov = noise_cov, labels = fwd_target['src'], rank = rank_fwd_origin, n_eigenmodes=n_eigenmodes, n_orients = n_orients, loose=loose, depth=depth, pca=pca, mode='svd_flip')
-    print(f'G shape: {G.shape}')
-    return G, info, noise_cov, fwd_origin, weights, rank, singular_values
+        raise ValueError(f'src_space {src_space} not implemented')
+    # the target's src from its forward, which puts it in head coordinates
+    return info, noise_cov, fwd_origin, fwd_target['src']
 
+
+# src_space -> (origin, target) source spaces as nlgc_pipeline names them
+_PIPELINE_SPACES = {'vol-surf': ('vol5', 'ico1'),
+                    'surf': ('ico4', 'ico1'),
+                    'vol': ('vol5', 'vol18')}
+
+
+def _require(path, made_by):
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f'{path} not found; it is made by nlgc_pipeline {made_by} '
+            f'(see analysis/resting/test_pipe.py)')
+    return path
+
+
+def _read_sidecar(fif_path, suffix):
+    """the 64-bit data nlgc_pipeline stores next to a fif, or None."""
+    sidecar = str(fif_path).replace(suffix, suffix[:-4] + '-sidecar.npy')
+    return np.load(sidecar) if os.path.exists(sidecar) else None
+
+
+def _load_pipeline_forward(subject_id, src_space, megdir, mridir, session, band,
+                           trial):
+    """(info, noise_cov, fwd_origin, target source space) from nlgc_pipeline
+    outputs, read the way analysis/resting/test_nlgc.py reads them."""
+    if src_space not in _PIPELINE_SPACES:
+        raise ValueError(
+            f"src_space {src_space!r} has no nlgc_pipeline equivalent; use one "
+            f"of {sorted(_PIPELINE_SPACES)} or lf_source='build'")
+    origin, target = _PIPELINE_SPACES[src_space]
+    sub = subject_id
+    bem = mridir / sub / 'bem'
+
+    cov_fname = _require(megdir / sub / f"{sub}-[{band}]-cov.fif", 'make_cov')
+    evo_fname = _require(
+        megdir / sub / f"{sub}_{session}-[trial={trial}]-[{band}]-evoked-ave.fif",
+        'make_evoked')
+    fwd_fname = _require(bem / f"{sub}_{session}-[src={origin}]-solution-fwd.fif",
+                         f'make_fwd(space="{origin}")')
+    src_fname = _require(bem / f"{sub}-{target}-src.fif",
+                         f'make_src(space="{target}")')
+
+    noise_cov = mne.read_cov(cov_fname)
+    cov_data = _read_sidecar(cov_fname, '-cov.fif')
+    if cov_data is not None:
+        noise_cov['data'] = cov_data
+
+    fwd = mne.read_forward_solution(fwd_fname)
+    fwd_data = _read_sidecar(fwd_fname, '-fwd.fif')
+    if fwd_data is not None:
+        fwd['sol']['data'] = fwd_data
+    if src_space == 'surf':
+        fwd = _to_fixed_surf_ori(fwd)
+
+    # only the channel info is needed from the evoked
+    info = mne.read_evokeds(evo_fname)[0].info
+    labels = mne.read_source_spaces(src_fname)
+    return info, noise_cov, fwd, labels
+
+
+def _cov_rank(noise_cov, thr):
+    """rank of the noise covariance: eigenvalues above thr (test_nlgc.py's rule;
+    1e-30 suits alpha, beta needs about 1e-28)."""
+    eigvals = np.linalg.eigvalsh(noise_cov['data'])
+    rank = int((eigvals >= thr).sum())
+    if rank <= 100:
+        raise ValueError(
+            f'noise covariance rank {rank} at threshold {thr} looks wrong '
+            f'(expected > 100); check cov_eig_thr')
+    return rank
 
 
 def _voxel_block(v, n_orient=3):
@@ -868,7 +1012,19 @@ def _voxel_mode_block(v, n_eigenmodes, n_orients=3):
 
 def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes = 2, G=None, p=2, t=500, n_active_voxels=10, n_links=10, target_spec_rad=0.9, coupling_mode="mixed",
     process_noise_active=0.1, process_noise_inactive=0.001, measurement_noise_scale=1e2, plot_psd=False, n_orients=3, verbose=False,
-    n_sensors=None, n_voxels=None):
+    n_sensors=None, n_voxels=None, q_within_corr=0.0, q_log_sd=0.0):
+    """Volume ground-truth VAR(p) simulation, n_orients units per voxel.
+
+    q_within_corr, q_log_sd : float
+        Correlated / unequal innovations within each active voxel's
+        n_orients block; see ssm_gen.make_block_q. Both 0 (default) gives the
+        original process_noise_active * I, and turning them on does not move
+        A, the links or the noise draws. Inactive voxels stay isotropic.
+
+    Returns f, y, x, r_cov, p, JG, pow_actives, a, q -- q is the true
+    innovation covariance (m x m).
+    """
+    from .test.ssm_gen import make_block_q
 
     if p < 1:
         raise ValueError("p should be at least 1")
@@ -929,11 +1085,16 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
     if verbose:
         print(f"Active (voxel, eigenmode) units: {active_voxels}")
 
+    # one block per active unit, from its own rng so the main stream is untouched
+    q_active = make_block_q(n_active_voxels, n_orients, process_noise_active,
+                            within_corr=q_within_corr, log_sd=q_log_sd,
+                            rng=np.random.default_rng([seed, 1]))
+
     if band == "wide":
-        for v in active_voxels:
+        for v, q_block in zip(active_voxels, q_active):
             block = _voxel_block(v, n_orients)
 
-            q[block, block] = process_noise_active * np.eye(n_orients)
+            q[block, block] = q_block
 
             # Independent AR(1)-style self-history for R/A/S
             a[0, block, block] = target_spec_rad * np.eye(n_orients)
@@ -951,10 +1112,10 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
 
         f_low, f_high = band_dict[band]
 
-        for v in active_voxels:
+        for v, q_block in zip(active_voxels, q_active):
             block = _voxel_block(v, n_orients)
 
-            q[block, block] = process_noise_active * np.eye(n_orients) # Look into making this randn but make sure that the array is positive definite and symmetric
+            q[block, block] = q_block
 
             f0 = rng.uniform(f_low, f_high)
             w0 = 2 * np.pi * f0 / fs
@@ -1056,7 +1217,7 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
         for comp in range(x.shape[1]):
             plt.psd(x[:, comp], Fs=fs)
         plt.title("Source/RAS component PSDs")
-        plt.show()
+        # plt.show()
 
     pow_actives = [np.mean(x[:, i] ** 2) for i in range(m)]
 
@@ -1081,7 +1242,7 @@ def vol_data_generation(seed=0, band="wide", fs=50, natures="all", n_eigenmodes 
     y += noise / np.sqrt(multiplier)
     r_cov = 1 / multiplier
 
-    return f, y, x, r_cov, p, JG, pow_actives, a
+    return f, y, x, r_cov, p, JG, pow_actives, a, q
 
 
 # n_sensors/n_patches go LAST: this is called positionally from run_GT_sim, so
@@ -1220,7 +1381,7 @@ def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2,
     print('band', band, x.shape)
     for i in range(x.T.shape[0]):
         plt.psd(x.T[i], Fs=fs)
-    plt.show()
+    # plt.show()
     
     pow_actives = []
     for i in range(m):
@@ -1255,7 +1416,8 @@ def data_generation(seed=0, band='wide', fs=50, natures='all', n_eigenmodes = 2,
     y += noise / np.sqrt(multiplier)
     r_cov = 1 / multiplier
 
-    return f, y, x, r_cov, p, JG, pow_actives, a
+    # q is the true innovation covariance, for the report's Q pages
+    return f, y, x, r_cov, p, JG, pow_actives, a, q
 
 
 '''
@@ -1451,7 +1613,21 @@ def _run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0,
         a_init = None, save_dir = None, run_ggc = False, ggc_kwargs = None,
         vol_pos_origin = 5.0, vol_pos_target = 18.0, debug_report = False,
         obsidian_report = False, n_sensors = None, n_sources = None,
-        config = None, gen_n_orients = None, **kwargs):
+        config = None, gen_n_orients = None, lf_kwargs = None,
+        q_within_corr = 0.0, q_log_sd = 0.0, **kwargs):
+    """Simulate ground-truth data (data_generation on 'surf', else
+    vol_data_generation), fit it with nlgc_map_opt and, with save_dir, write the
+    model-comparison report. Unrecognized keyword arguments go to ModelConfig.
+
+    lf_kwargs : dict | None
+        Extra lead_field_generation arguments for every leadfield this run
+        builds, e.g. dict(lf_source='pipeline', megdir=..., mridir=...,
+        pipeline_band='4-8Hz') to use the nlgc_pipeline outputs.
+    q_within_corr, q_log_sd : float
+        Correlated / unequal innovations within each active source; volume
+        spaces only (vol_data_generation). Both 0 keeps the diagonal true Q.
+    """
+    lf_kwargs = {} if lf_kwargs is None else dict(lf_kwargs)
 
     # everything that is not simulation setup is model configuration and goes
     # through ModelConfig, as in nlgc_map. alpha stays named: here it is the
@@ -1512,7 +1688,8 @@ def _run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0,
             root=root, subject_id=subject_id, src_space=src_space,
             n_eigenmodes=n_eigenmodes, n_orients=gen_n_orients, loose=loose,
             depth=depth, pca=pca, rank=rank, trans=trans,
-            vol_pos_origin=vol_pos_origin, vol_pos_target=vol_pos_target)
+            vol_pos_origin=vol_pos_origin, vol_pos_target=vol_pos_target,
+            **lf_kwargs)
     elif (type(lf) != type(None)):
         print('Using passed in lead field')
         G = lf
@@ -1523,16 +1700,20 @@ def _run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0,
     if src_space == 'surf':
         # keyword form: the positional call silently shifted arguments once the
         # signature grew, which is the bug already recorded at lead_field_generation
-        f, y, x, r_cov, p, JG, pow_actives, a = data_generation(
+        if q_within_corr or q_log_sd:
+            raise ValueError('q_within_corr / q_log_sd need a volume src_space; '
+                             'data_generation has one unit per source')
+        f, y, x, r_cov, p, JG, pow_actives, a, q_true = data_generation(
             seed = seed, band = band, fs = fs, natures = natures,
             n_eigenmodes = n_eigenmodes, G = G, p = order, t = t,
             m_active = m_active, n_links = n_links,
             target_spec_rad = target_spec_rad,
             n_sensors = n_sensors, n_patches = n_sources)
     else:
-        f, y, x, r_cov, p, JG, pow_actives, a = vol_data_generation(seed = seed, band = band, fs = fs, natures = natures, n_eigenmodes = n_eigenmodes, G = G, p = order, t = t
+        f, y, x, r_cov, p, JG, pow_actives, a, q_true = vol_data_generation(seed = seed, band = band, fs = fs, natures = natures, n_eigenmodes = n_eigenmodes, G = G, p = order, t = t
                                                                     ,n_active_voxels = m_active, n_links = n_links, target_spec_rad = target_spec_rad, n_orients = gen_n_orients,
-                                                                    verbose = verbose, n_sensors = n_sensors, n_voxels = n_sources)
+                                                                    verbose = verbose, n_sensors = n_sensors, n_voxels = n_sources,
+                                                                    q_within_corr = q_within_corr, q_log_sd = q_log_sd)
 
     # captured before the diff_lf branch below can reassign f
     gen_lf_shape = tuple(int(v) for v in f.shape)
@@ -1542,7 +1723,7 @@ def _run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0,
         print(f"Completed data gen; {int(JG.sum())} ground truth links "
               f"across {JG.shape[0]} ROIs")
         plt.imshow(JG)
-        plt.show()
+        # plt.show()
         print('Start nlgc_map_opt')
 
     stc_init = None
@@ -1582,7 +1763,8 @@ def _run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0,
             root=root, subject_id=subject_id, src_space=src_space,
             n_eigenmodes=n_eigenmodes, n_orients=n_orients, loose=loose,
             depth=depth, pca=pca, rank=rank, trans=trans,
-            vol_pos_origin=vol_pos_origin, vol_pos_target=vol_pos_target)
+            vol_pos_origin=vol_pos_origin, vol_pos_target=vol_pos_target,
+            **lf_kwargs)
         print(f'Creating diff lf; shape of second lead field: {f.shape}')
     start_time = time.time()
     if run_ggc == False or (run_ggc and ggc_kwargs != None and ggc_kwargs['model_params'] == None):
@@ -1619,6 +1801,8 @@ def _run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0,
             'm_active': m_active,
             'n_links': n_links,
             'target_spec_rad': target_spec_rad,
+            'q_within_corr': q_within_corr,
+            'q_log_sd': q_log_sd,
         }
 
         ggc_dict = {
@@ -1638,6 +1822,7 @@ def _run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0,
             'trans': trans,
             'vol_pos_origin': vol_pos_origin,
             'vol_pos_target': vol_pos_target,
+            **lf_kwargs,
         }
 
         # dimensions of the leadfield actually used, as opposed to the ones
@@ -1689,23 +1874,23 @@ def _run_GT_sim(lead_field_gen = False, lf = None, src_space = 'surf', seed = 0,
                 'ggc_mt': ggc_mt,
             }
         if run_ggc:
-            save_info(dir = save_dir,a = a, JG = JG, model = temp_obj, order = order, param_dict = param_dict, ggc_model = ggc_obj, J_GGC = J_GGC, ggc_model_extras = ggc_model_extras, debug_report = debug_report, obsidian_report = obsidian_report)
+            save_info(dir = save_dir,a = a, JG = JG, model = temp_obj, order = order, param_dict = param_dict, ggc_model = ggc_obj, J_GGC = J_GGC, ggc_model_extras = ggc_model_extras, debug_report = debug_report, obsidian_report = obsidian_report, Q_true = q_true)
         else:
-            save_info(dir = save_dir,a = a, JG = JG, model = temp_obj, order = order, param_dict = param_dict, debug_report = debug_report, obsidian_report = obsidian_report)
+            save_info(dir = save_dir,a = a, JG = JG, model = temp_obj, order = order, param_dict = param_dict, debug_report = debug_report, obsidian_report = obsidian_report, Q_true = q_true)
 
 
 
     plt.imshow(JG)
-    plt.show()
+    # plt.show()
     plt.imshow(J)
-    plt.show()
+    # plt.show()
     a_concat = np.concatenate(a[:], axis = 1)
     plt.imshow(a_concat, cmap = 'seismic')
-    plt.show()
+    # plt.show()
     a_model = temp_obj._model_f[0]._parameters[0]
     a_model = np.concatenate(a_model[:], axis = 1)
     plt.imshow(a_model, cmap = 'seismic',)
-    plt.show()
+    # plt.show()
     return temp_obj
 
 
@@ -1726,12 +1911,14 @@ def _run_ssm_sim(lead_field_gen=True, src_space='vol-surf', seed=0, root=None, s
                  debug_report=False, obsidian_report=False, config=None,
                  leadfield=None, sparsity=0.25, self_decay=0.8,
                  cross_scale=0.1, q_scale=0.05, measurement_noise_scale=1e2,
-                 burnin=100, n_sensors=None, n_sources=None, **kwargs):
+                 burnin=100, n_sensors=None, n_sources=None, lf_kwargs=None,
+                 q_within_corr=0.0, q_log_sd=0.0, **kwargs):
     """Like _run_GT_sim, but the data come from ssm_gen.gen_sparse_var_ssm.
 
     The leadfield is the real one (lead_field_generation), so the number of
     sensors and sources is whatever that leadfield dictates. The true Q is
-    ssm_gen's q_scale * I. Returns the fitted NLGC object, with the true Q on
+    ssm_gen's q_scale * I, or block-correlated with q_within_corr / q_log_sd.
+    Returns the fitted NLGC object, with the true Q on
     `_Q_true`.
 
     leadfield : dict | None
@@ -1743,7 +1930,14 @@ def _run_ssm_sim(lead_field_gen=True, src_space='vol-surf', seed=0, root=None, s
         matrix of n_sensors x n_sources (plumbing checks only).
     burnin : int
         Samples generated and discarded, since ssm_gen starts at x = 0.
+    lf_kwargs : dict | None
+        Extra lead_field_generation arguments, merged into the default
+        leadfield dict, e.g. dict(lf_source='pipeline', megdir=..., mridir=...).
+    q_within_corr, q_log_sd : float
+        Correlated / unequal innovations within each source block; see
+        ssm_gen.make_block_q. Both 0 keeps the true Q = q_scale * I.
     """
+    lf_kwargs = {} if lf_kwargs is None else dict(lf_kwargs)
     from .test.ssm_gen import gen_sparse_var_ssm
 
     if config is None:
@@ -1762,13 +1956,15 @@ def _run_ssm_sim(lead_field_gen=True, src_space='vol-surf', seed=0, root=None, s
             root=root, subject_id=subject_id, src_space=src_space,
             loose=config.forward.loose, depth=config.forward.depth,
             pca=config.forward.pca, rank=config.forward.rank, trans=trans,
-            vol_pos_origin=vol_pos_origin, vol_pos_target=vol_pos_target)
+            vol_pos_origin=vol_pos_origin, vol_pos_target=vol_pos_target,
+            **lf_kwargs)
 
     ssm, A_lags, supports = gen_sparse_var_ssm(
         T=t + burnin, order=order, n_orients=n_orients,
         n_eigenmodes=n_eigenmodes, sparsity=sparsity, self_decay=self_decay,
         cross_scale=cross_scale, q_scale=q_scale, seed=seed,
         leadfield=leadfield, measurement_noise_scale=measurement_noise_scale,
+        q_within_corr=q_within_corr, q_log_sd=q_log_sd,
         **({} if lead_field_gen else dict(n_sensors=n_sensors,
                                           n_sources=n_sources)))
 
@@ -1816,12 +2012,14 @@ def _run_ssm_sim(lead_field_gen=True, src_space='vol-surf', seed=0, root=None, s
             't': t,
             'ssm_gen': dict(seed=seed, sparsity=sparsity,
                             self_decay=self_decay, cross_scale=cross_scale,
-                            q_scale=q_scale, burnin=burnin,
+                            q_scale=q_scale, q_within_corr=q_within_corr,
+                            q_log_sd=q_log_sd, burnin=burnin,
                             measurement_noise_scale=measurement_noise_scale),
             'lead_field_gen': dict(root_dir=root, subject_id=subject_id,
                                    trans=trans,
                                    vol_pos_origin=vol_pos_origin,
-                                   vol_pos_target=vol_pos_target),
+                                   vol_pos_target=vol_pos_target,
+                                   **lf_kwargs),
             'screening': {'alpha': alpha},
             'debug_report': debug_report,
             'obsidian_report': obsidian_report,

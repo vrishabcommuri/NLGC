@@ -354,12 +354,13 @@ def em_blas(y, F, R, em_state, config, lambda_, N_iter):
     """
 
     for _ in range(N_iter):
-        smoother_result = rts_smoother_blas(y, F, R, em_state, 
-                                            config.numerical.use_lapack)
+        # returns (em_state, smoother_result), like rts_smoother_jax
+        em_state, smoother_result = rts_smoother_blas(
+            y, F, R, em_state, config.numerical.use_lapack)
         curr_iter = em_state.em_iter
         prev_ll = em_state.log_likelihood[curr_iter]
 
-        em_state, rel_A_change = proximal_param_update(em_state, 
+        em_state, rel_A_change, _ = proximal_param_update(em_state,
                                                        smoother_result, 
                                                        config,
                                                        lambda_)
