@@ -18,12 +18,17 @@ import jax
 import jax.numpy as jnp
 from nlgc.opt import NeuraLVAR, create_shared_mem, link_share_memory
 from joblib import Parallel, delayed
+import multiprocessing
 from multiprocessing import current_process
 from mne.utils import logger
 from threadpoolctl import threadpool_limits
 from joblib import dump, load
 import tempfile
 import os
+import faulthandler
+from contextlib import ExitStack
+import shutil
+
 jax.config.update("jax_enable_x64", True)
                                          
 
@@ -172,9 +177,22 @@ def multiprocess_test_links(links_to_check, y, F, R, lambda_, em_state, config):
     nx = m // (eff_eigenmodes)
 
     em_state_warm, smoother_result_warm = rts_smoother_jax(y, F, R, em_state)
+
     fullmodel_log_likelihood = em_state_warm\
                                 .log_likelihood[em_state_warm.em_iter]
-    
+
+    # TODO: this is an explicit workaround that needs to be further debugged,
+    # but it can avoid a race condition where some subsequent functions attempt
+    # to utilize these structs before they have been populated, causing a
+    # deadlock
+    jax.block_until_ready((
+        em_state_warm.A,
+        em_state_warm.Q,
+        smoother_result_warm.smoothed_state,
+        smoother_result_warm.smoothed_cov,
+        smoother_result_warm.smoother_gain,
+    ))
+
     bias_f = compute_bias(em_state_warm, smoother_result_warm, config)
 
     dev_raw = np.zeros((nx, nx))
@@ -184,44 +202,67 @@ def multiprocess_test_links(links_to_check, y, F, R, lambda_, em_state, config):
     if len(links_to_check) == 0:
         return dev_raw, bias_r, bias_f, nonconv_flag
 
-    # Memory management for Parallel implementation
-    _, info_y, shm_y = create_shared_mem(y)
-    _, info_f, shm_f = create_shared_mem(F)
-    shared_bias_r, info_bias_r, shm_bias_r = create_shared_mem(bias_r)
-    shared_ll_r, info_ll_r, shm_ll_r = create_shared_mem(dev_raw)
-    shared_nonconv_flag, info_nonconv_flag, shm_nonconv_flag = \
-        create_shared_mem(nonconv_flag)
+    with ExitStack() as stack:
+        def close_shared(shm):
+            try:
+                shm.close()
+            finally:
+                try:
+                    shm.unlink()
+                except FileNotFoundError:
+                    pass
 
-    tmp_dir = tempfile.mkdtemp()
-    em_state_path = os.path.join(tmp_dir, 'em_state.joblib')
-    dump(em_state, em_state_path)
-    
-    shared_args = (info_y, info_f, info_bias_r, info_ll_r, info_nonconv_flag) 
-    args = (R, lambda_, em_state_path, config)  
+        def allocate_shared(obj):
+            shared, info, shm = create_shared_mem(obj)
+            stack.callback(close_shared, shm)
+            return shared, info, shm
 
-    n_jobs = min(config.parallel.n_workers, len(links_to_check))
+        def close_memmap(tmp_dir):
+            shutil.rmtree(tmp_dir)
 
-    timeout=99999
-    Parallel(n_jobs=n_jobs, verbose=10, timeout=timeout)(
-        delayed(_learn_reduced_model_parallel)(
-            link, *(shared_args + args)
-        ) for link in links_to_check
-    )
+        def memmap_em_state(em_state):
+            tmp_dir = tempfile.mkdtemp()
+            stack.callback(close_memmap, tmp_dir)
+            em_state_path = os.path.join(tmp_dir, 'em_state.joblib')
+            dump(em_state, em_state_path)
+            return em_state_path
 
-    ll_r = np.reshape(shared_ll_r, dev_raw.shape).copy()
-    bias_r = np.reshape(shared_bias_r, dev_raw.shape).copy()
-    nonconv_flag = np.reshape(shared_nonconv_flag, nonconv_flag.shape).copy()
+        # allocate shared memory resources to prevent multiple copy distribution
+        # to workers
+        _, info_y, shm_y = allocate_shared(y)
+        _, info_f, shm_f = allocate_shared(F)
+        shared_bias_r, info_bias_r, shm_bias_r = allocate_shared(bias_r)
+        shared_ll_r, info_ll_r, shm_ll_r = allocate_shared(dev_raw)
+        shared_nonconv_flag, info_nonconv_flag, shm_nonconv_flag = \
+            allocate_shared(nonconv_flag)
 
-    for shm in (shm_nonconv_flag, shm_bias_r, shm_f, shm_ll_r, shm_y):
-        shm.close()
-        try:
-            shm.unlink()
-        except Exception as exc:
-            print(f"\nUnlink shared-memory issue: {exc}")
+        # memory map the em_state object and send its path to the workers --
+        # save serialization bandwidth
+        em_state_path = memmap_em_state(em_state)
+        
+        # worker arguments
+        shared_args = (info_y, info_f, info_bias_r, info_ll_r, info_nonconv_flag) 
+        args = (R, lambda_, em_state_path, config)  
 
-    indices = tuple(z for z in zip(*links_to_check))
-    dev_raw[indices] = 2 * fullmodel_log_likelihood
-    dev_raw[indices] -= 2 * ll_r[indices]
+        # mutliprocess pool setup
+        n_jobs = min(config.parallel.n_workers, len(links_to_check))
+        pool = multiprocessing.get_context("spawn").Pool(processes=n_jobs)
+        
+        # farm
+        with pool:
+            pool.starmap(
+                _learn_reduced_model_parallel,
+                ((link, *(shared_args + args)) for link in links_to_check),
+                chunksize=1,
+            )
+            
+        ll_r = np.reshape(shared_ll_r, dev_raw.shape).copy()
+        bias_r = np.reshape(shared_bias_r, dev_raw.shape).copy()
+        nonconv_flag = np.reshape(shared_nonconv_flag, nonconv_flag.shape).copy()
+
+        indices = tuple(z for z in zip(*links_to_check))
+        dev_raw[indices] = 2 * fullmodel_log_likelihood
+        dev_raw[indices] -= 2 * ll_r[indices]
 
     return dev_raw, bias_r, bias_f, nonconv_flag
 
@@ -255,29 +296,25 @@ def _learn_reduced_model(targ, src, y, F, R, lambda_f, em_state_path, config):
 def _learn_reduced_model_parallel(link_index, info_y, info_f, info_bias_r, 
                                   info_ll_r, info_nonconv_flag, R, lambda_f, 
                                   em_state_path, config):
-    
-    # prevent oversubscription
-    with threadpool_limits(limits=1, user_api='blas'):
-        try:
-            y, shm_y = link_share_memory(info_y)
-            F, shm_f = link_share_memory(info_f)
-            bias_r, shm_bias_r = link_share_memory(info_bias_r)
-            ll_r, shm_ll_r = link_share_memory(info_ll_r)
-            nonconv_flag, shm_nonconv_flag = \
-                link_share_memory(info_nonconv_flag)
-        except BaseException as e:
-            logger.error("Could not link to memory")
-            raise e
+    with threadpool_limits(limits=1, user_api="blas"):
+        with ExitStack() as stack:
+            def attach(info):
+                array, shm = link_share_memory(info)
+                stack.callback(shm.close)
+                return array
 
-        targ, src = link_index
-        ll, bias, flag = _learn_reduced_model(targ, src, y, F, R, lambda_f, 
-                                              em_state_path, config)
-        ll_r[targ, src] = ll
-        bias_r[targ, src] = bias
-        nonconv_flag[targ, src] = flag
-
-        for shm in (shm_y, shm_f, shm_bias_r, shm_ll_r, shm_nonconv_flag):
-            shm.close()    
+            y = attach(info_y)
+            F = attach(info_f)
+            bias_r = attach(info_bias_r)
+            ll_r = attach(info_ll_r)
+            nonconv_flag = attach(info_nonconv_flag)
+            
+            targ, src = link_index
+            ll, bias, flag = _learn_reduced_model(targ, src, y, F, R, lambda_f, 
+                                                em_state_path, config)
+            ll_r[targ, src] = ll
+            bias_r[targ, src] = bias
+            nonconv_flag[targ, src] = flag
 
 
 def compute_P(F, R, em_state):

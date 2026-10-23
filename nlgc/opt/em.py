@@ -98,7 +98,19 @@ def solve_params(y, F, R, em_state, config, lambda_):
                                            config.optimizer.max_iter)
     
     em_state, smoother_result = _finalize_em_state(y, F, R, em_state)
-        
+    
+    # TODO: this is an explicit workaround that needs to be further debugged,
+    # but it can avoid a race condition where some subsequent functions attempt
+    # to utilize these structs before they have been populated, causing a
+    # deadlock
+    jax.block_until_ready((
+        em_state.A,
+        em_state.Q,
+        smoother_result.smoothed_state,
+        smoother_result.smoothed_cov,
+        smoother_result.smoother_gain,
+    ))
+
     if config.numerical.verbose:
         print(f"EM finished in {em_state.em_iter} iterations")
                   
